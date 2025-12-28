@@ -1,0 +1,154 @@
+# TSCS Backend API
+
+Backend API for the TSCS (Teacher Submission Competition System) built with Node.js, Express, and MongoDB.
+
+## Tech Stack
+
+- **Node.js** - Runtime environment
+- **Express.js** - Web framework
+- **MongoDB** - Database (MongoDB Atlas)
+- **Mongoose** - MongoDB object modeling
+- **JWT** - Authentication
+- **bcryptjs** - Password hashing
+
+## Prerequisites
+
+- Node.js (v14 or higher)
+- npm (Node Package Manager)
+- MongoDB Atlas account (or local MongoDB instance)
+
+## Installation
+
+1. Install dependencies:
+```bash
+npm install
+```
+
+2. Create a `.env` file in the root directory:
+```bash
+cp .env.example .env
+```
+
+3. Update the `.env` file with your configuration:
+- MongoDB Atlas connection string
+- JWT secret key
+- Server port
+- Client URL (frontend URL)
+
+## Environment Variables
+
+```env
+PORT=5000
+NODE_ENV=development
+MONGODB_URI=mongodb+srv://username:password@cluster.mongodb.net/tscs?retryWrites=true&w=majority
+JWT_SECRET=your-super-secret-jwt-key-change-this-in-production
+CLIENT_URL=http://localhost:5173
+```
+
+## Running the Server
+
+### Development Mode (with auto-reload)
+```bash
+npm run dev
+```
+
+### Production Mode
+```bash
+npm start
+```
+
+The server will start on `http://localhost:5000` (or the port specified in `.env`).
+
+## API Endpoints
+
+### Authentication
+- `POST /api/auth/login` - Login user
+- `GET /api/auth/me` - Get current user (Protected)
+
+### Users
+- `GET /api/users` - Get all users (Admin/Superadmin)
+- `GET /api/users/:id` - Get user by ID (Admin/Superadmin)
+- `POST /api/users` - Create user (Admin/Superadmin)
+- `PUT /api/users/:id` - Update user (Admin/Superadmin)
+- `DELETE /api/users/:id` - Delete user (Superadmin only)
+
+### Submissions
+- `GET /api/submissions` - Get all submissions (with filters)
+- `GET /api/submissions/:id` - Get submission by ID
+- `POST /api/submissions` - Create submission
+- `PUT /api/submissions/:id` - Update submission
+- `DELETE /api/submissions/:id` - Delete submission (Admin/Superadmin)
+
+### Competitions
+- `GET /api/competitions` - Get all competition years
+- `GET /api/competitions/:year` - Get competition by year
+- `POST /api/competitions` - Create competition (Superadmin)
+- `PUT /api/competitions/:year` - Update competition (Superadmin)
+
+### Evaluations
+- `GET /api/evaluations` - Get all evaluations
+- `GET /api/evaluations/:id` - Get evaluation by ID
+- `POST /api/evaluations` - Create/update evaluation (Judge)
+- `GET /api/evaluations/submission/:submissionId` - Get evaluations for a submission
+
+### Quotas
+- `GET /api/quotas` - Get all quotas (Superadmin)
+- `GET /api/quotas/:year/:level` - Get quota by year and level (Superadmin)
+- `POST /api/quotas` - Create/update quota (Superadmin)
+
+### Tie-Breaking
+- `GET /api/tie-breaking` - Get all tie-breaking rounds
+- `GET /api/tie-breaking/:id` - Get tie-breaking round by ID
+- `POST /api/tie-breaking` - Create tie-breaking round (Admin/Superadmin)
+- `POST /api/tie-breaking/:id/vote` - Submit vote (Judge)
+
+### System Logs
+- `GET /api/system-logs` - Get system logs (Superadmin)
+- `GET /api/system-logs/:id` - Get log by ID (Superadmin)
+- `DELETE /api/system-logs` - Delete old logs (Superadmin)
+
+### Landing Page
+- `GET /api/landing-page` - Get all sections (Public/Admin)
+- `GET /api/landing-page/:id` - Get section by ID (Admin/Superadmin)
+- `POST /api/landing-page` - Create section (Admin/Superadmin)
+- `PUT /api/landing-page/:id` - Update section (Admin/Superadmin)
+- `DELETE /api/landing-page/:id` - Delete section (Admin/Superadmin)
+
+## Authentication
+
+Most endpoints require authentication using JWT tokens. Include the token in the Authorization header:
+
+```
+Authorization: Bearer <token>
+```
+
+## Role-Based Access Control
+
+- **Teacher**: Can create and manage own submissions
+- **Judge**: Can evaluate submissions assigned to them
+- **Admin**: Can manage users, submissions, and competitions
+- **Superadmin**: Full access to all resources
+
+## Project Structure
+
+```
+tscs-backend/
+├── config/          # Configuration files
+├── middleware/      # Custom middleware (auth, logging)
+├── models/          # Mongoose models
+├── routes/          # API routes
+├── server.js        # Entry point
+├── .env             # Environment variables (not in git)
+└── package.json     # Dependencies
+```
+
+## Development
+
+- The server uses `nodemon` for auto-reload during development
+- All requests are logged via the SystemLog model
+- CORS is configured to allow requests from the frontend
+
+## License
+
+ISC
+
