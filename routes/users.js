@@ -83,6 +83,14 @@ router.post('/', async (req, res) => {
   try {
     const userData = req.body;
 
+    // Validate required fields
+    if (!userData.password || userData.password.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password is required and must be at least 6 characters'
+      });
+    }
+
     // Check if user already exists
     const existingUser = await User.findOne({
       $or: [
