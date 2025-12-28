@@ -77,11 +77,34 @@ router.post('/lesson-plan', protect, upload.single('file'), (req, res) => {
 // @access  Private (via token in query or header)
 router.get('/files/:filename', protect, (req, res) => {
   try {
-    const filename = req.params.filename;
+    // Decode URL-encoded filename
+    let filename = decodeURIComponent(req.params.filename);
+    
+    // Remove any query parameters that might be in the filename
+    filename = filename.split('?')[0];
+    
+    // Security: Prevent directory traversal
+    if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid filename'
+      });
+    }
+    
     const filePath = path.join(uploadsDir, filename);
 
     // Check if file exists
     if (!fs.existsSync(filePath)) {
+      console.log('File not found:', filePath);
+      console.log('Requested filename:', req.params.filename);
+      console.log('Decoded filename:', filename);
+      
+      // List files in uploads directory for debugging
+      if (fs.existsSync(uploadsDir)) {
+        const files = fs.readdirSync(uploadsDir);
+        console.log('Available files in uploads directory:', files.slice(0, 10)); // Show first 10
+      }
+      
       return res.status(404).json({
         success: false,
         message: 'File not found'
