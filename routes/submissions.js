@@ -26,32 +26,76 @@ router.get('/', async (req, res) => {
     
     let query = {};
     
-    // Role-based filtering
+    // Role-based filtering (applied first, cannot be overridden)
     if (req.user.role === 'judge') {
-      // Judges only see submissions at their assigned level and location
+      // Check if judge has assignment data
+      if (!req.user.assignedLevel) {
+        console.log('Judge has no assignedLevel:', req.user._id, req.user.username);
+        return res.json({
+          success: true,
+          count: 0,
+          submissions: [],
+          message: 'Judge assignment not configured. Please contact administrator.'
+        });
+      }
+
+      // Strict level matching: judges only see submissions at their exact assigned level
       query.level = req.user.assignedLevel;
       
       if (req.user.assignedLevel === 'Council') {
-        query.region = req.user.assignedRegion;
-        query.council = req.user.assignedCouncil;
+        // Council level: must match both region and council exactly
+        if (!req.user.assignedRegion || !req.user.assignedCouncil) {
+          console.log('Council judge missing region/council:', req.user._id, req.user.username);
+          return res.json({
+            success: true,
+            count: 0,
+            submissions: [],
+            message: 'Judge assignment incomplete. Please contact administrator.'
+          });
+        }
+        // Match region and council exactly (case-sensitive for now, can be made case-insensitive if needed)
+        query.region = req.user.assignedRegion?.trim();
+        query.council = req.user.assignedCouncil?.trim();
       } else if (req.user.assignedLevel === 'Regional') {
-        query.region = req.user.assignedRegion;
+        // Regional level: must match region (all councils in that region)
+        // Submissions must be at Regional level (after council round)
+        if (!req.user.assignedRegion) {
+          console.log('Regional judge missing region:', req.user._id, req.user.username);
+          return res.json({
+            success: true,
+            count: 0,
+            submissions: [],
+            message: 'Judge assignment incomplete. Please contact administrator.'
+          });
+        }
+        // Match region exactly (case-sensitive for now, can be made case-insensitive if needed)
+        query.region = req.user.assignedRegion?.trim();
+      } else if (req.user.assignedLevel === 'National') {
+        // National level: see all submissions at National level only
+        // No location filter needed
       }
-      // National level judges see all national submissions (no additional filter)
+
+      // Debug logging
+      console.log('Judge query:', {
+        judgeId: req.user._id,
+        judgeUsername: req.user.username,
+        assignedLevel: req.user.assignedLevel,
+        assignedRegion: req.user.assignedRegion,
+        assignedCouncil: req.user.assignedCouncil,
+        query: query
+      });
     } else if (req.user.role === 'teacher') {
       // Teachers only see their own submissions
       query.teacherId = req.user._id;
     }
     
-    // Apply filters
-    if (level) query.level = level;
+    // Apply additional filters (but don't override role-based filters)
     if (status) query.status = status;
     if (year) query.year = parseInt(year);
     if (category) query.category = category;
     if (classLevel) query.class = classLevel;
     if (subject) query.subject = subject;
-    if (region) query.region = region;
-    if (council) query.council = council;
+    // Note: level, region, and council are controlled by role-based filtering above
     
     if (search) {
       query.$or = [
@@ -66,11 +110,45 @@ router.get('/', async (req, res) => {
       .populate('teacherId', 'name email username')
       .sort({ createdAt: -1 });
 
-    res.json({
+    // Debug logging
+    if (req.user.role === 'judge') {
+      console.log('Judge submissions query result:', {
+        judgeId: req.user._id,
+        judgeUsername: req.user.username,
+        assignedLevel: req.user.assignedLevel,
+        assignedRegion: req.user.assignedRegion,
+        assignedCouncil: req.user.assignedCouncil,
+        query: JSON.stringify(query),
+        count: submissions.length,
+        sampleSubmission: submissions.length > 0 ? {
+          id: submissions[0]._id,
+          level: submissions[0].level,
+          region: submissions[0].region,
+          council: submissions[0].council,
+          school: submissions[0].school
+        } : null
+      });
+    }
+
+    const response = {
       success: true,
       count: submissions.length,
       submissions
-    });
+    };
+
+    // Add debug info in development mode
+    if (process.env.NODE_ENV === 'development' && req.user.role === 'judge') {
+      response.debug = {
+        judgeAssignment: {
+          assignedLevel: req.user.assignedLevel,
+          assignedRegion: req.user.assignedRegion,
+          assignedCouncil: req.user.assignedCouncil
+        },
+        query: query
+      };
+    }
+
+    res.json(response);
   } catch (error) {
     console.error('Get submissions error:', error);
     res.status(500).json({
