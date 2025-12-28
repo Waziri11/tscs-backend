@@ -66,11 +66,22 @@ router.post('/login', async (req, res) => {
         username: user.username,
         name: user.name,
         email: user.email,
+        phone: user.phone,
+        gender: user.gender,
         role: user.role,
+        ...(user.role === 'teacher' && {
+          school: user.school,
+          region: user.region,
+          council: user.council,
+          chequeNumber: user.chequeNumber,
+          subject: user.subject
+        }),
         ...(user.role === 'judge' && {
           assignedLevel: user.assignedLevel,
           assignedRegion: user.assignedRegion,
-          assignedCouncil: user.assignedCouncil
+          assignedCouncil: user.assignedCouncil,
+          specialization: user.specialization,
+          experience: user.experience
         })
       }
     });
@@ -155,10 +166,13 @@ router.post('/register', async (req, res) => {
         username: user.username,
         name: user.name,
         email: user.email,
+        phone: user.phone,
+        gender: user.gender,
         role: user.role,
         school: user.school,
         region: user.region,
-        council: user.council
+        council: user.council,
+        chequeNumber: user.chequeNumber
       }
     });
   } catch (error) {
@@ -196,6 +210,70 @@ router.get('/me', protect, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Server error'
+    });
+  }
+});
+
+// @route   PUT /api/auth/profile
+// @desc    Update current user profile
+// @access  Private
+router.put('/profile', protect, async (req, res) => {
+  try {
+    const {
+      firstName,
+      lastName,
+      email,
+      phone,
+      gender,
+      schoolName,
+      chequeNumber,
+      region,
+      council
+    } = req.body;
+
+    // Build update object
+    const updateData = {};
+    if (firstName && lastName) updateData.name = `${firstName} ${lastName}`;
+    if (email) updateData.email = email.toLowerCase();
+    if (phone !== undefined) updateData.phone = phone;
+    if (gender) updateData.gender = gender;
+    if (schoolName !== undefined) updateData.school = schoolName;
+    if (chequeNumber !== undefined) updateData.chequeNumber = chequeNumber;
+    if (region !== undefined) updateData.region = region;
+    if (council !== undefined) updateData.council = council;
+
+    const user = await User.findByIdAndUpdate(
+      req.user._id,
+      updateData,
+      { new: true, runValidators: true }
+    ).select('-password');
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      user
+    });
+  } catch (error) {
+    console.error('Update profile error:', error);
+    
+    // Handle duplicate key error
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern)[0];
+      return res.status(400).json({
+        success: false,
+        message: `${field} already exists`
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
     });
   }
 });
