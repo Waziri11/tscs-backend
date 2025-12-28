@@ -83,6 +83,103 @@ router.post('/login', async (req, res) => {
   }
 });
 
+// @route   POST /api/auth/register
+// @desc    Register new user (teacher)
+// @access  Public
+router.post('/register', async (req, res) => {
+  try {
+    const {
+      firstName,
+      lastName,
+      email,
+      phone,
+      gender,
+      schoolName,
+      chequeNumber,
+      region,
+      council,
+      password
+    } = req.body;
+
+    // Validate required fields
+    if (!firstName || !lastName || !email || !password || !schoolName || !region || !council) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide all required fields'
+      });
+    }
+
+    // Check if user already exists
+    const existingUser = await User.findOne({
+      $or: [
+        { email: email.toLowerCase() }
+      ]
+    });
+
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: 'User with this email already exists'
+      });
+    }
+
+    // Create username from email
+    const username = email.toLowerCase();
+
+    // Create user data
+    const userData = {
+      username,
+      password,
+      name: `${firstName} ${lastName}`,
+      email: email.toLowerCase(),
+      phone: phone || '',
+      role: 'teacher',
+      status: 'active',
+      school: schoolName,
+      region,
+      council,
+      ...(chequeNumber && { chequeNumber }),
+      ...(gender && { gender })
+    };
+
+    const user = await User.create(userData);
+
+    // Generate token
+    const token = generateToken(user._id);
+
+    res.status(201).json({
+      success: true,
+      token,
+      user: {
+        id: user._id,
+        username: user.username,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        school: user.school,
+        region: user.region,
+        council: user.council
+      }
+    });
+  } catch (error) {
+    console.error('Registration error:', error);
+    
+    // Handle duplicate key error
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern)[0];
+      return res.status(400).json({
+        success: false,
+        message: `${field} already exists`
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error during registration'
+    });
+  }
+});
+
 // @route   GET /api/auth/me
 // @desc    Get current user
 // @access  Private

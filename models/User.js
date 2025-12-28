@@ -30,6 +30,11 @@ const userSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  gender: {
+    type: String,
+    enum: ['Male', 'Female'],
+    trim: true
+  },
   role: {
     type: String,
     required: true,
@@ -43,6 +48,10 @@ const userSchema = new mongoose.Schema({
   },
   // Teacher specific fields
   school: {
+    type: String,
+    trim: true
+  },
+  chequeNumber: {
     type: String,
     trim: true
   },
