@@ -167,5 +167,72 @@ router.get('/:year/evaluation-criteria/:category/:class/:subject/:area', async (
   }
 });
 
+// @route   PUT /api/competitions/:year/evaluation-criteria/:category/:class/:subject/:area
+// @desc    Update evaluation criteria for a specific area
+// @access  Private (Superadmin only)
+router.put('/:year/evaluation-criteria/:category/:class/:subject/:area', authorize('superadmin'), async (req, res) => {
+  try {
+    const { year, category, class: classLevel, subject, area } = req.params;
+    const { evaluationCriteria } = req.body;
+
+    const competition = await Competition.findOne({ year: parseInt(year) });
+
+    if (!competition) {
+      return res.status(404).json({
+        success: false,
+        message: 'Competition not found'
+      });
+    }
+
+    const categoryObj = competition.categories.find(c => c.name === category);
+    if (!categoryObj) {
+      return res.status(404).json({
+        success: false,
+        message: 'Category not found'
+      });
+    }
+
+    const classObj = categoryObj.classes.find(c => c.name === classLevel);
+    if (!classObj) {
+      return res.status(404).json({
+        success: false,
+        message: 'Class not found'
+      });
+    }
+
+    const subjectObj = classObj.subjects.find(s => s.name === subject);
+    if (!subjectObj) {
+      return res.status(404).json({
+        success: false,
+        message: 'Subject not found'
+      });
+    }
+
+    const areaObj = subjectObj.areasOfFocus.find(a => a.name === area);
+    if (!areaObj) {
+      return res.status(404).json({
+        success: false,
+        message: 'Area of focus not found'
+      });
+    }
+
+    // Update evaluation criteria
+    areaObj.evaluationCriteria = evaluationCriteria || [];
+
+    await competition.save();
+
+    res.json({
+      success: true,
+      evaluationCriteria: areaObj.evaluationCriteria
+    });
+  } catch (error) {
+    console.error('Update evaluation criteria error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
 module.exports = router;
 
