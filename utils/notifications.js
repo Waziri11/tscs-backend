@@ -21,9 +21,10 @@ try {
  * @param {String} options.title - Notification title
  * @param {String} options.message - Notification message
  * @param {Object} options.metadata - Additional metadata
+ * @param {Boolean} options.isSystem - Whether this is a system notification (default: true)
  * @returns {Promise<Object>} Created notification
  */
-const createNotification = async ({ userId, type, title, message, metadata = {} }) => {
+const createNotification = async ({ userId, type, title, message, metadata = {}, isSystem = true }) => {
   try {
     const notification = await Notification.create({
       userId,
@@ -31,6 +32,7 @@ const createNotification = async ({ userId, type, title, message, metadata = {} 
       title,
       message,
       metadata,
+      isSystem,
       read: false
     });
 
