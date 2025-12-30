@@ -1,6 +1,7 @@
 const express = require('express');
 const Notification = require('../models/Notification');
-const { protect } = require('../middleware/auth');
+const User = require('../models/User');
+const { protect, authorize } = require('../middleware/auth');
 
 // Safely import logger
 let logger = null;
@@ -161,11 +162,11 @@ router.put('/read-all', async (req, res) => {
 });
 
 // @route   DELETE /api/notifications/:id
-// @desc    Delete notification
+// @desc    Delete notification (cannot delete system notifications)
 // @access  Private
 router.delete('/:id', async (req, res) => {
   try {
-    const notification = await Notification.findOneAndDelete({
+    const notification = await Notification.findOne({
       _id: req.params.id,
       userId: req.user._id
     });
@@ -177,6 +178,26 @@ router.delete('/:id', async (req, res) => {
       });
     }
 
+    // Prevent deletion of system notifications
+    if (notification.isSystem) {
+      return res.status(403).json({
+        success: false,
+        message: 'Cannot delete system notifications'
+      });
+    }
+
+    await Notification.findByIdAndDelete(req.params.id);
+
+    // Log activity
+    if (logger) {
+      logger.logUserActivity(
+        'User deleted notification',
+        req.user._id,
+        req,
+        { notificationId: req.params.id }
+      ).catch(() => {});
+    }
+
     res.json({
       success: true,
       message: 'Notification deleted'
@@ -186,6 +207,78 @@ router.delete('/:id', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/notifications/send
+// @desc    Send notification to user(s) (Admin/Superadmin only)
+// @access  Private (Admin/Superadmin)
+router.post('/send', authorize('admin', 'superadmin'), async (req, res) => {
+  try {
+    const { userIds, title, message, type = 'system_announcement' } = req.body;
+
+    if (!userIds || !Array.isArray(userIds) || userIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide at least one user ID'
+      });
+    }
+
+    if (!title || !message) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide title and message'
+      });
+    }
+
+    // Verify all users exist
+    const users = await User.find({ _id: { $in: userIds } });
+    if (users.length !== userIds.length) {
+      return res.status(400).json({
+        success: false,
+        message: 'One or more users not found'
+      });
+    }
+
+    // Create notifications for all users
+    const notifications = userIds.map(userId => ({
+      userId,
+      type,
+      title,
+      message,
+      isSystem: false, // Admin-created notifications are not system notifications
+      createdBy: req.user._id,
+      read: false
+    }));
+
+    const createdNotifications = await Notification.insertMany(notifications);
+
+    // Log activity
+    if (logger) {
+      logger.logAdminAction(
+        `Admin sent notification to ${userIds.length} user(s)`,
+        req.user._id,
+        req,
+        {
+          notificationCount: createdNotifications.length,
+          title,
+          userIds
+        },
+        'success'
+      ).catch(() => {});
+    }
+
+    res.json({
+      success: true,
+      count: createdNotifications.length,
+      notifications: createdNotifications
+    });
+  } catch (error) {
+    console.error('Send notification error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
     });
   }
 });

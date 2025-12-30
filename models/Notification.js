@@ -54,6 +54,18 @@ const notificationSchema = new mongoose.Schema({
   emailSentAt: {
     type: Date,
     default: null
+  },
+  // System notification flag - prevents deletion
+  isSystem: {
+    type: Boolean,
+    default: false,
+    index: true
+  },
+  // Who created this notification (for admin-created notifications)
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
   }
 }, {
   timestamps: true
