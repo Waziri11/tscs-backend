@@ -13,12 +13,12 @@ router.use(authorize('superadmin'));
 // @access  Private (Superadmin)
 router.get('/', async (req, res) => {
   try {
-    const { type, severity, userId, startDate, endDate, limit = 100 } = req.query;
+    const { type, severity, userId, startDate, endDate, limit = 1000, search } = req.query;
     
     let query = {};
     
-    if (type) query.type = type;
-    if (severity) query.severity = severity;
+    if (type && type !== 'all') query.type = type;
+    if (severity && severity !== 'all') query.severity = severity;
     if (userId) query.userId = userId;
     
     if (startDate || endDate) {
@@ -27,15 +27,39 @@ router.get('/', async (req, res) => {
       if (endDate) query.createdAt.$lte = new Date(endDate);
     }
 
+    // Search filter
+    if (search) {
+      query.$or = [
+        { action: { $regex: search, $options: 'i' } },
+        { message: { $regex: search, $options: 'i' } }
+      ];
+    }
+
     const logs = await SystemLog.find(query)
       .populate('userId', 'name username email role')
       .sort({ createdAt: -1 })
       .limit(parseInt(limit));
 
+    // Format logs to match frontend expectations
+    const formattedLogs = logs.map(log => ({
+      id: log._id.toString(),
+      type: log.type,
+      severity: log.severity,
+      action: log.action,
+      message: log.message || log.action,
+      timestamp: log.createdAt.toISOString(),
+      user: log.userId ? log.userId.name : 'System',
+      userEmail: log.userId ? log.userId.email : 'system@tscs.local',
+      userRole: log.userId ? log.userId.role : 'system',
+      ipAddress: log.ipAddress || 'unknown',
+      browser: log.userAgent || 'unknown',
+      details: log.metadata || {}
+    }));
+
     res.json({
       success: true,
-      count: logs.length,
-      logs
+      count: formattedLogs.length,
+      logs: formattedLogs
     });
   } catch (error) {
     console.error('Get system logs error:', error);

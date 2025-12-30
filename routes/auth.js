@@ -2,6 +2,7 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const { protect } = require('../middleware/auth');
+const { logger } = require('../utils/logger');
 
 const router = express.Router();
 
@@ -31,6 +32,15 @@ router.post('/login', async (req, res) => {
     const user = await User.findOne({ email: email.toLowerCase() });
 
     if (!user) {
+      // Log failed login attempt
+      await logger.logSecurity(
+        'Failed login attempt - user not found',
+        null,
+        req,
+        { email: email.toLowerCase() },
+        'warning'
+      );
+      
       return res.status(401).json({
         success: false,
         message: 'Invalid email or password'
@@ -39,6 +49,15 @@ router.post('/login', async (req, res) => {
 
     // Check if user is active
     if (user.status !== 'active') {
+      // Log inactive account login attempt
+      await logger.logSecurity(
+        'Failed login attempt - inactive account',
+        user._id,
+        req,
+        { email: email.toLowerCase(), status: user.status },
+        'warning'
+      );
+      
       return res.status(401).json({
         success: false,
         message: 'Your account is not active. Please contact an administrator.'
@@ -49,6 +68,15 @@ router.post('/login', async (req, res) => {
     const isMatch = await user.comparePassword(password);
 
     if (!isMatch) {
+      // Log failed login attempt
+      await logger.logSecurity(
+        'Failed login attempt - invalid password',
+        user._id,
+        req,
+        { email: email.toLowerCase() },
+        'warning'
+      );
+      
       return res.status(401).json({
         success: false,
         message: 'Invalid email or password'
@@ -57,6 +85,14 @@ router.post('/login', async (req, res) => {
 
     // Generate token
     const token = generateToken(user._id);
+
+    // Log successful login
+    await logger.logUserActivity(
+      'User logged in',
+      user._id,
+      req,
+      { role: user.role }
+    );
 
     res.json({
       success: true,
@@ -158,6 +194,14 @@ router.post('/register', async (req, res) => {
     // Generate token
     const token = generateToken(user._id);
 
+    // Log user registration
+    await logger.logUserActivity(
+      'User registered',
+      user._id,
+      req,
+      { role: 'teacher', region, council, school: schoolName }
+    );
+
     res.status(201).json({
       success: true,
       token,
@@ -200,6 +244,13 @@ router.post('/register', async (req, res) => {
 router.get('/me', protect, async (req, res) => {
   try {
     const user = await User.findById(req.user._id).select('-password');
+
+    // Log profile view
+    await logger.logUserActivity(
+      'User viewed profile',
+      user._id,
+      req
+    );
 
     res.json({
       success: true,
@@ -254,6 +305,14 @@ router.put('/profile', protect, async (req, res) => {
         message: 'User not found'
       });
     }
+
+    // Log profile update
+    await logger.logUserActivity(
+      'User updated profile',
+      user._id,
+      req,
+      { updatedFields: Object.keys(updateData) }
+    );
 
     res.json({
       success: true,
