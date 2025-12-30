@@ -3,26 +3,31 @@ const mongoose = require('mongoose');
 const systemLogSchema = new mongoose.Schema({
   type: {
     type: String,
-    enum: ['auth', 'submission', 'evaluation', 'system', 'user', 'competition', 'other'],
+    enum: ['user_activity', 'admin_action', 'system_event', 'security', 'api_request', 'error'],
     required: true
   },
   severity: {
     type: String,
-    enum: ['info', 'warning', 'error', 'critical'],
+    enum: ['info', 'success', 'warning', 'error', 'critical'],
     default: 'info'
   },
-  message: {
+  action: {
     type: String,
     required: true,
     trim: true
   },
+  message: {
+    type: String,
+    trim: true
+  },
   userId: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'User'
+    ref: 'User',
+    default: null
   },
   metadata: {
-    type: Map,
-    of: mongoose.Schema.Types.Mixed
+    type: mongoose.Schema.Types.Mixed,
+    default: {}
   },
   ipAddress: {
     type: String,
@@ -40,9 +45,8 @@ const systemLogSchema = new mongoose.Schema({
 systemLogSchema.index({ createdAt: -1 });
 systemLogSchema.index({ type: 1, severity: 1 });
 systemLogSchema.index({ userId: 1 });
-
-// TTL index to auto-delete logs older than 90 days (optional)
-// systemLogSchema.index({ createdAt: 1 }, { expireAfterSeconds: 7776000 });
+systemLogSchema.index({ 'metadata.submissionId': 1 });
+systemLogSchema.index({ 'metadata.evaluationId': 1 });
 
 module.exports = mongoose.model('SystemLog', systemLogSchema);
 
