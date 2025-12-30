@@ -137,6 +137,15 @@ router.put('/:year/:level', async (req, res) => {
       });
     }
 
+    // Log quota update
+    await logger.logAdminAction(
+      'Superadmin updated quota',
+      req.user._id,
+      req,
+      { year: parseInt(req.params.year), level: req.params.level, updatedFields: Object.keys(req.body) },
+      'info'
+    );
+
     res.json({
       success: true,
       quota

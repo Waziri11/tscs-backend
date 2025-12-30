@@ -3,6 +3,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { protect } = require('../middleware/auth');
+const { logger } = require('../utils/logger');
 
 const router = express.Router();
 
@@ -54,6 +55,19 @@ router.post('/lesson-plan', protect, upload.single('file'), (req, res) => {
         message: 'No file uploaded'
       });
     }
+
+    // Log file upload
+    await logger.logUserActivity(
+      'User uploaded lesson plan file',
+      req.user._id,
+      req,
+      {
+        filename: req.file.filename,
+        originalName: req.file.originalname,
+        fileSize: req.file.size
+      },
+      'success'
+    );
 
     res.json({
       success: true,

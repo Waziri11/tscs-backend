@@ -112,6 +112,15 @@ router.put('/:year', authorize('superadmin'), async (req, res) => {
       });
     }
 
+    // Log competition update
+    await logger.logAdminAction(
+      'Superadmin updated competition',
+      req.user._id,
+      req,
+      { year: parseInt(req.params.year), updatedFields: Object.keys(req.body) },
+      'info'
+    );
+
     res.json({
       success: true,
       competition

@@ -110,6 +110,15 @@ router.put('/:id', async (req, res) => {
       });
     }
 
+    // Log landing page section update
+    await logger.logAdminAction(
+      'Admin updated landing page section',
+      req.user._id,
+      req,
+      { sectionId: req.params.id, updatedFields: Object.keys(req.body) },
+      'info'
+    );
+
     res.json({
       success: true,
       section
