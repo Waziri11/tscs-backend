@@ -218,6 +218,22 @@ const checkAndProcessRounds = async () => {
           if (advanceResult.success) {
             console.log(`Round ${round._id} auto-advanced: ${advanceResult.promoted} promoted, ${advanceResult.eliminated} eliminated`);
             
+            // Send notifications to teachers
+            const { notifyTeachersOnPromotion, notifyTeachersOnElimination } = require('./notifications');
+            if (advanceResult.promotedIds && advanceResult.promotedIds.length > 0) {
+              const nextLevel = getNextLevel(round.level);
+              if (nextLevel) {
+                notifyTeachersOnPromotion(advanceResult.promotedIds, nextLevel).catch(err => 
+                  console.error('Error sending promotion notifications:', err)
+                );
+              }
+            }
+            if (advanceResult.eliminatedIds && advanceResult.eliminatedIds.length > 0) {
+              notifyTeachersOnElimination(advanceResult.eliminatedIds).catch(err => 
+                console.error('Error sending elimination notifications:', err)
+              );
+            }
+            
             // Log the auto-advancement
             if (logger) {
               logger.logSystemEvent(

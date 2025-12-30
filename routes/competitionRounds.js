@@ -531,6 +531,22 @@ router.post('/:id/close', async (req, res) => {
       });
     }
 
+    // Send notifications to teachers
+    const { notifyTeachersOnPromotion, notifyTeachersOnElimination } = require('../utils/notifications');
+    if (advanceResult.promotedIds && advanceResult.promotedIds.length > 0) {
+      const nextLevel = getNextLevel(round.level);
+      if (nextLevel) {
+        notifyTeachersOnPromotion(advanceResult.promotedIds, nextLevel).catch(err => 
+          console.error('Error sending promotion notifications:', err)
+        );
+      }
+    }
+    if (advanceResult.eliminatedIds && advanceResult.eliminatedIds.length > 0) {
+      notifyTeachersOnElimination(advanceResult.eliminatedIds).catch(err => 
+        console.error('Error sending elimination notifications:', err)
+      );
+    }
+
     // Update round status
     round.status = 'closed';
     round.closedAt = new Date();

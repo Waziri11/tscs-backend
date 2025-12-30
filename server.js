@@ -18,6 +18,7 @@ const tieBreakingRoutes = require('./routes/tieBreaking');
 const systemLogRoutes = require('./routes/systemLogs');
 const landingPageRoutes = require('./routes/landingPage');
 const uploadRoutes = require('./routes/uploads');
+const notificationRoutes = require('./routes/notifications');
 
 const app = express();
 
@@ -62,6 +63,7 @@ app.use('/api/tie-breaking', tieBreakingRoutes);
 app.use('/api/system-logs', systemLogRoutes);
 app.use('/api/landing-page', landingPageRoutes);
 app.use('/api/uploads', uploadRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
