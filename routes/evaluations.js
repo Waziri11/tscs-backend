@@ -2,6 +2,7 @@ const express = require('express');
 const Evaluation = require('../models/Evaluation');
 const Submission = require('../models/Submission');
 const { protect, authorize } = require('../middleware/auth');
+const { logger } = require('../utils/logger');
 
 const router = express.Router();
 
@@ -32,6 +33,18 @@ router.get('/', async (req, res) => {
       .populate('submissionId', 'teacherName category subject level')
       .populate('judgeId', 'name username')
       .sort({ submittedAt: -1 });
+
+    // Log evaluation list view
+    await logger.logUserActivity(
+      'User viewed evaluations list',
+      req.user._id,
+      req,
+      { 
+        role: req.user.role,
+        filters: { submissionId, judgeId },
+        count: evaluations.length
+      }
+    );
 
     res.json({
       success: true,
@@ -65,11 +78,32 @@ router.get('/:id', async (req, res) => {
 
     // Judges can only see their own evaluations
     if (req.user.role === 'judge' && evaluation.judgeId._id.toString() !== req.user._id.toString()) {
+      // Log unauthorized access attempt
+      await logger.logSecurity(
+        'Unauthorized evaluation access attempt',
+        req.user._id,
+        req,
+        { evaluationId: req.params.id },
+        'warning'
+      );
+      
       return res.status(403).json({
         success: false,
         message: 'Not authorized to access this evaluation'
       });
     }
+
+    // Log evaluation view
+    await logger.logUserActivity(
+      'User viewed evaluation details',
+      req.user._id,
+      req,
+      { 
+        evaluationId: evaluation._id.toString(),
+        submissionId: evaluation.submissionId._id.toString(),
+        judgeId: evaluation.judgeId._id.toString()
+      }
+    );
 
     res.json({
       success: true,
@@ -131,6 +165,24 @@ router.post('/', authorize('judge'), async (req, res) => {
     // Update submission average score (recalculate from all evaluations)
     await updateSubmissionAverageScore(submissionId);
 
+    // Log evaluation creation/update
+    const isUpdate = evaluation.createdAt && evaluation.updatedAt && 
+                     evaluation.createdAt.getTime() !== evaluation.updatedAt.getTime();
+    
+    await logger.logUserActivity(
+      isUpdate ? 'Judge updated evaluation' : 'Judge submitted evaluation',
+      req.user._id,
+      req,
+      {
+        evaluationId: evaluation._id.toString(),
+        submissionId: submissionId.toString(),
+        averageScore: averageScore,
+        totalScore: totalScore,
+        criteriaCount: Object.keys(scores).length
+      },
+      'success'
+    );
+
     res.status(201).json({
       success: true,
       evaluation
@@ -174,6 +226,17 @@ router.get('/submission/:submissionId', async (req, res) => {
     const evaluations = await Evaluation.find({ submissionId: req.params.submissionId })
       .populate('judgeId', 'name username assignedLevel')
       .sort({ submittedAt: -1 });
+
+    // Log submission evaluations view
+    await logger.logUserActivity(
+      'User viewed submission evaluations',
+      req.user._id,
+      req,
+      { 
+        submissionId: req.params.submissionId,
+        count: evaluations.length
+      }
+    );
 
     res.json({
       success: true,

@@ -1,6 +1,7 @@
 const express = require('express');
 const User = require('../models/User');
 const { protect, authorize } = require('../middleware/auth');
+const { logger } = require('../utils/logger');
 
 const router = express.Router();
 
@@ -34,6 +35,17 @@ router.get('/', async (req, res) => {
     }
 
     const users = await User.find(query).select('-password').sort({ createdAt: -1 });
+
+    // Log user list view
+    await logger.logAdminAction(
+      'Admin viewed users list',
+      req.user._id,
+      req,
+      { 
+        filters: { role, status, search },
+        count: users.length
+      }
+    );
 
     res.json({
       success: true,
@@ -108,6 +120,20 @@ router.post('/', async (req, res) => {
 
     const user = await User.create(userData);
 
+    // Log user creation
+    await logger.logAdminAction(
+      'Admin created new user account',
+      req.user._id,
+      req,
+      {
+        targetUserId: user._id.toString(),
+        targetUserRole: user.role,
+        targetUserEmail: user.email,
+        targetUserName: user.name
+      },
+      'success'
+    );
+
     res.status(201).json({
       success: true,
       user: user.toJSON()
@@ -165,6 +191,20 @@ router.delete('/:id', authorize('superadmin'), async (req, res) => {
         message: 'User not found'
       });
     }
+
+    // Log user deletion before deleting
+    await logger.logAdminAction(
+      'Superadmin deleted user account',
+      req.user._id,
+      req,
+      {
+        targetUserId: req.params.id,
+        targetUserRole: user.role,
+        targetUserEmail: user.email,
+        targetUserName: user.name
+      },
+      'error'
+    );
 
     await user.deleteOne();
 
