@@ -26,17 +26,19 @@ router.use(protect);
 // Public route for judges to get active rounds
 router.get('/active', async (req, res) => {
   try {
-    const { level, region, council } = req.query;
+    const { level } = req.query;
     
+    // Only filter by level and status - return all active rounds for this level
+    // Client will filter by region/council as needed
     let query = { status: 'active' };
     
-    if (level) query.level = level;
-    if (region) query.region = region;
-    if (council) query.council = council;
+    if (level) {
+      query.level = level;
+    }
 
     const rounds = await CompetitionRound.find(query)
       .sort({ createdAt: -1 })
-      .limit(10);
+      .limit(20);
 
     res.json({
       success: true,
