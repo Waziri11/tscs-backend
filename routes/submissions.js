@@ -1,6 +1,7 @@
 const express = require('express');
 const Submission = require('../models/Submission');
 const { protect, authorize } = require('../middleware/auth');
+const { logger } = require('../utils/logger');
 
 const router = express.Router();
 
@@ -148,6 +149,18 @@ router.get('/', async (req, res) => {
       };
     }
 
+    // Log submission list view
+    await logger.logUserActivity(
+      'User viewed submissions list',
+      req.user._id,
+      req,
+      { 
+        role: req.user.role,
+        filters: { level, status, year, category, subject, region, council },
+        count: submissions.length
+      }
+    );
+
     res.json(response);
   } catch (error) {
     console.error('Get submissions error:', error);
@@ -175,11 +188,32 @@ router.get('/:id', async (req, res) => {
 
     // Check authorization
     if (req.user.role === 'teacher' && submission.teacherId._id.toString() !== req.user._id.toString()) {
+      // Log unauthorized access attempt
+      await logger.logSecurity(
+        'Unauthorized submission access attempt',
+        req.user._id,
+        req,
+        { submissionId: req.params.id },
+        'warning'
+      );
+      
       return res.status(403).json({
         success: false,
         message: 'Not authorized to access this submission'
       });
     }
+
+    // Log submission view
+    await logger.logUserActivity(
+      'User viewed submission details',
+      req.user._id,
+      req,
+      { 
+        submissionId: submission._id.toString(),
+        submissionLevel: submission.level,
+        teacherId: submission.teacherId._id.toString()
+      }
+    );
 
     res.json({
       success: true,
@@ -205,6 +239,25 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), async (req, res) =
     };
 
     const submission = await Submission.create(submissionData);
+
+    // Log submission creation
+    const logAction = req.user.role === 'teacher' 
+      ? 'User submitted new entry' 
+      : `${req.user.role} created submission`;
+    
+    await logger.logUserActivity(
+      logAction,
+      req.user._id,
+      req,
+      {
+        submissionId: submission._id.toString(),
+        level: submission.level,
+        category: submission.category,
+        subject: submission.subject,
+        areaOfFocus: submission.areaOfFocus
+      },
+      'success'
+    );
 
     res.status(201).json({
       success: true,
@@ -247,6 +300,54 @@ router.put('/:id', async (req, res) => {
       { new: true, runValidators: true }
     ).populate('teacherId', 'name email username');
 
+    // Determine log action based on what was updated
+    const levelChanged = req.body.level && req.body.level !== submission.level;
+    const statusChanged = req.body.status && req.body.status !== submission.status;
+    
+    let logAction = 'User updated submission';
+    let logSeverity = 'info';
+    
+    if (levelChanged && req.user.role !== 'teacher') {
+      logAction = `Admin ${req.body.level > submission.level ? 'promoted' : 'demoted'} submission to ${req.body.level} level`;
+      logSeverity = 'success';
+    } else if (statusChanged) {
+      if (req.body.status === 'approved') {
+        logAction = 'Admin approved submission';
+        logSeverity = 'success';
+      } else if (req.body.status === 'eliminated') {
+        logAction = 'Admin eliminated submission';
+        logSeverity = 'warning';
+      }
+    }
+
+    // Log submission update
+    if (req.user.role === 'admin' || req.user.role === 'superadmin') {
+      await logger.logAdminAction(
+        logAction,
+        req.user._id,
+        req,
+        {
+          submissionId: req.params.id,
+          previousLevel: submission.level,
+          newLevel: req.body.level || submission.level,
+          previousStatus: submission.status,
+          newStatus: req.body.status || submission.status,
+          updatedFields: Object.keys(req.body)
+        },
+        logSeverity
+      );
+    } else {
+      await logger.logUserActivity(
+        logAction,
+        req.user._id,
+        req,
+        {
+          submissionId: req.params.id,
+          updatedFields: Object.keys(req.body)
+        }
+      );
+    }
+
     res.json({
       success: true,
       submission: updatedSubmission
@@ -273,6 +374,22 @@ router.delete('/:id', authorize('admin', 'superadmin'), async (req, res) => {
         message: 'Submission not found'
       });
     }
+
+    // Log submission deletion before deleting
+    await logger.logAdminAction(
+      'Admin deleted submission',
+      req.user._id,
+      req,
+      {
+        submissionId: req.params.id,
+        teacherId: submission.teacherId?.toString(),
+        teacherName: submission.teacherName,
+        level: submission.level,
+        category: submission.category,
+        subject: submission.subject
+      },
+      'error'
+    );
 
     await submission.deleteOne();
 
