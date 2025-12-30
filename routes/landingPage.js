@@ -1,6 +1,7 @@
 const express = require('express');
 const LandingPage = require('../models/LandingPage');
 const { protect, authorize } = require('../middleware/auth');
+const { logger } = require('../utils/logger');
 
 const router = express.Router();
 
@@ -69,6 +70,15 @@ router.post('/', async (req, res) => {
   try {
     const section = await LandingPage.create(req.body);
 
+    // Log landing page section creation
+    await logger.logAdminAction(
+      'Admin created landing page section',
+      req.user._id,
+      req,
+      { sectionId: section._id.toString(), sectionType: section.type },
+      'success'
+    );
+
     res.status(201).json({
       success: true,
       section
@@ -126,6 +136,15 @@ router.delete('/:id', async (req, res) => {
         message: 'Landing page section not found'
       });
     }
+
+    // Log landing page section deletion
+    await logger.logAdminAction(
+      'Admin deleted landing page section',
+      req.user._id,
+      req,
+      { sectionId: req.params.id, sectionType: section.type },
+      'warning'
+    );
 
     await section.deleteOne();
 

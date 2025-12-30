@@ -1,6 +1,7 @@
 const express = require('express');
 const TieBreaking = require('../models/TieBreaking');
 const { protect, authorize } = require('../middleware/auth');
+const { logger } = require('../utils/logger');
 
 const router = express.Router();
 
@@ -30,6 +31,14 @@ router.get('/', async (req, res) => {
       .populate('votes.judgeId', 'name username')
       .populate('winners', 'teacherName category subject')
       .sort({ createdAt: -1 });
+
+    // Log tie-breaking list view
+    await logger.logUserActivity(
+      'User viewed tie-breaking rounds',
+      req.user._id,
+      req,
+      { filters: { year, level, status }, count: tieBreaks.length }
+    );
 
     res.json({
       success: true,
@@ -134,6 +143,19 @@ router.post('/:id/vote', authorize('judge'), async (req, res) => {
 
     await tieBreak.save();
 
+    // Log tie-breaking vote
+    await logger.logUserActivity(
+      'Judge submitted tie-breaking vote',
+      req.user._id,
+      req,
+      {
+        tieBreakId: req.params.id,
+        submissionId: submissionId,
+        level: tieBreak.level
+      },
+      'success'
+    );
+
     res.json({
       success: true,
       tieBreak
@@ -153,6 +175,20 @@ router.post('/:id/vote', authorize('judge'), async (req, res) => {
 router.post('/', authorize('admin', 'superadmin'), async (req, res) => {
   try {
     const tieBreak = await TieBreaking.create(req.body);
+
+    // Log tie-breaking round creation
+    await logger.logAdminAction(
+      'Admin created tie-breaking round',
+      req.user._id,
+      req,
+      {
+        tieBreakId: tieBreak._id.toString(),
+        level: tieBreak.level,
+        submissionCount: tieBreak.submissionIds.length,
+        quota: tieBreak.quota
+      },
+      'info'
+    );
 
     res.status(201).json({
       success: true,

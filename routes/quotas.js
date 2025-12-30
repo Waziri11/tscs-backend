@@ -1,6 +1,7 @@
 const express = require('express');
 const Quota = require('../models/Quota');
 const { protect, authorize } = require('../middleware/auth');
+const { logger } = require('../utils/logger');
 
 const router = express.Router();
 
@@ -20,6 +21,14 @@ router.get('/', async (req, res) => {
     if (level) query.level = level;
 
     const quotas = await Quota.find(query).sort({ year: -1, level: 1 });
+
+    // Log quota list view
+    await logger.logAdminAction(
+      'Superadmin viewed quotas list',
+      req.user._id,
+      req,
+      { filters: { year, level } }
+    );
 
     res.json({
       success: true,
@@ -79,10 +88,22 @@ router.post('/', async (req, res) => {
       });
     }
 
+    const existingQuota = await Quota.findOne({ year: parseInt(year), level });
+    const isUpdate = !!existingQuota;
+    
     const quotaDoc = await Quota.findOneAndUpdate(
       { year: parseInt(year), level },
       { year: parseInt(year), level, quota: parseInt(quota) },
       { new: true, upsert: true, runValidators: true }
+    );
+
+    // Log quota creation/update
+    await logger.logAdminAction(
+      isUpdate ? 'Superadmin updated quota' : 'Superadmin created quota',
+      req.user._id,
+      req,
+      { year: parseInt(year), level, quota: parseInt(quota) },
+      'success'
     );
 
     res.json({

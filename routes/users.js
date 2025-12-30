@@ -75,6 +75,18 @@ router.get('/:id', async (req, res) => {
       });
     }
 
+    // Log user detail view
+    await logger.logAdminAction(
+      'Admin viewed user details',
+      req.user._id,
+      req,
+      { 
+        targetUserId: req.params.id,
+        targetUserRole: user.role,
+        targetUserEmail: user.email
+      }
+    );
+
     res.json({
       success: true,
       user
@@ -152,18 +164,38 @@ router.post('/', async (req, res) => {
 // @access  Private (Admin/Superadmin)
 router.put('/:id', async (req, res) => {
   try {
+    // Get original user data before update for logging
+    const originalUser = await User.findById(req.params.id).select('-password');
+    
+    if (!originalUser) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
     const user = await User.findByIdAndUpdate(
       req.params.id,
       req.body,
       { new: true, runValidators: true }
     ).select('-password');
 
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
+    const updatedFields = Object.keys(req.body);
+
+    // Log user update
+    await logger.logAdminAction(
+      'Admin updated user account',
+      req.user._id,
+      req,
+      {
+        targetUserId: req.params.id,
+        targetUserRole: user.role,
+        targetUserEmail: user.email,
+        updatedFields: updatedFields,
+        statusChanged: req.body.status && req.body.status !== originalUser.status,
+        roleChanged: req.body.role && req.body.role !== originalUser.role
+      }
+    );
 
     res.json({
       success: true,

@@ -1,6 +1,7 @@
 const express = require('express');
 const Competition = require('../models/Competition');
 const { protect, authorize } = require('../middleware/auth');
+const { logger } = require('../utils/logger');
 
 const router = express.Router();
 
@@ -13,6 +14,15 @@ router.use(protect);
 router.get('/', async (req, res) => {
   try {
     const competitions = await Competition.find().sort({ year: -1 });
+
+    // Log competition list view
+    if (req.user) {
+      await logger.logUserActivity(
+        'User viewed competitions list',
+        req.user._id,
+        req
+      );
+    }
 
     res.json({
       success: true,
@@ -61,6 +71,15 @@ router.get('/:year', async (req, res) => {
 router.post('/', authorize('superadmin'), async (req, res) => {
   try {
     const competition = await Competition.create(req.body);
+
+    // Log competition creation
+    await logger.logAdminAction(
+      'Superadmin created competition',
+      req.user._id,
+      req,
+      { year: competition.year },
+      'success'
+    );
 
     res.status(201).json({
       success: true,
@@ -220,6 +239,15 @@ router.put('/:year/evaluation-criteria/:category/:class/:subject/:area', authori
     areaObj.evaluationCriteria = evaluationCriteria || [];
 
     await competition.save();
+
+    // Log evaluation criteria update
+    await logger.logAdminAction(
+      'Superadmin updated evaluation criteria',
+      req.user._id,
+      req,
+      { year, category, class: classLevel, subject, area },
+      'info'
+    );
 
     res.json({
       success: true,
