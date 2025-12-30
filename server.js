@@ -11,6 +11,7 @@ const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/users');
 const submissionRoutes = require('./routes/submissions');
 const competitionRoutes = require('./routes/competitions');
+const competitionRoundRoutes = require('./routes/competitionRounds');
 const evaluationRoutes = require('./routes/evaluations');
 const quotaRoutes = require('./routes/quotas');
 const tieBreakingRoutes = require('./routes/tieBreaking');
@@ -54,6 +55,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/submissions', submissionRoutes);
 app.use('/api/competitions', competitionRoutes);
+app.use('/api/competition-rounds', competitionRoundRoutes);
 app.use('/api/evaluations', evaluationRoutes);
 app.use('/api/quotas', quotaRoutes);
 app.use('/api/tie-breaking', tieBreakingRoutes);
@@ -89,6 +91,10 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 5000;
+
+// Start round scheduler
+const { startScheduler } = require('./utils/roundScheduler');
+startScheduler();
 
 app.listen(PORT, () => {
   console.log(`🚀 Server is running on port ${PORT}`);
