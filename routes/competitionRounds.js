@@ -20,8 +20,39 @@ try {
 
 const router = express.Router();
 
-// All routes require authentication and superadmin role
+// All routes require authentication
 router.use(protect);
+
+// Public route for judges to get active rounds
+router.get('/active', async (req, res) => {
+  try {
+    const { level, region, council } = req.query;
+    
+    let query = { status: 'active' };
+    
+    if (level) query.level = level;
+    if (region) query.region = region;
+    if (council) query.council = council;
+
+    const rounds = await CompetitionRound.find(query)
+      .sort({ createdAt: -1 })
+      .limit(10);
+
+    res.json({
+      success: true,
+      count: rounds.length,
+      rounds
+    });
+  } catch (error) {
+    console.error('Get active rounds error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// All other routes require superadmin role
 router.use(authorize('superadmin'));
 
 // Helper: Get next level
