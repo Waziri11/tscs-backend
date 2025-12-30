@@ -1,4 +1,10 @@
-const SystemLog = require('../models/SystemLog');
+// Safely require SystemLog - if it fails, logging will be disabled
+let SystemLog = null;
+try {
+  SystemLog = require('../models/SystemLog');
+} catch (error) {
+  console.error('Warning: SystemLog model not available, logging disabled:', error.message);
+}
 
 /**
  * System Logger Utility
@@ -63,7 +69,13 @@ const createLog = async ({
   metadata = {},
   req = null
 }) => {
+  // Always return immediately - never block
   try {
+    // Check if SystemLog model is available
+    if (!SystemLog) {
+      return Promise.resolve();
+    }
+
     const logData = {
       type,
       severity,
@@ -76,12 +88,25 @@ const createLog = async ({
     };
 
     // Create log asynchronously (don't block the request)
-    SystemLog.create(logData).catch(err => {
-      console.error('Error creating system log:', err);
+    // Use setImmediate to ensure this doesn't block the event loop
+    setImmediate(() => {
+      try {
+        if (SystemLog && SystemLog.create) {
+          SystemLog.create(logData).catch(() => {
+            // Silently fail - don't log errors about logging
+          });
+        }
+      } catch (err) {
+        // Silently fail
+      }
     });
+    
+    // Return resolved promise immediately so awaiting doesn't block
+    return Promise.resolve();
   } catch (error) {
     // Don't throw errors - logging should never break the application
-    console.error('Error in createLog:', error);
+    // Silently fail
+    return Promise.resolve();
   }
 };
 

@@ -2,7 +2,25 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const { protect } = require('../middleware/auth');
-const { logger } = require('../utils/logger');
+
+// Safely import logger - if it fails, app should still work
+let logger = null;
+try {
+  const loggerModule = require('../utils/logger');
+  logger = loggerModule.logger;
+} catch (error) {
+  console.error('Warning: Logger not available:', error.message);
+  // Create a no-op logger so the app doesn't crash
+  logger = {
+    logUserActivity: () => Promise.resolve(),
+    logSecurity: () => Promise.resolve(),
+    logAdminAction: () => Promise.resolve(),
+    logSystemEvent: () => Promise.resolve(),
+    logApiRequest: () => Promise.resolve(),
+    logError: () => Promise.resolve(),
+    log: () => Promise.resolve()
+  };
+}
 
 const router = express.Router();
 
@@ -32,14 +50,16 @@ router.post('/login', async (req, res) => {
     const user = await User.findOne({ email: email.toLowerCase() });
 
     if (!user) {
-      // Log failed login attempt
-      await logger.logSecurity(
-        'Failed login attempt - user not found',
-        null,
-        req,
-        { email: email.toLowerCase() },
-        'warning'
-      );
+      // Log failed login attempt (non-blocking)
+      if (logger) {
+        logger.logSecurity(
+          'Failed login attempt - user not found',
+          null,
+          req,
+          { email: email.toLowerCase() },
+          'warning'
+        ).catch(() => {}); // Silently fail
+      }
       
       return res.status(401).json({
         success: false,
@@ -49,14 +69,16 @@ router.post('/login', async (req, res) => {
 
     // Check if user is active
     if (user.status !== 'active') {
-      // Log inactive account login attempt
-      await logger.logSecurity(
-        'Failed login attempt - inactive account',
-        user._id,
-        req,
-        { email: email.toLowerCase(), status: user.status },
-        'warning'
-      );
+      // Log inactive account login attempt (non-blocking)
+      if (logger) {
+        logger.logSecurity(
+          'Failed login attempt - inactive account',
+          user._id,
+          req,
+          { email: email.toLowerCase(), status: user.status },
+          'warning'
+        ).catch(() => {}); // Silently fail
+      }
       
       return res.status(401).json({
         success: false,
@@ -68,14 +90,16 @@ router.post('/login', async (req, res) => {
     const isMatch = await user.comparePassword(password);
 
     if (!isMatch) {
-      // Log failed login attempt
-      await logger.logSecurity(
-        'Failed login attempt - invalid password',
-        user._id,
-        req,
-        { email: email.toLowerCase() },
-        'warning'
-      );
+      // Log failed login attempt (non-blocking)
+      if (logger) {
+        logger.logSecurity(
+          'Failed login attempt - invalid password',
+          user._id,
+          req,
+          { email: email.toLowerCase() },
+          'warning'
+        ).catch(() => {}); // Silently fail
+      }
       
       return res.status(401).json({
         success: false,
@@ -86,13 +110,15 @@ router.post('/login', async (req, res) => {
     // Generate token
     const token = generateToken(user._id);
 
-    // Log successful login
-    await logger.logUserActivity(
-      'User logged in',
-      user._id,
-      req,
-      { role: user.role }
-    );
+    // Log successful login (non-blocking)
+    if (logger) {
+      logger.logUserActivity(
+        'User logged in',
+        user._id,
+        req,
+        { role: user.role }
+      ).catch(() => {}); // Silently fail
+    }
 
     res.json({
       success: true,
@@ -194,13 +220,15 @@ router.post('/register', async (req, res) => {
     // Generate token
     const token = generateToken(user._id);
 
-    // Log user registration
-    await logger.logUserActivity(
-      'User registered',
-      user._id,
-      req,
-      { role: 'teacher', region, council, school: schoolName }
-    );
+    // Log user registration (non-blocking)
+    if (logger) {
+      logger.logUserActivity(
+        'User registered',
+        user._id,
+        req,
+        { role: 'teacher', region, council, school: schoolName }
+      ).catch(() => {}); // Silently fail
+    }
 
     res.status(201).json({
       success: true,
@@ -245,12 +273,14 @@ router.get('/me', protect, async (req, res) => {
   try {
     const user = await User.findById(req.user._id).select('-password');
 
-    // Log profile view
-    await logger.logUserActivity(
-      'User viewed profile',
-      user._id,
-      req
-    );
+    // Log profile view (non-blocking)
+    if (logger) {
+      logger.logUserActivity(
+        'User viewed profile',
+        user._id,
+        req
+      ).catch(() => {}); // Silently fail
+    }
 
     res.json({
       success: true,
@@ -306,13 +336,15 @@ router.put('/profile', protect, async (req, res) => {
       });
     }
 
-    // Log profile update
-    await logger.logUserActivity(
-      'User updated profile',
-      user._id,
-      req,
-      { updatedFields: Object.keys(updateData) }
-    );
+    // Log profile update (non-blocking)
+    if (logger) {
+      logger.logUserActivity(
+        'User updated profile',
+        user._id,
+        req,
+        { updatedFields: Object.keys(updateData) }
+      ).catch(() => {}); // Silently fail
+    }
 
     res.json({
       success: true,

@@ -3,7 +3,25 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { protect } = require('../middleware/auth');
-const { logger } = require('../utils/logger');
+
+// Safely import logger - if it fails, app should still work
+let logger = null;
+try {
+  const loggerModule = require('../utils/logger');
+  logger = loggerModule.logger;
+} catch (error) {
+  console.error('Warning: Logger not available:', error.message);
+  // Create a no-op logger so the app doesn't crash
+  logger = {
+    logUserActivity: () => Promise.resolve(),
+    logSecurity: () => Promise.resolve(),
+    logAdminAction: () => Promise.resolve(),
+    logSystemEvent: () => Promise.resolve(),
+    logApiRequest: () => Promise.resolve(),
+    logError: () => Promise.resolve(),
+    log: () => Promise.resolve()
+  };
+}
 
 const router = express.Router();
 
@@ -47,7 +65,7 @@ const upload = multer({
 // @route   POST /api/uploads/lesson-plan
 // @desc    Upload lesson plan PDF
 // @access  Private
-router.post('/lesson-plan', protect, upload.single('file'), (req, res) => {
+router.post('/lesson-plan', protect, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -56,18 +74,19 @@ router.post('/lesson-plan', protect, upload.single('file'), (req, res) => {
       });
     }
 
-    // Log file upload
-    await logger.logUserActivity(
-      'User uploaded lesson plan file',
-      req.user._id,
-      req,
-      {
-        filename: req.file.filename,
-        originalName: req.file.originalname,
-        fileSize: req.file.size
-      },
-      'success'
-    );
+    // Log file upload (non-blocking)
+    if (logger) {
+      logger.logUserActivity(
+        'User uploaded lesson plan file',
+        req.user._id,
+        req,
+        {
+          filename: req.file.filename,
+          originalName: req.file.originalname,
+          fileSize: req.file.size
+        }
+      ).catch(() => {}); // Silently fail
+    }
 
     res.json({
       success: true,
