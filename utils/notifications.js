@@ -218,7 +218,6 @@ const notifyAllJudgesPendingEvaluations = async (level, region = null, council =
     if (council) submissionQuery.council = council;
 
     const submissions = await Submission.find(submissionQuery);
-    const Submission = require('../models/Submission');
     const Evaluation = require('../models/Evaluation');
 
     for (const judge of judges) {

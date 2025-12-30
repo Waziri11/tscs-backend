@@ -297,8 +297,12 @@ const stopScheduler = () => {
   if (schedulerInterval) {
     clearInterval(schedulerInterval);
     schedulerInterval = null;
-    console.log('⏹️ Round scheduler stopped');
   }
+  if (reminderInterval) {
+    clearInterval(reminderInterval);
+    reminderInterval = null;
+  }
+  console.log('⏹️ Round scheduler stopped');
 };
 
 module.exports = {
