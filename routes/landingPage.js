@@ -16,9 +16,9 @@ try {
 const router = express.Router();
 
 // @route   GET /api/landing-page
-// @desc    Get all landing page content (sections + settings)
-// @access  Public (for display) or Private (for editing)
-router.get('/', protect, async (req, res) => {
+// @desc    Get all landing page content (sections + settings) - Public endpoint
+// @access  Public (for display)
+router.get('/', async (req, res) => {
   try {
     const sections = await LandingPage.find()
       .sort({ order: 1, createdAt: 1 });
