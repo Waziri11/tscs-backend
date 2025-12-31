@@ -1,68 +1,59 @@
 const mongoose = require('mongoose');
 
-const sectionContentSchema = new mongoose.Schema({
-  type: {
-    type: String,
-    enum: ['text', 'image', 'video', 'button', 'heading'],
-    required: true
-  },
-  content: {
-    type: String,
-    trim: true
-  },
-  url: {
-    type: String,
-    trim: true
-  },
-  alt: {
-    type: String,
-    trim: true
-  },
-  style: {
-    type: Map,
-    of: String
-  }
-}, { _id: true });
-
 const landingPageSectionSchema = new mongoose.Schema({
   id: {
     type: String,
     required: true,
     unique: true
   },
-  title: {
-    type: String,
-    required: true,
-    trim: true
-  },
   type: {
     type: String,
-    enum: ['hero', 'about', 'features', 'testimonials', 'cta', 'custom'],
-    default: 'custom'
+    enum: ['hero', 'stats', 'about', 'criteria', 'awards', 'cta', 'custom'],
+    required: true
   },
-  content: {
-    type: [sectionContentSchema],
-    default: []
-  },
-  order: {
-    type: Number,
-    default: 0
-  },
-  visible: {
+  enabled: {
     type: Boolean,
     default: true
   },
-  backgroundColor: {
-    type: String,
-    trim: true
+  order: {
+    type: Number,
+    default: 0,
+    required: true
   },
-  textColor: {
+  content: {
+    type: mongoose.Schema.Types.Mixed, // Flexible content structure based on type
+    default: {}
+  }
+}, {
+  timestamps: true
+});
+
+// Index for efficient querying
+landingPageSectionSchema.index({ order: 1 });
+landingPageSectionSchema.index({ enabled: 1, order: 1 });
+
+// Landing Page Settings Schema
+const landingPageSettingsSchema = new mongoose.Schema({
+  key: {
     type: String,
+    required: true,
+    unique: true,
+    enum: ['siteName', 'footerText']
+  },
+  value: {
+    type: String,
+    required: true,
     trim: true
   }
 }, {
   timestamps: true
 });
 
-module.exports = mongoose.model('LandingPage', landingPageSectionSchema);
+const LandingPageSection = mongoose.model('LandingPage', landingPageSectionSchema);
+const LandingPageSettings = mongoose.model('LandingPageSettings', landingPageSettingsSchema);
+
+module.exports = {
+  LandingPage: LandingPageSection,
+  LandingPageSettings
+};
 
