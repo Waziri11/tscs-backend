@@ -15,10 +15,37 @@ try {
 
 const router = express.Router();
 
+// Optional auth check helper
+const optionalAuth = async (req, res, next) => {
+  try {
+    let token;
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+      token = req.headers.authorization.split(' ')[1];
+    } else if (req.query.token) {
+      token = req.query.token;
+    }
+
+    if (token) {
+      try {
+        const jwt = require('jsonwebtoken');
+        const User = require('../models/User');
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        req.user = await User.findById(decoded.id).select('-password');
+      } catch (error) {
+        // Invalid token, continue without user
+        req.user = null;
+      }
+    }
+    next();
+  } catch (error) {
+    next();
+  }
+};
+
 // @route   GET /api/landing-page
 // @desc    Get all landing page content (sections + settings) - Public endpoint
 // @access  Public (for display)
-router.get('/', async (req, res) => {
+router.get('/', optionalAuth, async (req, res) => {
   try {
     const sections = await LandingPage.find()
       .sort({ order: 1, createdAt: 1 });
