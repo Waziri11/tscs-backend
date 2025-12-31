@@ -27,18 +27,96 @@ router.use(protect);
 router.get('/active', async (req, res) => {
   try {
     const { level } = req.query;
+    const user = req.user;
     
-    // Only filter by level and status - return all active rounds for this level
-    // Client will filter by region/council as needed
+    // Build query for active rounds
     let query = { status: 'active' };
     
     if (level) {
       query.level = level;
     }
 
-    const rounds = await CompetitionRound.find(query)
+    // Fetch all active rounds for the level (we'll filter by location in code for better reliability)
+    const allRounds = await CompetitionRound.find(query)
       .sort({ createdAt: -1 })
-      .limit(20);
+      .limit(50); // Get more rounds, we'll filter them
+
+    // If user is a judge, filter rounds based on their assignment
+    let rounds = allRounds;
+    if (user && user.role === 'judge' && user.assignedLevel) {
+      const judgeLevel = user.assignedLevel;
+      // Normalize region and council names for comparison (trim and lowercase)
+      const judgeRegion = user.assignedRegion ? user.assignedRegion.trim().toLowerCase() : null;
+      const judgeCouncil = user.assignedCouncil ? user.assignedCouncil.trim().toLowerCase() : null;
+      
+      rounds = allRounds.filter(round => {
+        // Normalize round location data
+        const roundRegion = round.region ? round.region.toString().trim().toLowerCase() : null;
+        const roundCouncil = round.council ? round.council.toString().trim().toLowerCase() : null;
+        
+        // Nationwide rounds (no region/council) - all judges can see
+        if (!roundRegion && !roundCouncil) {
+          return true;
+        }
+        
+        // Match based on judge level
+        if (judgeLevel === 'Council' && judgeRegion) {
+          // Council judges should see:
+          // 1. Rounds for all councils in their region (region matches, council is null/empty)
+          // 2. Rounds for their specific council (region and council both match)
+          if (roundRegion === judgeRegion) {
+            // Region matches - check council
+            if (!roundCouncil) {
+              // Round is for all councils in region - this judge should see it
+              return true;
+            } else if (judgeCouncil && roundCouncil === judgeCouncil) {
+              // Specific council matches - this judge should see it
+              return true;
+            }
+          }
+          return false;
+        } else if (judgeLevel === 'Regional' && judgeRegion) {
+          // Regional judges should see rounds for their region (council must be null/empty)
+          return roundRegion === judgeRegion && !roundCouncil;
+        } else if (judgeLevel === 'National') {
+          // National judges only see nationwide rounds (already handled above)
+          return !roundRegion && !roundCouncil;
+        }
+        
+        return false;
+      });
+      
+      // Debug logging
+      console.log('Judge round filter:', {
+        judgeId: user._id.toString(),
+        judgeLevel,
+        judgeRegion: user.assignedRegion,
+        judgeCouncil: user.assignedCouncil,
+        normalizedJudgeRegion: judgeRegion,
+        normalizedJudgeCouncil: judgeCouncil,
+        totalRoundsFound: allRounds.length,
+        roundsAfterFilter: rounds.length,
+        allRoundsDetails: allRounds.map(r => ({
+          id: r._id.toString(),
+          level: r.level,
+          region: r.region,
+          council: r.council,
+          normalizedRegion: r.region ? r.region.toString().trim().toLowerCase() : null,
+          normalizedCouncil: r.council ? r.council.toString().trim().toLowerCase() : null,
+          status: r.status
+        })),
+        matchedRounds: rounds.map(r => ({
+          id: r._id.toString(),
+          level: r.level,
+          region: r.region,
+          council: r.council,
+          status: r.status
+        }))
+      });
+    }
+
+    // Limit to 20 rounds
+    rounds = rounds.slice(0, 20);
 
     res.json({
       success: true,
@@ -473,10 +551,15 @@ router.post('/:id/activate', async (req, res) => {
       });
     }
 
-    // Update start time if countdown and not set
+    // Set start time when round is activated (for tracking when round actually started)
+    // For countdown rounds, also recalculate endTime
     if (round.timingType === 'countdown' && !round.startTime) {
       round.startTime = new Date();
       round.endTime = new Date(round.startTime.getTime() + round.countdownDuration);
+    } else if (!round.startTime) {
+      // For fixed_time rounds, set startTime to track activation time
+      // This helps with judge progress tracking (only count evaluations after activation)
+      round.startTime = new Date();
     }
 
     round.status = 'active';
@@ -698,11 +781,18 @@ router.get('/:id/judge-progress', async (req, res) => {
       });
     }
 
-    // Get all submissions at this level
+    // Get round start time (when round was activated)
+    // For countdown rounds, startTime is set when activated
+    // For fixed_time rounds, use createdAt (rounds are typically activated soon after creation)
+    // This ensures we only count evaluations that happened during this round
+    const roundStartTime = round.startTime || round.createdAt;
+    
+    // Get all submissions at this level that haven't been promoted or eliminated
+    // Only include submissions that are still at this level (not approved/eliminated)
     const submissionQuery = {
       level: round.level,
       year: round.year,
-      status: { $in: ['submitted', 'evaluated'] }
+      status: { $in: ['submitted', 'evaluated', 'under_review', 'pending'] }
     };
     
     if (round.region) submissionQuery.region = round.region;
@@ -723,7 +813,11 @@ router.get('/:id/judge-progress', async (req, res) => {
 
     // Calculate progress for each judge
     const judgeProgress = await Promise.all(judges.map(async (judge) => {
-      const evaluations = await Evaluation.find({ judgeId: judge._id });
+      // Only get evaluations created AFTER the round started
+      const evaluations = await Evaluation.find({ 
+        judgeId: judge._id,
+        createdAt: { $gte: roundStartTime }
+      });
       const evaluatedSubmissionIds = evaluations.map(e => e.submissionId.toString());
       
       const assignedSubmissions = submissions.filter(sub => {
@@ -736,6 +830,7 @@ router.get('/:id/judge-progress', async (req, res) => {
         return true; // National level - all judges see all
       });
 
+      // Count completed: submissions evaluated by this judge AFTER round started
       const completed = assignedSubmissions.filter(sub => 
         evaluatedSubmissionIds.includes(sub._id.toString())
       ).length;
@@ -762,10 +857,12 @@ router.get('/:id/judge-progress', async (req, res) => {
     }));
 
     // Calculate overall statistics
+    // Only count evaluations created AFTER the round started
     const totalSubmissions = submissions.length;
     const totalJudges = judges.length;
     const totalEvaluations = await Evaluation.countDocuments({
-      submissionId: { $in: submissions.map(s => s._id) }
+      submissionId: { $in: submissions.map(s => s._id) },
+      createdAt: { $gte: roundStartTime }
     });
     const averageProgress = judgeProgress.length > 0
       ? Math.round(judgeProgress.reduce((sum, j) => sum + j.percentage, 0) / judgeProgress.length)
