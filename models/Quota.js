@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const mongoosePaginate = require('mongoose-paginate-v2');
 
 const quotaSchema = new mongoose.Schema({
   year: {
@@ -21,6 +22,9 @@ const quotaSchema = new mongoose.Schema({
 
 // Unique constraint on year and level
 quotaSchema.index({ year: 1, level: 1 }, { unique: true });
+
+// Add pagination plugin
+quotaSchema.plugin(mongoosePaginate);
 
 module.exports = mongoose.model('Quota', quotaSchema);
 
