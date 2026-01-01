@@ -1,10 +1,12 @@
 const express = require('express');
-const mongoose = require('mongoose');
 const cors = require('cors');
 const dotenv = require('dotenv');
 
 // Load environment variables
 dotenv.config();
+
+// Import database connection
+const connectDB = require('./config/database');
 
 // Import routes
 const authRoutes = require('./routes/auth');
@@ -42,14 +44,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/tscs')
-  .then(() => {
-    console.log('✅ MongoDB Connected Successfully');
-  })
-  .catch((err) => {
-    console.error('❌ MongoDB Connection Error:', err.message);
-    process.exit(1);
-  });
+connectDB();
 
 // Routes
 app.use('/api/auth', authRoutes);
