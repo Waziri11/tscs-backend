@@ -26,6 +26,10 @@ const userSchema = new mongoose.Schema({
     trim: true,
     lowercase: true
   },
+  emailVerified: {
+    type: Boolean,
+    default: false
+  },
   phone: {
     type: String,
     trim: true

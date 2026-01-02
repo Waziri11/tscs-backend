@@ -1,7 +1,11 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
 const User = require('../models/User');
 const { protect } = require('../middleware/auth');
+const OTPService = require('../services/otpService');
+const emailService = require('../services/emailService');
+const notificationService = require('../services/notificationService');
 
 // Safely import logger - if it fails, app should still work
 let logger = null;
@@ -79,10 +83,29 @@ router.post('/login', async (req, res) => {
           'warning'
         ).catch(() => {}); // Silently fail
       }
-      
+
       return res.status(401).json({
         success: false,
         message: 'Your account is not active. Please contact an administrator.'
+      });
+    }
+
+    // Check if email is verified
+    if (!user.emailVerified) {
+      // Log unverified email login attempt (non-blocking)
+      if (logger) {
+        logger.logSecurity(
+          'Failed login attempt - unverified email',
+          user._id,
+          req,
+          { email: email.toLowerCase() },
+          'warning'
+        ).catch(() => {}); // Silently fail
+      }
+
+      return res.status(401).json({
+        success: false,
+        message: 'Please verify your email address before logging in.'
       });
     }
 
@@ -156,8 +179,32 @@ router.post('/login', async (req, res) => {
   }
 });
 
+// Rate limiter for OTP endpoints
+const otpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // 10 requests per window
+  message: {
+    success: false,
+    message: 'Too many OTP requests. Please try again later.'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Stricter rate limiter for OTP verification (prevents brute force)
+const otpVerifyLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // 5 verification attempts per window
+  message: {
+    success: false,
+    message: 'Too many verification attempts. Please try again later.'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // @route   POST /api/auth/register
-// @desc    Register new user (teacher)
+// @desc    Register new user (teacher) - sends OTP for email verification
 // @access  Public
 router.post('/register', async (req, res) => {
   try {
@@ -184,22 +231,21 @@ router.post('/register', async (req, res) => {
 
     // Check if user already exists
     const existingUser = await User.findOne({
-      $or: [
-        { email: email.toLowerCase() }
-      ]
+      email: email.toLowerCase()
     });
 
     if (existingUser) {
+      // Don't reveal if email exists for security
       return res.status(400).json({
         success: false,
-        message: 'User with this email already exists'
+        message: 'An account with this email already exists'
       });
     }
 
     // Create username from email
     const username = email.toLowerCase();
 
-    // Create user data
+    // Create user data (emailVerified: false by default)
     const userData = {
       username,
       password,
@@ -208,6 +254,7 @@ router.post('/register', async (req, res) => {
       phone: phone || '',
       role: 'teacher',
       status: 'active',
+      emailVerified: false, // Explicitly set to false
       school: schoolName,
       region,
       council,
@@ -217,13 +264,38 @@ router.post('/register', async (req, res) => {
 
     const user = await User.create(userData);
 
-    // Generate token
-    const token = generateToken(user._id);
+    // Generate and send OTP
+    const otpResult = await OTPService.createOTP(user.email);
+
+    if (!otpResult.success) {
+      // If OTP creation fails, delete the user to avoid orphaned accounts
+      await User.findByIdAndDelete(user._id);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to send verification code. Please try again.'
+      });
+    }
+
+    // Send OTP email (non-blocking)
+    emailService.sendOTPVerification(user.email, otpResult.otp, user.name)
+      .catch(error => {
+        console.error('Failed to send OTP email:', error);
+        // Don't fail registration if email fails
+      });
+
+    // Emit registration event (non-blocking)
+    notificationService.emit('USER_REGISTERED', {
+      userId: user._id,
+      userName: user.name,
+      email: user.email
+    }).catch(error => {
+      console.error('Failed to emit registration event:', error);
+    });
 
     // Log user registration (non-blocking)
     if (logger) {
       logger.logUserActivity(
-        'User registered',
+        'User registered - pending email verification',
         user._id,
         req,
         { role: 'teacher', region, council, school: schoolName }
@@ -232,36 +304,130 @@ router.post('/register', async (req, res) => {
 
     res.status(201).json({
       success: true,
-      token,
+      message: 'Account created successfully. Please check your email for verification code.',
       user: {
         id: user._id,
-        username: user.username,
         name: user.name,
         email: user.email,
-        phone: user.phone,
-        gender: user.gender,
         role: user.role,
-        school: user.school,
-        region: user.region,
-        council: user.council,
-        chequeNumber: user.chequeNumber
+        emailVerified: false
       }
     });
   } catch (error) {
     console.error('Registration error:', error);
-    
+
     // Handle duplicate key error
     if (error.code === 11000) {
-      const field = Object.keys(error.keyPattern)[0];
       return res.status(400).json({
         success: false,
-        message: `${field} already exists`
+        message: 'An account with this email already exists'
       });
     }
 
     res.status(500).json({
       success: false,
-      message: error.message || 'Server error during registration'
+      message: 'Server error during registration'
+    });
+  }
+});
+
+// @route   POST /api/auth/verify-otp
+// @desc    Verify email with OTP and complete registration
+// @access  Public
+router.post('/verify-otp', otpVerifyLimiter, async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+
+    // Validate input
+    if (!email || !otp) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email and verification code are required'
+      });
+    }
+
+    // Verify OTP
+    const verifyResult = await OTPService.verifyOTPAndUpdate(email, otp);
+
+    if (!verifyResult.success) {
+      return res.status(400).json({
+        success: false,
+        message: verifyResult.error || 'Invalid verification code'
+      });
+    }
+
+    // Generate JWT token
+    const token = generateToken(verifyResult.user.id);
+
+    // Log successful verification (non-blocking)
+    if (logger) {
+      logger.logUserActivity(
+        'Email verified - account activated',
+        verifyResult.user.id,
+        req,
+        { email: email.toLowerCase() }
+      ).catch(() => {}); // Silently fail
+    }
+
+    res.json({
+      success: true,
+      message: 'Email verified successfully. Welcome to TSCS!',
+      token,
+      user: verifyResult.user
+    });
+  } catch (error) {
+    console.error('OTP verification error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during verification'
+    });
+  }
+});
+
+// @route   POST /api/auth/resend-otp
+// @desc    Resend OTP for email verification
+// @access  Public
+router.post('/resend-otp', otpLimiter, async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    // Validate input
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email is required'
+      });
+    }
+
+    // Resend OTP
+    const resendResult = await OTPService.resendOTP(email);
+
+    if (!resendResult.success) {
+      return res.status(resendResult.cooldownRemaining ? 429 : 400).json({
+        success: false,
+        message: resendResult.error || 'Failed to resend verification code',
+        ...(resendResult.cooldownRemaining && { cooldownRemaining: resendResult.cooldownRemaining })
+      });
+    }
+
+    // Send OTP email (non-blocking)
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (user) {
+      emailService.sendOTPVerification(user.email, resendResult.otp, user.name)
+        .catch(error => {
+          console.error('Failed to send OTP email:', error);
+        });
+    }
+
+    res.json({
+      success: true,
+      message: 'Verification code sent successfully. Please check your email.'
+    });
+  } catch (error) {
+    console.error('OTP resend error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during resend'
     });
   }
 });

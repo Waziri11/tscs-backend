@@ -8,6 +8,10 @@ dotenv.config();
 // Import database connection
 const connectDB = require('./config/database');
 
+// Import services
+const emailService = require('./services/emailService');
+const notificationService = require('./services/notificationService');
+
 // Import routes
 const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/users');
@@ -45,6 +49,16 @@ app.use(express.urlencoded({ extended: true }));
 
 // MongoDB Connection
 connectDB();
+
+// Initialize email service
+emailService.initialize();
+
+// Test email connection in development
+if (process.env.NODE_ENV === 'development') {
+  emailService.testConnection().catch(() => {
+    console.warn('⚠️  Email service test failed. Check your Gmail credentials.');
+  });
+}
 
 // Routes
 app.use('/api/auth', authRoutes);

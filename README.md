@@ -10,6 +10,8 @@ Backend API for the TSCS (Teacher Submission Competition System) built with Node
 - **Mongoose** - MongoDB object modeling
 - **JWT** - Authentication
 - **bcryptjs** - Password hashing
+- **Nodemailer** - Email sending (Gmail SMTP)
+- **express-rate-limit** - Rate limiting
 
 ## Prerequisites
 
@@ -62,7 +64,10 @@ The server will start on `http://localhost:5000` (or the port specified in `.env
 ## API Endpoints
 
 ### Authentication
-- `POST /api/auth/login` - Login user
+- `POST /api/auth/login` - Login user (requires verified email)
+- `POST /api/auth/register` - Register new teacher (sends OTP)
+- `POST /api/auth/verify-otp` - Verify email with OTP
+- `POST /api/auth/resend-otp` - Resend verification OTP
 - `GET /api/auth/me` - Get current user (Protected)
 
 ### Users
@@ -121,6 +126,34 @@ Most endpoints require authentication using JWT tokens. Include the token in the
 ```
 Authorization: Bearer <token>
 ```
+
+### Email Verification
+
+Teacher registration now requires email verification:
+
+1. **Registration**: User registers with `emailVerified: false`
+2. **OTP Generation**: System generates 6-digit OTP, hashes it, and sends via email
+3. **Email Verification**: User enters OTP to verify email and activate account
+4. **Login**: Only verified users can log in
+
+**OTP Security Features**:
+- 6-digit numeric codes
+- Hashed storage (never plain text)
+- 10-minute expiration
+- Max 5 verification attempts per OTP
+- Only one active OTP per email
+- 60-second resend cooldown
+- Max 5 resends per hour
+- Rate limiting on endpoints
+
+### Email Notifications
+
+The system includes an event-driven notification system:
+
+- **In-app notifications**: Stored in database with read/unread status
+- **Email notifications**: Sent asynchronously using Gmail SMTP
+- **Event types**: USER_REGISTERED, SYSTEM_NOTIFICATION, competition events, etc.
+- **Templates**: Professional HTML templates for OTP verification and system notifications
 
 ## Role-Based Access Control
 

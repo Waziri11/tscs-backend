@@ -10,15 +10,22 @@ const notificationSchema = new mongoose.Schema({
   type: {
     type: String,
     enum: [
+      // Competition events
       'round_started',
       'round_ending_soon',
       'round_ended',
-      'submission_promoted',
-      'submission_eliminated',
-      'evaluation_reminder',
-      'evaluation_pending',
-      'judge_assigned',
-      'system_announcement'
+      // Submission events (email enabled for teachers)
+      'submission_successful', // Email: successful submission
+      'submission_promoted',   // Email: approved/promoted
+      'submission_eliminated', // Email: eliminated
+      // Evaluation events (email enabled for judges)
+      'evaluation_reminder',   // Email: time reminder
+      'evaluation_pending',    // Email: new round available
+      'judge_assigned',        // Email: assigned to round
+      // System events
+      'system_announcement',
+      'admin_notification',    // Email: direct from admin
+      'system_critical'        // Email: critical system issues
     ],
     required: true
   },
