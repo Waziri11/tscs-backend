@@ -127,6 +127,27 @@ class EmailService {
   }
 
   /**
+   * Send password reset OTP email
+   * @param {string} email - Recipient email
+   * @param {string} otp - OTP code
+   * @param {string} userName - User name
+   * @returns {Promise<boolean>} Success status
+   */
+  async sendPasswordResetOTP(email, otp, userName) {
+    const subject = 'Password Reset - TSCS';
+    const html = this.generatePasswordResetOTPHTML(otp, userName);
+    const text = this.generatePasswordResetOTPText(otp, userName);
+
+    return await this.sendEmail({
+      to: email,
+      subject,
+      html,
+      text,
+      type: 'password_reset_otp'
+    });
+  }
+
+  /**
    * Send system notification email
    * @param {string} email - Recipient email
    * @param {string} subject - Email subject
@@ -288,27 +309,6 @@ class EmailService {
       text,
       type: 'admin_notification',
       metadata
-    });
-  }
-
-  /**
-   * Send password reset OTP email
-   * @param {string} email - Recipient email
-   * @param {string} userName - User name
-   * @param {string} otp - OTP code
-   * @returns {Promise<boolean>} Success status
-   */
-  async sendPasswordResetOTP(email, userName, otp) {
-    const subject = 'Password Reset - TSCS';
-    const html = this.generatePasswordResetHTML(otp, userName);
-    const text = this.generatePasswordResetText(otp, userName);
-
-    return await this.sendEmail({
-      to: email,
-      subject,
-      html,
-      text,
-      type: 'password_reset_otp'
     });
   }
 
@@ -1070,12 +1070,12 @@ Critical system alerts require immediate action.
   }
 
   /**
-   * Generate password reset HTML template
+   * Generate password reset OTP HTML template
    * @param {string} otp - OTP code
    * @param {string} userName - User name
    * @returns {string} HTML content
    */
-  generatePasswordResetHTML(otp, userName) {
+  generatePasswordResetOTPHTML(otp, userName) {
     return `
       <!DOCTYPE html>
       <html lang="en">
@@ -1087,38 +1087,37 @@ Critical system alerts require immediate action.
           body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 20px; background-color: #f4f4f4; }
           .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
           .header { text-align: center; margin-bottom: 30px; }
-          .security-icon { font-size: 48px; color: #faad14; margin-bottom: 16px; }
-          .content { background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; }
+          .warning-icon { font-size: 48px; color: #fa8c16; margin-bottom: 16px; }
           .otp-code { font-size: 32px; font-weight: bold; color: #1890ff; text-align: center; margin: 30px 0; padding: 20px; background: #f0f8ff; border: 2px dashed #1890ff; border-radius: 8px; letter-spacing: 5px; }
           .warning { background: #fff7e6; border: 1px solid #ffd591; color: #d46b08; padding: 15px; border-radius: 5px; margin: 20px 0; }
           .footer { margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; text-align: center; color: #666; font-size: 14px; }
+          .support { margin-top: 15px; }
         </style>
       </head>
       <body>
         <div class="container">
           <div class="header">
-            <div class="security-icon">🔐</div>
+            <div class="warning-icon">🔐</div>
             <h1>Password Reset Request</h1>
-            <p>Hello ${userName},</p>
+            <p>Hi ${userName},</p>
           </div>
 
-          <div class="content">
-            <h3>You requested a password reset for your TSCS account.</h3>
-            <p>Use the verification code below to reset your password:</p>
+          <p>You have requested to reset your password for your TSCS account. Use the verification code below to proceed:</p>
 
-            <div class="otp-code">${otp}</div>
+          <div class="otp-code">${otp}</div>
 
-            <div class="warning">
-              <strong>Security Notice:</strong> This code will expire in 10 minutes.
-              If you didn't request this password reset, please ignore this email.
-            </div>
-
-            <p>For security reasons, never share this code with anyone.</p>
+          <div class="warning">
+            <strong>Security Notice:</strong> This code will expire in 10 minutes. Do not share this code with anyone. If you didn't request this password reset, please ignore this email.
           </div>
+
+          <p>If you continue with the password reset, you will be able to set a new password for your account.</p>
 
           <div class="footer">
             <p><strong>Teacher Submission Competition System (TSCS)</strong></p>
-            <p>If you have any questions, please contact our support team.</p>
+            <p>This password reset was requested for your account security.</p>
+            <div class="support">
+              <p>Need help? Contact our support team.</p>
+            </div>
           </div>
         </div>
       </body>
@@ -1127,29 +1126,30 @@ Critical system alerts require immediate action.
   }
 
   /**
-   * Generate password reset text template
+   * Generate password reset OTP text template
    * @param {string} otp - OTP code
    * @param {string} userName - User name
    * @returns {string} Text content
    */
-  generatePasswordResetText(otp, userName) {
+  generatePasswordResetOTPText(otp, userName) {
     return `
 TSCS - Password Reset Request
 
-Hello ${userName},
+Hi ${userName},
 
-You requested a password reset for your TSCS account.
+You have requested to reset your password for your TSCS account.
 
 Your verification code is: ${otp}
 
-This code will expire in 10 minutes.
+This code will expire in 10 minutes. Do not share this code with anyone.
 
-For security reasons, never share this code with anyone.
 If you didn't request this password reset, please ignore this email.
+
+If you continue with the password reset, you will be able to set a new password for your account.
 
 ---
 Teacher Submission Competition System (TSCS)
-If you have any questions, please contact our support team.
+This password reset was requested for your account security.
     `.trim();
   }
 

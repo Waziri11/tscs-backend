@@ -2,6 +2,7 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const User = require('../models/User');
+const PasswordReset = require('../models/PasswordReset');
 const { protect } = require('../middleware/auth');
 const OTPService = require('../services/otpService');
 const emailService = require('../services/emailService');
@@ -83,7 +84,7 @@ router.post('/login', async (req, res) => {
           'warning'
         ).catch(() => {}); // Silently fail
       }
-
+      
       return res.status(401).json({
         success: false,
         message: 'Your account is not active. Please contact an administrator.'
@@ -315,7 +316,7 @@ router.post('/register', async (req, res) => {
     });
   } catch (error) {
     console.error('Registration error:', error);
-
+    
     // Handle duplicate key error
     if (error.code === 11000) {
       return res.status(400).json({
@@ -432,6 +433,227 @@ router.post('/resend-otp', otpLimiter, async (req, res) => {
   }
 });
 
+// Rate limiter for password reset requests
+const passwordResetLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // 5 password reset requests per window
+  message: {
+    success: false,
+    message: 'Too many password reset requests. Please try again later.'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// @route   POST /api/auth/forgot-password
+// @desc    Request password reset - sends OTP for verification
+// @access  Public
+router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    // Validate input
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email is required'
+      });
+    }
+
+    // Find user by email
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) {
+      // Don't reveal if email exists for security
+      return res.json({
+        success: true,
+        message: 'If an account with this email exists, you will receive a password reset code.'
+      });
+    }
+
+    // Check if user is active
+    if (user.status !== 'active') {
+      return res.json({
+        success: true,
+        message: 'If an account with this email exists, you will receive a password reset code.'
+      });
+    }
+
+    // Generate OTP for password reset (same as email verification)
+    const otpResult = await OTPService.createOTP(user.email);
+
+    if (!otpResult.success) {
+      console.error('Failed to create password reset OTP:', otpResult.error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to send password reset code. Please try again.'
+      });
+    }
+
+    // Send password reset OTP email (non-blocking)
+    emailService.sendPasswordResetOTP(user.email, otpResult.otp, user.name)
+      .catch(error => {
+        console.error('Failed to send password reset email:', error);
+      });
+
+    // Log security event (non-blocking)
+    if (logger) {
+      logger.logSecurity(
+        'Password reset requested',
+        user._id,
+        req,
+        { email: email.toLowerCase() },
+        'info'
+      ).catch(() => {});
+    }
+
+    res.json({
+      success: true,
+      message: 'If an account with this email exists, you will receive a password reset code.'
+    });
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during password reset request'
+    });
+  }
+});
+
+// @route   POST /api/auth/verify-password-reset-otp
+// @desc    Verify OTP and create password reset token
+// @access  Public
+router.post('/verify-password-reset-otp', otpVerifyLimiter, async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+
+    // Validate input
+    if (!email || !otp) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email and verification code are required'
+      });
+    }
+
+    // Verify OTP (same as email verification)
+    const verifyResult = await OTPService.verifyOTPAndUpdate(email, otp);
+
+    if (!verifyResult.success) {
+      return res.status(400).json({
+        success: false,
+        message: verifyResult.error || 'Invalid verification code'
+      });
+    }
+
+    // Create password reset token
+    const resetToken = PasswordReset.generateResetToken();
+    const hashedToken = PasswordReset.hashResetToken(resetToken);
+
+    // Invalidate any existing reset tokens for this user
+    await PasswordReset.invalidateUserTokens(verifyResult.user.id);
+
+    // Create new password reset record (expires in 15 minutes)
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+
+    await PasswordReset.create({
+      userId: verifyResult.user.id,
+      email: email.toLowerCase(),
+      resetToken: hashedToken,
+      expiresAt
+    });
+
+    // Log security event (non-blocking)
+    if (logger) {
+      logger.logSecurity(
+        'Password reset OTP verified - reset token created',
+        verifyResult.user.id,
+        req,
+        { email: email.toLowerCase() },
+        'info'
+      ).catch(() => {});
+    }
+
+    res.json({
+      success: true,
+      message: 'Verification successful. You can now reset your password.',
+      resetToken: resetToken // Send plain token to client
+    });
+  } catch (error) {
+    console.error('Password reset OTP verification error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during verification'
+    });
+  }
+});
+
+// @route   POST /api/auth/reset-password
+// @desc    Reset password using reset token
+// @access  Public
+router.post('/reset-password', async (req, res) => {
+  try {
+    const { resetToken, newPassword } = req.body;
+
+    // Validate input
+    if (!resetToken || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Reset token and new password are required'
+      });
+    }
+
+    // Validate password strength
+    if (newPassword.length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password must be at least 8 characters long'
+      });
+    }
+
+    // Hash the reset token to find the record
+    const hashedToken = PasswordReset.hashResetToken(resetToken);
+
+    // Find valid reset token
+    const resetRecord = await PasswordReset.findValidToken(hashedToken);
+
+    if (!resetRecord) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid or expired reset token'
+      });
+    }
+
+    // Get user and update password
+    const user = resetRecord.userId;
+    user.password = newPassword; // Will be hashed by pre-save middleware
+    await user.save();
+
+    // Mark token as used
+    await resetRecord.markUsed();
+
+    // Log security event (non-blocking)
+    if (logger) {
+      logger.logSecurity(
+        'Password reset completed',
+        user._id,
+        req,
+        { email: resetRecord.email },
+        'info'
+      ).catch(() => {});
+    }
+
+    res.json({
+      success: true,
+      message: 'Password reset successful. You can now log in with your new password.'
+    });
+  } catch (error) {
+    console.error('Password reset error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during password reset'
+    });
+  }
+});
+
 // @route   GET /api/auth/me
 // @desc    Get current user
 // @access  Private
@@ -535,138 +757,6 @@ router.put('/profile', protect, async (req, res) => {
   }
 });
 
-// @route   POST /api/auth/forgot-password
-// @desc    Request password reset OTP
-// @access  Public
-router.post('/forgot-password', otpLimiter, async (req, res) => {
-  try {
-    const { email } = req.body;
-
-    // Validate input
-    if (!email) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email is required'
-      });
-    }
-
-    // Check if user exists
-    const user = await User.findOne({ email: email.toLowerCase() });
-    if (!user) {
-      // Don't reveal if email exists for security
-      return res.json({
-        success: true,
-        message: 'If the email exists, a password reset code has been sent.'
-      });
-    }
-
-    // Check if user is active
-    if (user.status !== 'active') {
-      return res.status(400).json({
-        success: false,
-        message: 'Account is not active. Please contact an administrator.'
-      });
-    }
-
-    // Check if email is verified
-    if (!user.emailVerified) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please verify your email address first.'
-      });
-    }
-
-    // Generate password reset OTP
-    const otpResult = await OTPService.createOTP(user.email);
-
-    if (!otpResult.success) {
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to send password reset code. Please try again.'
-      });
-    }
-
-    // Send password reset email (non-blocking)
-    emailService.sendPasswordResetOTP(user.email, user.name, otpResult.otp)
-      .catch(error => {
-        console.error('Failed to send password reset email:', error);
-      });
-
-    res.json({
-      success: true,
-      message: 'If the email exists, a password reset code has been sent.'
-    });
-  } catch (error) {
-    console.error('Forgot password error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error during password reset request'
-    });
-  }
-});
-
-// @route   POST /api/auth/reset-password
-// @desc    Reset password with OTP verification
-// @access  Public
-router.post('/reset-password', otpVerifyLimiter, async (req, res) => {
-  try {
-    const { email, otp, newPassword } = req.body;
-
-    // Validate input
-    if (!email || !otp || !newPassword) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email, verification code, and new password are required'
-      });
-    }
-
-    // Validate password strength
-    if (newPassword.length < 6) {
-      return res.status(400).json({
-        success: false,
-        message: 'Password must be at least 6 characters long'
-      });
-    }
-
-    // Verify OTP and update password
-    const verifyResult = await OTPService.verifyOTPAndUpdate(email, otp);
-
-    if (!verifyResult.success) {
-      return res.status(400).json({
-        success: false,
-        message: verifyResult.error || 'Invalid verification code'
-      });
-    }
-
-    // Update user password
-    const user = await User.findById(verifyResult.user.id);
-    user.password = newPassword; // Will be hashed by pre-save middleware
-    await user.save();
-
-    // Log password reset (non-blocking)
-    if (logger) {
-      logger.logSecurity(
-        'Password reset successful',
-        user._id,
-        req,
-        { email: email.toLowerCase() },
-        'info'
-      ).catch(() => {}); // Silently fail
-    }
-
-    res.json({
-      success: true,
-      message: 'Password reset successful. You can now log in with your new password.'
-    });
-  } catch (error) {
-    console.error('Reset password error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error during password reset'
-    });
-  }
-});
-
 // @route   PUT /api/auth/change-password
 // @desc    Change password for authenticated user
 // @access  Private
@@ -683,43 +773,87 @@ router.put('/change-password', protect, async (req, res) => {
     }
 
     // Validate new password strength
-    if (newPassword.length < 6) {
+    if (newPassword.length < 8) {
       return res.status(400).json({
         success: false,
-        message: 'New password must be at least 6 characters long'
+        message: 'New password must be at least 8 characters long'
       });
     }
 
-    // Check if new password is different from current
-    if (currentPassword === newPassword) {
+    if (!/(?=.*[a-z])/.test(newPassword)) {
       return res.status(400).json({
         success: false,
-        message: 'New password must be different from current password'
+        message: 'New password must contain at least one lowercase letter'
+      });
+    }
+
+    if (!/(?=.*[A-Z])/.test(newPassword)) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must contain at least one uppercase letter'
+      });
+    }
+
+    if (!/(?=.*\d)/.test(newPassword)) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must contain at least one number'
+      });
+    }
+
+    // Get current user with password
+    const user = await User.findById(req.user._id);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
       });
     }
 
     // Verify current password
-    const isValidPassword = await req.user.comparePassword(currentPassword);
-    if (!isValidPassword) {
+    const isCurrentPasswordValid = await user.comparePassword(currentPassword);
+
+    if (!isCurrentPasswordValid) {
+      // Log failed password change attempt (non-blocking)
+      if (logger) {
+        logger.logSecurity(
+          'Failed password change - invalid current password',
+          user._id,
+          req,
+          {},
+          'warning'
+        ).catch(() => {});
+      }
+
       return res.status(400).json({
         success: false,
         message: 'Current password is incorrect'
       });
     }
 
-    // Update password
-    req.user.password = newPassword; // Will be hashed by pre-save middleware
-    await req.user.save();
+    // Check if new password is different from current
+    const isSamePassword = await user.comparePassword(newPassword);
+    if (isSamePassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be different from current password'
+      });
+    }
 
-    // Log password change (non-blocking)
+    // Update password (will be hashed by pre-save middleware)
+    user.password = newPassword;
+    await user.save();
+
+    // Log successful password change (non-blocking)
     if (logger) {
       logger.logSecurity(
-        'Password changed by user',
-        req.user._id,
+        'Password changed successfully',
+        user._id,
         req,
-        { ip: req.ip },
+        {},
         'info'
-      ).catch(() => {}); // Silently fail
+      ).catch(() => {});
     }
 
     res.json({
