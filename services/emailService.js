@@ -292,6 +292,27 @@ class EmailService {
   }
 
   /**
+   * Send password reset OTP email
+   * @param {string} email - Recipient email
+   * @param {string} userName - User name
+   * @param {string} otp - OTP code
+   * @returns {Promise<boolean>} Success status
+   */
+  async sendPasswordResetOTP(email, userName, otp) {
+    const subject = 'Password Reset - TSCS';
+    const html = this.generatePasswordResetHTML(otp, userName);
+    const text = this.generatePasswordResetText(otp, userName);
+
+    return await this.sendEmail({
+      to: email,
+      subject,
+      html,
+      text,
+      type: 'password_reset_otp'
+    });
+  }
+
+  /**
    * Send system critical email (Admin)
    * @param {string} email - Recipient email
    * @param {string} userName - User name
@@ -1045,6 +1066,90 @@ This requires immediate attention from system administrators.
 ---
 Teacher Submission Competition System (TSCS)
 Critical system alerts require immediate action.
+    `.trim();
+  }
+
+  /**
+   * Generate password reset HTML template
+   * @param {string} otp - OTP code
+   * @param {string} userName - User name
+   * @returns {string} HTML content
+   */
+  generatePasswordResetHTML(otp, userName) {
+    return `
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Password Reset - TSCS</title>
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 20px; background-color: #f4f4f4; }
+          .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+          .header { text-align: center; margin-bottom: 30px; }
+          .security-icon { font-size: 48px; color: #faad14; margin-bottom: 16px; }
+          .content { background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; }
+          .otp-code { font-size: 32px; font-weight: bold; color: #1890ff; text-align: center; margin: 30px 0; padding: 20px; background: #f0f8ff; border: 2px dashed #1890ff; border-radius: 8px; letter-spacing: 5px; }
+          .warning { background: #fff7e6; border: 1px solid #ffd591; color: #d46b08; padding: 15px; border-radius: 5px; margin: 20px 0; }
+          .footer { margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; text-align: center; color: #666; font-size: 14px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <div class="security-icon">🔐</div>
+            <h1>Password Reset Request</h1>
+            <p>Hello ${userName},</p>
+          </div>
+
+          <div class="content">
+            <h3>You requested a password reset for your TSCS account.</h3>
+            <p>Use the verification code below to reset your password:</p>
+
+            <div class="otp-code">${otp}</div>
+
+            <div class="warning">
+              <strong>Security Notice:</strong> This code will expire in 10 minutes.
+              If you didn't request this password reset, please ignore this email.
+            </div>
+
+            <p>For security reasons, never share this code with anyone.</p>
+          </div>
+
+          <div class="footer">
+            <p><strong>Teacher Submission Competition System (TSCS)</strong></p>
+            <p>If you have any questions, please contact our support team.</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+  }
+
+  /**
+   * Generate password reset text template
+   * @param {string} otp - OTP code
+   * @param {string} userName - User name
+   * @returns {string} Text content
+   */
+  generatePasswordResetText(otp, userName) {
+    return `
+TSCS - Password Reset Request
+
+Hello ${userName},
+
+You requested a password reset for your TSCS account.
+
+Your verification code is: ${otp}
+
+This code will expire in 10 minutes.
+
+For security reasons, never share this code with anyone.
+If you didn't request this password reset, please ignore this email.
+
+---
+Teacher Submission Competition System (TSCS)
+If you have any questions, please contact our support team.
     `.trim();
   }
 

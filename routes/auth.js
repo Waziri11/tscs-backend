@@ -535,5 +535,205 @@ router.put('/profile', protect, async (req, res) => {
   }
 });
 
+// @route   POST /api/auth/forgot-password
+// @desc    Request password reset OTP
+// @access  Public
+router.post('/forgot-password', otpLimiter, async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    // Validate input
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email is required'
+      });
+    }
+
+    // Check if user exists
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) {
+      // Don't reveal if email exists for security
+      return res.json({
+        success: true,
+        message: 'If the email exists, a password reset code has been sent.'
+      });
+    }
+
+    // Check if user is active
+    if (user.status !== 'active') {
+      return res.status(400).json({
+        success: false,
+        message: 'Account is not active. Please contact an administrator.'
+      });
+    }
+
+    // Check if email is verified
+    if (!user.emailVerified) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please verify your email address first.'
+      });
+    }
+
+    // Generate password reset OTP
+    const otpResult = await OTPService.createOTP(user.email);
+
+    if (!otpResult.success) {
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to send password reset code. Please try again.'
+      });
+    }
+
+    // Send password reset email (non-blocking)
+    emailService.sendPasswordResetOTP(user.email, user.name, otpResult.otp)
+      .catch(error => {
+        console.error('Failed to send password reset email:', error);
+      });
+
+    res.json({
+      success: true,
+      message: 'If the email exists, a password reset code has been sent.'
+    });
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during password reset request'
+    });
+  }
+});
+
+// @route   POST /api/auth/reset-password
+// @desc    Reset password with OTP verification
+// @access  Public
+router.post('/reset-password', otpVerifyLimiter, async (req, res) => {
+  try {
+    const { email, otp, newPassword } = req.body;
+
+    // Validate input
+    if (!email || !otp || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email, verification code, and new password are required'
+      });
+    }
+
+    // Validate password strength
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password must be at least 6 characters long'
+      });
+    }
+
+    // Verify OTP and update password
+    const verifyResult = await OTPService.verifyOTPAndUpdate(email, otp);
+
+    if (!verifyResult.success) {
+      return res.status(400).json({
+        success: false,
+        message: verifyResult.error || 'Invalid verification code'
+      });
+    }
+
+    // Update user password
+    const user = await User.findById(verifyResult.user.id);
+    user.password = newPassword; // Will be hashed by pre-save middleware
+    await user.save();
+
+    // Log password reset (non-blocking)
+    if (logger) {
+      logger.logSecurity(
+        'Password reset successful',
+        user._id,
+        req,
+        { email: email.toLowerCase() },
+        'info'
+      ).catch(() => {}); // Silently fail
+    }
+
+    res.json({
+      success: true,
+      message: 'Password reset successful. You can now log in with your new password.'
+    });
+  } catch (error) {
+    console.error('Reset password error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during password reset'
+    });
+  }
+});
+
+// @route   PUT /api/auth/change-password
+// @desc    Change password for authenticated user
+// @access  Private
+router.put('/change-password', protect, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+
+    // Validate input
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Current password and new password are required'
+      });
+    }
+
+    // Validate new password strength
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be at least 6 characters long'
+      });
+    }
+
+    // Check if new password is different from current
+    if (currentPassword === newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be different from current password'
+      });
+    }
+
+    // Verify current password
+    const isValidPassword = await req.user.comparePassword(currentPassword);
+    if (!isValidPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Current password is incorrect'
+      });
+    }
+
+    // Update password
+    req.user.password = newPassword; // Will be hashed by pre-save middleware
+    await req.user.save();
+
+    // Log password change (non-blocking)
+    if (logger) {
+      logger.logSecurity(
+        'Password changed by user',
+        req.user._id,
+        req,
+        { ip: req.ip },
+        'info'
+      ).catch(() => {}); // Silently fail
+    }
+
+    res.json({
+      success: true,
+      message: 'Password changed successfully'
+    });
+  } catch (error) {
+    console.error('Change password error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during password change'
+    });
+  }
+});
+
 module.exports = router;
 
