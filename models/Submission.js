@@ -77,6 +77,14 @@ const submissionSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  videoFileName: {
+    type: String,
+    trim: true
+  },
+  videoFileUrl: {
+    type: String,
+    trim: true
+  },
   score: {
     type: Number,
     default: 0

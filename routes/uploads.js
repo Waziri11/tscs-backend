@@ -62,6 +62,30 @@ const upload = multer({
   }
 });
 
+// File filter for videos - allow common video formats
+const videoFileFilter = (req, file, cb) => {
+  const allowedMimeTypes = [
+    'video/mp4',
+    'video/webm',
+    'video/ogg',
+    'video/quicktime',
+    'video/x-msvideo' // avi
+  ];
+  if (allowedMimeTypes.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only video files (MP4, WebM, OGG, MOV, AVI) are allowed'), false);
+  }
+};
+
+const videoUpload = multer({
+  storage: storage,
+  fileFilter: videoFileFilter,
+  limits: {
+    fileSize: 500 * 1024 * 1024 // 500MB limit for videos
+  }
+});
+
 // @route   POST /api/uploads/lesson-plan
 // @desc    Upload lesson plan PDF
 // @access  Private
@@ -105,6 +129,49 @@ router.post('/lesson-plan', protect, upload.single('file'), async (req, res) => 
   }
 });
 
+// @route   POST /api/uploads/video
+// @desc    Upload video file
+// @access  Private
+router.post('/video', protect, videoUpload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No file uploaded'
+      });
+    }
+
+    // Log file upload (non-blocking)
+    if (logger) {
+      logger.logUserActivity(
+        'User uploaded video file',
+        req.user._id,
+        req,
+        {
+          filename: req.file.filename,
+          originalName: req.file.originalname,
+          fileSize: req.file.size
+        }
+      ).catch(() => {}); // Silently fail
+    }
+
+    res.json({
+      success: true,
+      file: {
+        filename: req.file.filename,
+        originalName: req.file.originalname,
+        url: `/api/uploads/files/${req.file.filename}`
+      }
+    });
+  } catch (error) {
+    console.error('Video upload error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Video upload failed'
+    });
+  }
+});
+
 // @route   GET /api/uploads/files/:filename
 // @desc    Serve uploaded file
 // @access  Private (via token in query or header)
@@ -144,10 +211,32 @@ router.get('/files/:filename', protect, (req, res) => {
       });
     }
 
-    // Set appropriate headers for PDF
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    // Determine content type based on file extension
+    const ext = path.extname(filename).toLowerCase();
+    let contentType = 'application/octet-stream';
+    let disposition = 'inline';
+    
+    if (ext === '.pdf') {
+      contentType = 'application/pdf';
+    } else if (['.mp4', '.webm', '.ogg', '.mov', '.avi'].includes(ext)) {
+      // Video files
+      if (ext === '.mp4') contentType = 'video/mp4';
+      else if (ext === '.webm') contentType = 'video/webm';
+      else if (ext === '.ogg') contentType = 'video/ogg';
+      else if (ext === '.mov') contentType = 'video/quicktime';
+      else if (ext === '.avi') contentType = 'video/x-msvideo';
+      disposition = 'inline'; // Allow inline playback
+    }
+
+    // Set appropriate headers
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `${disposition}; filename="${filename}"`);
     res.setHeader('Cache-Control', 'private, max-age=3600');
+    
+    // For video files, add range support for seeking
+    if (contentType.startsWith('video/')) {
+      res.setHeader('Accept-Ranges', 'bytes');
+    }
 
     // Send file
     res.sendFile(filePath);
