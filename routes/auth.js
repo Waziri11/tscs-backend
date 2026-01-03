@@ -91,26 +91,7 @@ router.post('/login', async (req, res) => {
       });
     }
 
-    // Check if email is verified
-    if (!user.emailVerified) {
-      // Log unverified email login attempt (non-blocking)
-      if (logger) {
-        logger.logSecurity(
-          'Failed login attempt - unverified email',
-          user._id,
-          req,
-          { email: email.toLowerCase() },
-          'warning'
-        ).catch(() => {}); // Silently fail
-      }
-
-      return res.status(401).json({
-        success: false,
-        message: 'Please verify your email address before logging in.'
-      });
-    }
-
-    // Check password
+    // Check password first (before email verification check)
     const isMatch = await user.comparePassword(password);
 
     if (!isMatch) {
@@ -129,6 +110,65 @@ router.post('/login', async (req, res) => {
         success: false,
         message: 'Invalid email or password'
       });
+    }
+
+    // Check if email is verified
+    // For admin/judge users registered by admin: send OTP if not verified
+    // For teacher users (self-registered): require verification before login
+    if (!user.emailVerified) {
+      // If user is admin or judge (registered by admin), send OTP
+      if (user.role === 'admin' || user.role === 'judge') {
+        // Generate and send OTP for email verification
+        const otpResult = await OTPService.createOTP(user.email);
+
+        if (!otpResult.success) {
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to send verification code. Please try again.'
+          });
+        }
+
+        // Send OTP email (non-blocking)
+        emailService.sendOTPVerification(user.email, otpResult.otp, user.name)
+          .catch(error => {
+            console.error('Failed to send OTP email:', error);
+          });
+
+        // Log OTP sent for unverified admin/judge (non-blocking)
+        if (logger) {
+          logger.logSecurity(
+            'OTP sent for unverified admin/judge login',
+            user._id,
+            req,
+            { email: email.toLowerCase(), role: user.role },
+            'info'
+          ).catch(() => {}); // Silently fail
+        }
+
+        // Return special response indicating OTP is required
+        return res.status(200).json({
+          success: false,
+          requiresOTP: true,
+          message: 'Please verify your email address. A verification code has been sent to your email.',
+          email: user.email
+        });
+      } else {
+        // For teacher users, require verification before login
+        if (logger) {
+          logger.logSecurity(
+            'Failed login attempt - unverified email (teacher)',
+            user._id,
+            req,
+            { email: email.toLowerCase() },
+            'warning'
+          ).catch(() => {}); // Silently fail
+        }
+
+        return res.status(401).json({
+          success: false,
+          message: 'Please verify your email address before logging in.'
+        });
+      }
     }
 
     // Generate token
@@ -387,6 +427,100 @@ router.post('/verify-otp', otpVerifyLimiter, async (req, res) => {
       success: false,
       message: 'Server error during verification'
     });
+  }
+});
+
+// @route   POST /api/auth/verify-otp-and-login
+// @desc    Verify OTP for admin/judge login and complete login process
+// @access  Public
+router.post('/verify-otp-and-login', otpVerifyLimiter, async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+
+    // Validate input
+    if (!email || !otp) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email and verification code are required'
+      });
+    }
+
+    // Find user
+    const user = await User.findOne({ email: email.toLowerCase() });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Only allow this for admin/judge users
+    if (user.role !== 'admin' && user.role !== 'judge') {
+      return res.status(403).json({
+        success: false,
+        message: 'This verification method is only for admin and judge accounts'
+      });
+    }
+
+    // Verify OTP and update email verification status
+    const verifyResult = await OTPService.verifyOTPAndUpdate(email, otp);
+
+    if (!verifyResult.success) {
+      return res.status(400).json({
+        success: false,
+        message: verifyResult.error || 'Invalid verification code'
+      });
+    }
+
+    // Generate JWT token
+    const token = generateToken(user._id);
+
+    // Log successful verification and login (non-blocking)
+    if (logger) {
+      logger.logUserActivity(
+        'Email verified and logged in',
+        user._id,
+        req,
+        { email: email.toLowerCase(), role: user.role }
+      ).catch(() => {}); // Silently fail
+    }
+
+    // Return login response with full user data
+    if (!res.headersSent) {
+      res.json({
+        success: true,
+        message: 'Email verified successfully. Welcome!',
+        token,
+        user: {
+          id: user._id,
+          username: user.username,
+          name: user.name,
+          email: user.email,
+          phone: user.phone,
+          gender: user.gender,
+          role: user.role,
+          ...(user.role === 'judge' && {
+            assignedLevel: user.assignedLevel,
+            assignedRegion: user.assignedRegion,
+            assignedCouncil: user.assignedCouncil,
+            specialization: user.specialization,
+            experience: user.experience
+          }),
+          ...(user.role === 'admin' && {
+            department: user.department
+          })
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Verify OTP and login error:', error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        message: error.message || 'Server error during verification'
+      });
+    }
   }
 });
 
