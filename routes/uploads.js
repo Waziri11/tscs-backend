@@ -262,8 +262,7 @@ router.get('/files/:filename', protect, (req, res) => {
       });
     }
 
-    // Determine content type based on file extension
-    const ext = path.extname(filename).toLowerCase();
+    // Determine content type based on file extension (ext already declared above)
     let contentType = 'application/octet-stream';
     let disposition = 'inline';
     
