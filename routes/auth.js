@@ -144,39 +144,44 @@ router.post('/login', async (req, res) => {
       ).catch(() => {}); // Silently fail
     }
 
-    res.json({
-      success: true,
-      token,
-      user: {
-        id: user._id,
-        username: user.username,
-        name: user.name,
-        email: user.email,
-        phone: user.phone,
-        gender: user.gender,
-        role: user.role,
-        ...(user.role === 'teacher' && {
-          school: user.school,
-          region: user.region,
-          council: user.council,
-          chequeNumber: user.chequeNumber,
-          subject: user.subject
-        }),
-        ...(user.role === 'judge' && {
-          assignedLevel: user.assignedLevel,
-          assignedRegion: user.assignedRegion,
-          assignedCouncil: user.assignedCouncil,
-          specialization: user.specialization,
-          experience: user.experience
-        })
-      }
-    });
+    // Ensure response is sent
+    if (!res.headersSent) {
+      res.json({
+        success: true,
+        token,
+        user: {
+          id: user._id,
+          username: user.username,
+          name: user.name,
+          email: user.email,
+          phone: user.phone,
+          gender: user.gender,
+          role: user.role,
+          ...(user.role === 'teacher' && {
+            school: user.school,
+            region: user.region,
+            council: user.council,
+            chequeNumber: user.chequeNumber,
+            subject: user.subject
+          }),
+          ...(user.role === 'judge' && {
+            assignedLevel: user.assignedLevel,
+            assignedRegion: user.assignedRegion,
+            assignedCouncil: user.assignedCouncil,
+            specialization: user.specialization,
+            experience: user.experience
+          })
+        }
+      });
+    }
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error during login'
-    });
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        message: error.message || 'Server error during login'
+      });
+    }
   }
 });
 

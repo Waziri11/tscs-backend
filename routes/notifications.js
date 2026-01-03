@@ -24,6 +24,14 @@ router.use(protect);
 // @access  Private
 router.get('/', async (req, res) => {
   try {
+    // Ensure user is authenticated
+    if (!req.user || !req.user._id) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized'
+      });
+    }
+
     const { read, type, limit = 50 } = req.query;
     
     let query = { userId: req.user._id };
@@ -46,18 +54,22 @@ router.get('/', async (req, res) => {
       read: false
     });
 
-    res.json({
-      success: true,
-      count: notifications.length,
-      unreadCount,
-      notifications
-    });
+    if (!res.headersSent) {
+      res.json({
+        success: true,
+        count: notifications.length,
+        unreadCount: unreadCount || 0,
+        notifications
+      });
+    }
   } catch (error) {
     console.error('Get notifications error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        message: error.message || 'Server error'
+      });
+    }
   }
 });
 
@@ -66,21 +78,33 @@ router.get('/', async (req, res) => {
 // @access  Private
 router.get('/unread-count', async (req, res) => {
   try {
+    // Ensure user is authenticated
+    if (!req.user || !req.user._id) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized'
+      });
+    }
+
     const count = await Notification.countDocuments({
       userId: req.user._id,
       read: false
     });
 
-    res.json({
-      success: true,
-      count
-    });
+    if (!res.headersSent) {
+      res.json({
+        success: true,
+        count: count || 0
+      });
+    }
   } catch (error) {
     console.error('Get unread count error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        message: error.message || 'Server error'
+      });
+    }
   }
 });
 
