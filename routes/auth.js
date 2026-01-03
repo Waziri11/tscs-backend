@@ -478,8 +478,8 @@ router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
       });
     }
 
-    // Generate OTP for password reset (same as email verification)
-    const otpResult = await OTPService.createOTP(user.email);
+    // Generate OTP for password reset
+    const otpResult = await OTPService.createPasswordResetOTP(user.email);
 
     if (!otpResult.success) {
       console.error('Failed to create password reset OTP:', otpResult.error);

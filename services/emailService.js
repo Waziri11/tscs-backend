@@ -22,6 +22,10 @@ class EmailService {
   initialize() {
     if (this.isInitialized) return;
 
+    console.log('📧 Initializing email service...');
+    console.log('GMAIL_USER:', process.env.GMAIL_USER ? 'Set' : 'Not set');
+    console.log('GMAIL_APP_PASSWORD:', process.env.GMAIL_APP_PASSWORD ? 'Set' : 'Not set');
+
     try {
       this.transporter = nodemailer.createTransport({
         service: 'gmail',

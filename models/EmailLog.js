@@ -22,6 +22,15 @@ const emailLogSchema = new mongoose.Schema({
     enum: [
       'email_verification_otp',
       'system_notification',
+      'password_reset_otp',
+      'submission_successful',
+      'submission_promoted',
+      'submission_eliminated',
+      'evaluation_reminder',
+      'evaluation_pending',
+      'judge_assigned',
+      'admin_notification',
+      'system_critical',
       'password_reset', // Future use
       'welcome_email'   // Future use
     ]

@@ -91,6 +91,50 @@ class OTPService {
   }
 
   /**
+   * Create and store a new OTP for password reset
+   * @param {string} email - User email
+   * @returns {Promise<{success: boolean, otp?: string, error?: string}>}
+   */
+  static async createPasswordResetOTP(email) {
+    try {
+      const normalizedEmail = email.toLowerCase();
+
+      // Check if user exists and is active
+      const user = await User.findOne({ email: normalizedEmail });
+      if (!user) {
+        return { success: false, error: 'User not found' };
+      }
+
+      if (user.status !== 'active') {
+        return { success: false, error: 'User account is not active' };
+      }
+
+      // Invalidate any existing OTPs for this email
+      await EmailOTP.invalidateOTPs(normalizedEmail);
+
+      // Generate new OTP
+      const otp = this.generateOTP();
+      const otpHash = await this.hashOTP(otp);
+
+      // Create new OTP record (expires in 10 minutes)
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+      await EmailOTP.create({
+        email: normalizedEmail,
+        otpHash,
+        expiresAt,
+        attempts: 0,
+        resendCount: 0
+      });
+
+      return { success: true, otp };
+    } catch (error) {
+      console.error('Create password reset OTP error:', error);
+      return { success: false, error: 'Failed to create password reset OTP' };
+    }
+  }
+
+  /**
    * Verify OTP and update user verification status
    * @param {string} email - User email
    * @param {string} otp - OTP to verify
