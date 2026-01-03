@@ -25,16 +25,39 @@ try {
 
 const router = express.Router();
 
-// Ensure uploads directory exists
+// Ensure uploads directory and subdirectories exist
 const uploadsDir = path.join(__dirname, '../uploads');
+const lessonPlanDir = path.join(uploadsDir, 'lesson-plan');
+const videosDir = path.join(uploadsDir, 'videos');
+
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
+if (!fs.existsSync(lessonPlanDir)) {
+  fs.mkdirSync(lessonPlanDir, { recursive: true });
+}
+if (!fs.existsSync(videosDir)) {
+  fs.mkdirSync(videosDir, { recursive: true });
+}
 
-// Configure multer for file storage
-const storage = multer.diskStorage({
+// Configure multer for lesson plan storage
+const lessonPlanStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, uploadsDir);
+    cb(null, lessonPlanDir);
+  },
+  filename: (req, file, cb) => {
+    // Generate unique filename: timestamp-teacherId-originalname
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const ext = path.extname(file.originalname);
+    const name = path.basename(file.originalname, ext);
+    cb(null, `${uniqueSuffix}-${name}${ext}`);
+  }
+});
+
+// Configure multer for video storage
+const videoStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, videosDir);
   },
   filename: (req, file, cb) => {
     // Generate unique filename: timestamp-teacherId-originalname
@@ -55,7 +78,7 @@ const fileFilter = (req, file, cb) => {
 };
 
 const upload = multer({
-  storage: storage,
+  storage: lessonPlanStorage,
   fileFilter: fileFilter,
   limits: {
     fileSize: 10 * 1024 * 1024 // 10MB limit
@@ -79,7 +102,7 @@ const videoFileFilter = (req, file, cb) => {
 };
 
 const videoUpload = multer({
-  storage: storage,
+  storage: videoStorage,
   fileFilter: videoFileFilter,
   limits: {
     fileSize: 500 * 1024 * 1024 // 500MB limit for videos
@@ -173,7 +196,7 @@ router.post('/video', protect, videoUpload.single('file'), async (req, res) => {
 });
 
 // @route   GET /api/uploads/files/:filename
-// @desc    Serve uploaded file
+// @desc    Serve uploaded file (checks both lesson-plan and videos subfolders, and root for backward compatibility)
 // @access  Private (via token in query or header)
 router.get('/files/:filename', protect, (req, res) => {
   try {
@@ -191,19 +214,47 @@ router.get('/files/:filename', protect, (req, res) => {
       });
     }
     
-    const filePath = path.join(uploadsDir, filename);
+    // Determine file type by extension to know which folder to check
+    const ext = path.extname(filename).toLowerCase();
+    const isVideo = ['.mp4', '.webm', '.ogg', '.mov', '.avi'].includes(ext);
+    const isPdf = ext === '.pdf';
+    
+    // Try to find file in appropriate subfolder, or root for backward compatibility
+    let filePath = null;
+    
+    if (isVideo) {
+      // Check videos folder first, then root for backward compatibility
+      const videoPath = path.join(videosDir, filename);
+      const rootPath = path.join(uploadsDir, filename);
+      if (fs.existsSync(videoPath)) {
+        filePath = videoPath;
+      } else if (fs.existsSync(rootPath)) {
+        filePath = rootPath;
+      }
+    } else if (isPdf) {
+      // Check lesson-plan folder first, then root for backward compatibility
+      const lessonPlanPath = path.join(lessonPlanDir, filename);
+      const rootPath = path.join(uploadsDir, filename);
+      if (fs.existsSync(lessonPlanPath)) {
+        filePath = lessonPlanPath;
+      } else if (fs.existsSync(rootPath)) {
+        filePath = rootPath;
+      }
+    } else {
+      // Unknown file type - check root folder
+      filePath = path.join(uploadsDir, filename);
+    }
 
     // Check if file exists
-    if (!fs.existsSync(filePath)) {
-      console.log('File not found:', filePath);
+    if (!filePath || !fs.existsSync(filePath)) {
+      console.log('File not found:', filePath || filename);
       console.log('Requested filename:', req.params.filename);
       console.log('Decoded filename:', filename);
-      
-      // List files in uploads directory for debugging
-      if (fs.existsSync(uploadsDir)) {
-        const files = fs.readdirSync(uploadsDir);
-        console.log('Available files in uploads directory:', files.slice(0, 10)); // Show first 10
-      }
+      console.log('Checked paths:', {
+        video: isVideo ? path.join(videosDir, filename) : 'N/A',
+        lessonPlan: isPdf ? path.join(lessonPlanDir, filename) : 'N/A',
+        root: path.join(uploadsDir, filename)
+      });
       
       return res.status(404).json({
         success: false,
