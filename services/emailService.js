@@ -29,14 +29,21 @@ class EmailService {
     try {
       this.transporter = nodemailer.createTransport({
         service: 'gmail',
+        host: 'smtp.gmail.com',
+        port: 587,
+        secure: false, // Use TLS (port 587)
         auth: {
           user: process.env.GMAIL_USER,
           pass: process.env.GMAIL_APP_PASSWORD // App-specific password, not regular password
         },
+        // Connection timeout settings
+        connectionTimeout: 10000, // 10 seconds
+        greetingTimeout: 5000, // 5 seconds
+        socketTimeout: 10000, // 10 seconds
         // Security settings
-        secure: true, // Use SSL
         tls: {
-          rejectUnauthorized: false // For development only
+          rejectUnauthorized: false, // For development/production compatibility
+          ciphers: 'SSLv3'
         }
       });
 

@@ -28,6 +28,9 @@ const notificationRoutes = require('./routes/notifications');
 
 const app = express();
 
+// Trust proxy - needed for Render and other reverse proxies
+app.set('trust proxy', true);
+
 // Middleware
 // CORS configuration
 const allowedOrigins = [];
