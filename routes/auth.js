@@ -877,7 +877,7 @@ router.put('/profile', protect, async (req, res) => {
       user
     });
   } catch (error) {
-    console.error('Update profile error:', error);
+    console.error('Profile update error:', error);
     
     // Handle duplicate key error
     if (error.code === 11000) {

@@ -8,10 +8,7 @@ const connectDB = async () => {
       console.warn('MONGODB_URI not set, using default localhost connection');
     }
     
-    const conn = await mongoose.connect(mongoUri, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
+    const conn = await mongoose.connect(mongoUri);
 
     if (process.env.NODE_ENV === 'development') {
       console.log(`MongoDB Connected: ${conn.connection.host}`);
