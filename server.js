@@ -73,12 +73,17 @@ connectDB();
 // Initialize email service
 emailService.initialize();
 
-// Test email connection in development
-if (process.env.NODE_ENV === 'development') {
-  emailService.testConnection().catch(() => {
-    console.warn('⚠️  Email service test failed. Check your Gmail credentials.');
+// Test email connection (in all environments to catch config issues)
+emailService.testConnection()
+  .then(success => {
+    if (!success) {
+      console.warn('⚠️  Email service connection test failed. Check your Gmail credentials.');
+      console.warn('   Make sure GMAIL_USER and GMAIL_APP_PASSWORD are set correctly.');
+    }
+  })
+  .catch(error => {
+    console.error('❌ Email service connection test error:', error.message);
   });
-}
 
 // Routes
 app.use('/api/auth', authRoutes);

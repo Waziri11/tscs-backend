@@ -130,8 +130,16 @@ router.post('/login', async (req, res) => {
 
         // Send OTP email (non-blocking)
         emailService.sendOTPVerification(user.email, otpResult.otp, user.name)
+          .then(success => {
+            if (!success) {
+              console.error('❌ Failed to send OTP email to:', user.email);
+            } else {
+              console.log('✅ OTP email sent successfully to:', user.email);
+            }
+          })
           .catch(error => {
-            console.error('Failed to send OTP email:', error);
+            console.error('❌ Error sending OTP email:', error.message);
+            console.error('   Full error:', error);
           });
 
         // Log OTP sent for unverified admin/judge (non-blocking)
@@ -324,8 +332,16 @@ router.post('/register', async (req, res) => {
 
     // Send OTP email (non-blocking)
     emailService.sendOTPVerification(user.email, otpResult.otp, user.name)
+      .then(success => {
+        if (!success) {
+          console.error('❌ Failed to send OTP email to:', user.email);
+        } else {
+          console.log('✅ OTP email sent successfully to:', user.email);
+        }
+      })
       .catch(error => {
-        console.error('Failed to send OTP email:', error);
+        console.error('❌ Error sending OTP email:', error.message);
+        console.error('   Full error:', error);
         // Don't fail registration if email fails
       });
 
@@ -550,14 +566,22 @@ router.post('/resend-otp', otpLimiter, async (req, res) => {
       });
     }
 
-    // Send OTP email (non-blocking)
-    const user = await User.findOne({ email: email.toLowerCase() });
-    if (user) {
-      emailService.sendOTPVerification(user.email, resendResult.otp, user.name)
-        .catch(error => {
-          console.error('Failed to send OTP email:', error);
-        });
-    }
+      // Send OTP email (non-blocking)
+      const user = await User.findOne({ email: email.toLowerCase() });
+      if (user) {
+        emailService.sendOTPVerification(user.email, resendResult.otp, user.name)
+          .then(success => {
+            if (!success) {
+              console.error('❌ Failed to resend OTP email to:', user.email);
+            } else {
+              console.log('✅ OTP email resent successfully to:', user.email);
+            }
+          })
+          .catch(error => {
+            console.error('❌ Error resending OTP email:', error.message);
+            console.error('   Full error:', error);
+          });
+      }
 
     res.json({
       success: true,

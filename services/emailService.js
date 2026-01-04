@@ -65,7 +65,17 @@ class EmailService {
     }
 
     if (!this.transporter) {
-      console.error('Email transporter not available');
+      console.error('❌ Email transporter not available');
+      console.error('   GMAIL_USER:', process.env.GMAIL_USER ? 'Set' : 'NOT SET');
+      console.error('   GMAIL_APP_PASSWORD:', process.env.GMAIL_APP_PASSWORD ? 'Set' : 'NOT SET');
+      return false;
+    }
+
+    // Validate email configuration
+    if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
+      console.error('❌ Email configuration incomplete:');
+      console.error('   GMAIL_USER:', process.env.GMAIL_USER ? 'Set' : 'NOT SET');
+      console.error('   GMAIL_APP_PASSWORD:', process.env.GMAIL_APP_PASSWORD ? 'Set' : 'NOT SET');
       return false;
     }
 
@@ -104,7 +114,17 @@ class EmailService {
         await EmailLog.updateStatus(logEntry._id, 'failed', error.message);
       }
 
-      console.error(`❌ Email sending failed to ${options.to}:`, error.message);
+      console.error(`❌ Email sending failed to ${options.to}:`);
+      console.error('   Error:', error.message);
+      console.error('   Error code:', error.code);
+      console.error('   Full error:', error);
+      
+      // Log specific Gmail authentication errors
+      if (error.code === 'EAUTH' || error.responseCode === 535) {
+        console.error('   ⚠️  Gmail authentication failed. Check GMAIL_USER and GMAIL_APP_PASSWORD.');
+        console.error('   ⚠️  Make sure you\'re using an App Password, not your regular Gmail password.');
+      }
+      
       return false;
     }
   }
