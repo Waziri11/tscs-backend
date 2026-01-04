@@ -247,14 +247,6 @@ router.get('/files/:filename', protect, (req, res) => {
 
     // Check if file exists
     if (!filePath || !fs.existsSync(filePath)) {
-      if (process.env.NODE_ENV === 'development') {
-        console.log('File not found:', filePath || filename);
-      }
-        video: isVideo ? path.join(videosDir, filename) : 'N/A',
-        lessonPlan: isPdf ? path.join(lessonPlanDir, filename) : 'N/A',
-        root: path.join(uploadsDir, filename)
-      });
-      
       return res.status(404).json({
         success: false,
         message: 'File not found'
