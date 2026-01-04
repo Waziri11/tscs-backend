@@ -29,16 +29,36 @@ const notificationRoutes = require('./routes/notifications');
 const app = express();
 
 // Middleware
+// CORS configuration
+const allowedOrigins = [];
+if (process.env.CLIENT_URL) {
+  allowedOrigins.push(process.env.CLIENT_URL);
+}
+// Allow localhost in development
+if (process.env.NODE_ENV === 'development') {
+  allowedOrigins.push(/^http:\/\/localhost:\d+$/);
+  allowedOrigins.push(/^http:\/\/127\.0\.0\.1:\d+$/);
+}
+
 app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
-    // Allow all localhost origins for development
-    if (origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:')) {
-      callback(null, true);
-    } else if (process.env.CLIENT_URL && origin === process.env.CLIENT_URL) {
+    
+    // Check if origin matches allowed origins
+    const isAllowed = allowedOrigins.some(allowed => {
+      if (typeof allowed === 'string') {
+        return origin === allowed;
+      } else if (allowed instanceof RegExp) {
+        return allowed.test(origin);
+      }
+      return false;
+    });
+    
+    if (isAllowed) {
       callback(null, true);
     } else {
+      console.warn(`CORS blocked origin: ${origin}`);
       callback(new Error('Not allowed by CORS'));
     }
   },
