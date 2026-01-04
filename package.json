@@ -33,8 +33,7 @@
     "mongoose": "^8.0.3",
     "mongoose-paginate-v2": "^1.9.1",
     "multer": "^2.0.2",
-    "nodemailer": "^7.0.12",
-    "tscs-fullstack": "file:.."
+    "nodemailer": "^7.0.12"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"

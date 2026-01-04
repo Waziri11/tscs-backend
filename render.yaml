@@ -3,6 +3,7 @@ services:
     name: tscs-backend
     env: node
     plan: free
+    rootDir: tscs-backend
     buildCommand: npm install && npm run build
     startCommand: npm start
     envVars:
