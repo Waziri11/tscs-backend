@@ -85,13 +85,6 @@ router.get('/active', async (req, res) => {
         
         return false;
       });
-      
-          level: r.level,
-          region: r.region,
-          council: r.council,
-          status: r.status
-        }))
-      });
     }
 
     // Limit to 20 rounds
