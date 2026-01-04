@@ -4,8 +4,8 @@ services:
     env: node
     plan: free
     rootDir: tscs-backend
-    buildCommand: cd tscs-backend && npm install && npm run build
-    startCommand: cd tscs-backend && npm start
+    buildCommand: npm install && npm run build
+    startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
