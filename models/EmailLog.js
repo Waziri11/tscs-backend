@@ -93,7 +93,7 @@ emailLogSchema.statics.logEmail = async function(data) {
     return log;
   } catch (error) {
     // Non-blocking - don't fail the main operation
-    console.warn('Failed to log email:', error.message);
+      // Silently fail - don't log errors about logging
     return null;
   }
 };
@@ -107,7 +107,7 @@ emailLogSchema.statics.updateStatus = async function(id, status, error = null, s
 
     await this.findByIdAndUpdate(id, updateData);
   } catch (err) {
-    console.warn('Failed to update email status:', err.message);
+      // Silently fail - don't log errors about logging
   }
 };
 

@@ -185,7 +185,6 @@ const checkAndProcessRounds = async () => {
       const actualEndTime = round.getActualEndTime();
       
       if (now >= actualEndTime) {
-        console.log(`Round ${round._id} (${round.year} - ${round.level}) has reached end time`);
         
         // Check if we should wait for all judges
         if (round.waitForAllJudges) {
@@ -197,7 +196,6 @@ const checkAndProcessRounds = async () => {
           );
 
           if (!completionStatus.allCompleted) {
-            console.log(`Round ${round._id} waiting for judges - ${completionStatus.pendingCount} pending`);
             // Don't end yet, but mark as ended (will be closed when judges finish)
             round.status = 'ended';
             round.endedAt = now;
@@ -216,7 +214,6 @@ const checkAndProcessRounds = async () => {
           );
 
           if (advanceResult.success) {
-            console.log(`Round ${round._id} auto-advanced: ${advanceResult.promoted} promoted, ${advanceResult.eliminated} eliminated`);
             
             // Send notifications to teachers
             const { notifyTeachersOnPromotion, notifyTeachersOnElimination } = require('./notifications');
@@ -290,7 +287,9 @@ const startScheduler = () => {
   // Then check every minute
   schedulerInterval = setInterval(checkAndProcessRounds, 60 * 1000);
   
-  console.log('✅ Round scheduler started (checking every minute)');
+  if (process.env.NODE_ENV === 'development') {
+    console.log('Round scheduler started');
+  }
 };
 
 const stopScheduler = () => {
@@ -302,7 +301,6 @@ const stopScheduler = () => {
     clearInterval(reminderInterval);
     reminderInterval = null;
   }
-  console.log('⏹️ Round scheduler stopped');
 };
 
 module.exports = {

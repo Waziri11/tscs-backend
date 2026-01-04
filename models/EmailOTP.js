@@ -56,7 +56,7 @@ emailOTPSchema.pre('save', function(next) {
       email: this.email,
       expiresAt: { $lt: new Date() }
     }).exec().catch(err => {
-      console.warn('Failed to cleanup expired OTPs:', err.message);
+      // Silently fail - don't log errors about cleanup
     });
   }
   next();

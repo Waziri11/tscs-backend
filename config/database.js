@@ -4,10 +4,8 @@ const connectDB = async () => {
   try {
     const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/tscs';
     
-    // Warn if using default localhost URI
     if (!process.env.MONGODB_URI) {
-      console.warn('⚠️  MONGODB_URI not set in .env, using default localhost connection');
-      console.warn('   For MongoDB Atlas, set MONGODB_URI in your .env file');
+      console.warn('MONGODB_URI not set, using default localhost connection');
     }
     
     const conn = await mongoose.connect(mongoUri, {
@@ -15,15 +13,11 @@ const connectDB = async () => {
       useUnifiedTopology: true,
     });
 
-    console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
+    if (process.env.NODE_ENV === 'development') {
+      console.log(`MongoDB Connected: ${conn.connection.host}`);
+    }
   } catch (error) {
-    console.error(`❌ MongoDB Connection Error: ${error.message}`);
-    if (error.message.includes('authentication')) {
-      console.error('💡 Tip: Check your Atlas username, password, and database user permissions');
-    }
-    if (error.message.includes('ENOTFOUND')) {
-      console.error('💡 Tip: Verify your Atlas cluster connection string and network access');
-    }
+    console.error(`MongoDB Connection Error: ${error.message}`);
     process.exit(1);
   }
 };

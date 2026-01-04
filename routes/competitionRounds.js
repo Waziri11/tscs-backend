@@ -86,27 +86,6 @@ router.get('/active', async (req, res) => {
         return false;
       });
       
-      // Debug logging
-      console.log('Judge round filter:', {
-        judgeId: user._id.toString(),
-        judgeLevel,
-        judgeRegion: user.assignedRegion,
-        judgeCouncil: user.assignedCouncil,
-        normalizedJudgeRegion: judgeRegion,
-        normalizedJudgeCouncil: judgeCouncil,
-        totalRoundsFound: allRounds.length,
-        roundsAfterFilter: rounds.length,
-        allRoundsDetails: allRounds.map(r => ({
-          id: r._id.toString(),
-          level: r.level,
-          region: r.region,
-          council: r.council,
-          normalizedRegion: r.region ? r.region.toString().trim().toLowerCase() : null,
-          normalizedCouncil: r.council ? r.council.toString().trim().toLowerCase() : null,
-          status: r.status
-        })),
-        matchedRounds: rounds.map(r => ({
-          id: r._id.toString(),
           level: r.level,
           region: r.region,
           council: r.council,

@@ -72,7 +72,7 @@ class NotificationService {
         // Don't throw - events should be non-blocking
       }
     } else {
-      console.warn(`No handler found for event: ${event}`);
+      // No handler for this event type - silently ignore
     }
   }
 

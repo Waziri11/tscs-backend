@@ -130,16 +130,8 @@ router.post('/login', async (req, res) => {
 
         // Send OTP email (non-blocking)
         emailService.sendOTPVerification(user.email, otpResult.otp, user.name)
-          .then(success => {
-            if (!success) {
-              console.error('❌ Failed to send OTP email to:', user.email);
-            } else {
-              console.log('✅ OTP email sent successfully to:', user.email);
-            }
-          })
           .catch(error => {
-            console.error('❌ Error sending OTP email:', error.message);
-            console.error('   Full error:', error);
+            console.error('Failed to send OTP email:', error.message);
           });
 
         // Log OTP sent for unverified admin/judge (non-blocking)
@@ -332,17 +324,8 @@ router.post('/register', async (req, res) => {
 
     // Send OTP email (non-blocking)
     emailService.sendOTPVerification(user.email, otpResult.otp, user.name)
-      .then(success => {
-        if (!success) {
-          console.error('❌ Failed to send OTP email to:', user.email);
-        } else {
-          console.log('✅ OTP email sent successfully to:', user.email);
-        }
-      })
       .catch(error => {
-        console.error('❌ Error sending OTP email:', error.message);
-        console.error('   Full error:', error);
-        // Don't fail registration if email fails
+        console.error('Failed to send OTP email:', error.message);
       });
 
     // Emit registration event (non-blocking)
@@ -570,16 +553,8 @@ router.post('/resend-otp', otpLimiter, async (req, res) => {
       const user = await User.findOne({ email: email.toLowerCase() });
       if (user) {
         emailService.sendOTPVerification(user.email, resendResult.otp, user.name)
-          .then(success => {
-            if (!success) {
-              console.error('❌ Failed to resend OTP email to:', user.email);
-            } else {
-              console.log('✅ OTP email resent successfully to:', user.email);
-            }
-          })
           .catch(error => {
-            console.error('❌ Error resending OTP email:', error.message);
-            console.error('   Full error:', error);
+            console.error('Failed to resend OTP email:', error.message);
           });
       }
 
@@ -654,16 +629,8 @@ router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
 
     // Send password reset OTP email (non-blocking)
     emailService.sendPasswordResetOTP(user.email, otpResult.otp, user.name)
-      .then(success => {
-        if (!success) {
-          console.error('❌ Failed to send password reset OTP email to:', user.email);
-        } else {
-          console.log('✅ Password reset OTP email sent successfully to:', user.email);
-        }
-      })
       .catch(error => {
-        console.error('❌ Error sending password reset OTP email:', error.message);
-        console.error('   Full error:', error);
+        console.error('Failed to send password reset OTP email:', error.message);
       });
 
     // Log security event (non-blocking)

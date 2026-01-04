@@ -61,7 +61,9 @@ app.use(cors({
     if (isAllowed) {
       callback(null, true);
     } else {
-      console.warn(`CORS blocked origin: ${origin}`);
+      if (process.env.NODE_ENV === 'development') {
+        console.warn(`CORS blocked origin: ${origin}`);
+      }
       callback(new Error('Not allowed by CORS'));
     }
   },
@@ -76,16 +78,10 @@ connectDB();
 // Initialize email service
 emailService.initialize();
 
-// Test email connection (in all environments to catch config issues)
+// Test email connection (silent in production, verbose in development)
 emailService.testConnection()
-  .then(success => {
-    if (!success) {
-      console.warn('⚠️  Email service connection test failed. Check your Gmail credentials.');
-      console.warn('   Make sure GMAIL_USER and GMAIL_APP_PASSWORD are set correctly.');
-    }
-  })
   .catch(error => {
-    console.error('❌ Email service connection test error:', error.message);
+    console.error('Email service connection test error:', error.message);
   });
 
 // Routes
@@ -136,7 +132,8 @@ const { startScheduler } = require('./utils/roundScheduler');
 startScheduler();
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server is running on port ${PORT}`);
-  console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
+  if (process.env.NODE_ENV === 'development') {
+    console.log(`Server running on port ${PORT} (${process.env.NODE_ENV || 'development'})`);
+  }
 });
 

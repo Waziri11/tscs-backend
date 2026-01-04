@@ -59,7 +59,7 @@ passwordResetSchema.pre('save', async function(next) {
       userId: this.userId,
       expiresAt: { $lt: new Date() }
     }).exec().catch(err => {
-      console.warn('Failed to cleanup expired reset tokens:', err.message);
+      // Silently fail - don't log errors about cleanup
     });
   }
   next();

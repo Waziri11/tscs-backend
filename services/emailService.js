@@ -22,9 +22,9 @@ class EmailService {
   initialize() {
     if (this.isInitialized) return;
 
-    console.log('📧 Initializing email service...');
-    console.log('GMAIL_USER:', process.env.GMAIL_USER ? 'Set' : 'Not set');
-    console.log('GMAIL_APP_PASSWORD:', process.env.GMAIL_APP_PASSWORD ? 'Set' : 'Not set');
+    if (process.env.NODE_ENV === 'development') {
+      console.log('Initializing email service...');
+    }
 
     try {
       this.transporter = nodemailer.createTransport({
@@ -48,9 +48,8 @@ class EmailService {
       });
 
       this.isInitialized = true;
-      console.log('✅ Email service initialized with Gmail SMTP');
     } catch (error) {
-      console.error('❌ Email service initialization failed:', error.message);
+      console.error('Email service initialization failed:', error.message);
       this.isInitialized = false;
     }
   }
@@ -72,17 +71,13 @@ class EmailService {
     }
 
     if (!this.transporter) {
-      console.error('❌ Email transporter not available');
-      console.error('   GMAIL_USER:', process.env.GMAIL_USER ? 'Set' : 'NOT SET');
-      console.error('   GMAIL_APP_PASSWORD:', process.env.GMAIL_APP_PASSWORD ? 'Set' : 'NOT SET');
+      console.error('Email transporter not available');
       return false;
     }
 
     // Validate email configuration
     if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
-      console.error('❌ Email configuration incomplete:');
-      console.error('   GMAIL_USER:', process.env.GMAIL_USER ? 'Set' : 'NOT SET');
-      console.error('   GMAIL_APP_PASSWORD:', process.env.GMAIL_APP_PASSWORD ? 'Set' : 'NOT SET');
+      console.error('Email configuration incomplete: GMAIL_USER or GMAIL_APP_PASSWORD not set');
       return false;
     }
 
@@ -112,7 +107,9 @@ class EmailService {
         await EmailLog.updateStatus(logEntry._id, 'sent', null, info.response);
       }
 
-      console.log(`📧 Email sent successfully to ${options.to}: ${info.messageId}`);
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`Email sent to ${options.to}`);
+      }
       return true;
 
     } catch (error) {
@@ -121,15 +118,11 @@ class EmailService {
         await EmailLog.updateStatus(logEntry._id, 'failed', error.message);
       }
 
-      console.error(`❌ Email sending failed to ${options.to}:`);
-      console.error('   Error:', error.message);
-      console.error('   Error code:', error.code);
-      console.error('   Full error:', error);
+      console.error(`Email sending failed to ${options.to}:`, error.message);
       
       // Log specific Gmail authentication errors
       if (error.code === 'EAUTH' || error.responseCode === 535) {
-        console.error('   ⚠️  Gmail authentication failed. Check GMAIL_USER and GMAIL_APP_PASSWORD.');
-        console.error('   ⚠️  Make sure you\'re using an App Password, not your regular Gmail password.');
+        console.error('Gmail authentication failed. Check GMAIL_USER and GMAIL_APP_PASSWORD.');
       }
       
       return false;
@@ -1199,10 +1192,9 @@ This password reset was requested for your account security.
 
     try {
       await this.transporter.verify();
-      console.log('✅ Email service connection test passed');
       return true;
     } catch (error) {
-      console.error('❌ Email service connection test failed:', error.message);
+      console.error('Email service connection test failed:', error.message);
       return false;
     }
   }

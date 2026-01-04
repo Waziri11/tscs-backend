@@ -31,7 +31,6 @@ router.get('/', async (req, res) => {
     if (req.user.role === 'judge') {
       // Check if judge has assignment data
       if (!req.user.assignedLevel) {
-        console.log('Judge has no assignedLevel:', req.user._id, req.user.username);
         return res.json({
           success: true,
           count: 0,
@@ -46,7 +45,6 @@ router.get('/', async (req, res) => {
       if (req.user.assignedLevel === 'Council') {
         // Council level: must match both region and council exactly
         if (!req.user.assignedRegion || !req.user.assignedCouncil) {
-          console.log('Council judge missing region/council:', req.user._id, req.user.username);
           return res.json({
             success: true,
             count: 0,
@@ -61,7 +59,6 @@ router.get('/', async (req, res) => {
         // Regional level: must match region (all councils in that region)
         // Submissions must be at Regional level (after council round)
         if (!req.user.assignedRegion) {
-          console.log('Regional judge missing region:', req.user._id, req.user.username);
           return res.json({
             success: true,
             count: 0,
@@ -76,15 +73,6 @@ router.get('/', async (req, res) => {
         // No location filter needed
       }
 
-      // Debug logging
-      console.log('Judge query:', {
-        judgeId: req.user._id,
-        judgeUsername: req.user.username,
-        assignedLevel: req.user.assignedLevel,
-        assignedRegion: req.user.assignedRegion,
-        assignedCouncil: req.user.assignedCouncil,
-        query: query
-      });
     } else if (req.user.role === 'teacher') {
       // Teachers only see their own submissions
       query.teacherId = req.user._id;
@@ -111,25 +99,6 @@ router.get('/', async (req, res) => {
       .populate('teacherId', 'name email username')
       .sort({ createdAt: -1 });
 
-    // Debug logging
-    if (req.user.role === 'judge') {
-      console.log('Judge submissions query result:', {
-        judgeId: req.user._id,
-        judgeUsername: req.user.username,
-        assignedLevel: req.user.assignedLevel,
-        assignedRegion: req.user.assignedRegion,
-        assignedCouncil: req.user.assignedCouncil,
-        query: JSON.stringify(query),
-        count: submissions.length,
-        sampleSubmission: submissions.length > 0 ? {
-          id: submissions[0]._id,
-          level: submissions[0].level,
-          region: submissions[0].region,
-          council: submissions[0].council,
-          school: submissions[0].school
-        } : null
-      });
-    }
 
     const response = {
       success: true,
