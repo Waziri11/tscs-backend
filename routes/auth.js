@@ -654,8 +654,16 @@ router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
 
     // Send password reset OTP email (non-blocking)
     emailService.sendPasswordResetOTP(user.email, otpResult.otp, user.name)
+      .then(success => {
+        if (!success) {
+          console.error('❌ Failed to send password reset OTP email to:', user.email);
+        } else {
+          console.log('✅ Password reset OTP email sent successfully to:', user.email);
+        }
+      })
       .catch(error => {
-        console.error('Failed to send password reset email:', error);
+        console.error('❌ Error sending password reset OTP email:', error.message);
+        console.error('   Full error:', error);
       });
 
     // Log security event (non-blocking)
