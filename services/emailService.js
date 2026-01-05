@@ -1,23 +1,25 @@
-const { Resend } = require('resend');
+const nodemailer = require('nodemailer');
 const EmailLog = require('../models/EmailLog');
 
 /**
  * Email Service
  *
- * Handles email sending using Resend API
+ * Handles email sending using Gmail SMTP with Nodemailer
  * - Asynchronous, non-blocking email sending
  * - Comprehensive email logging
  * - Template support
  * - Error handling and retries
+ * - Fallback configurations for Railway compatibility
  */
 class EmailService {
   constructor() {
-    this.resend = null;
+    this.transporter = null;
     this.isInitialized = false;
   }
 
   /**
-   * Initialize email service with Resend API
+   * Initialize email transporter with Gmail SMTP
+   * Uses port 465 (SSL) first, with improved timeout settings for Railway
    */
   initialize() {
     if (this.isInitialized) return;
@@ -27,11 +29,26 @@ class EmailService {
     }
 
     try {
-      if (!process.env.RESEND_API_KEY) {
-        throw new Error('RESEND_API_KEY not set');
-      }
+      // Primary configuration: Port 465 with SSL (most reliable)
+      this.transporter = nodemailer.createTransport({
+        host: 'smtp.gmail.com',
+        port: 465,
+        secure: true, // Use SSL for port 465
+        auth: {
+          user: process.env.GMAIL_USER,
+          pass: process.env.GMAIL_APP_PASSWORD // App-specific password, not regular password
+        },
+        // Increased timeouts for Railway compatibility
+        connectionTimeout: 30000, // 30 seconds
+        greetingTimeout: 30000, // 30 seconds
+        socketTimeout: 30000, // 30 seconds
+        // Security settings
+        tls: {
+          rejectUnauthorized: false, // For Railway compatibility
+          ciphers: 'SSLv3'
+        }
+      });
 
-      this.resend = new Resend(process.env.RESEND_API_KEY);
       this.isInitialized = true;
     } catch (error) {
       console.error('Email service initialization failed:', error.message);
@@ -55,14 +72,14 @@ class EmailService {
       this.initialize();
     }
 
-    if (!this.resend) {
-      console.error('Email service not available');
+    if (!this.transporter) {
+      console.error('Email transporter not available');
       return false;
     }
 
     // Validate email configuration
-    if (!process.env.RESEND_API_KEY) {
-      console.error('Email configuration incomplete: RESEND_API_KEY not set');
+    if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
+      console.error('Email configuration incomplete: GMAIL_USER or GMAIL_APP_PASSWORD not set');
       return false;
     }
 
@@ -76,25 +93,20 @@ class EmailService {
     });
 
     try {
-      // Resend requires a verified domain, or you can use their default
-      // For production, set RESEND_FROM_EMAIL in env (e.g., "onboarding@resend.dev" or your verified domain)
-      const fromEmail = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
-      
-      const { data, error } = await this.resend.emails.send({
-        from: `TSCS <${fromEmail}>`,
+      const mailOptions = {
+        from: `"TSCS" <${process.env.GMAIL_USER}>`,
         to: options.to,
         subject: options.subject,
         html: options.html,
         text: options.text
-      });
+      };
 
-      if (error) {
-        throw new Error(error.message || 'Failed to send email');
-      }
+      // Send email
+      const info = await this.transporter.sendMail(mailOptions);
 
       // Update log on success
       if (logEntry) {
-        await EmailLog.updateStatus(logEntry._id, 'sent', null, JSON.stringify(data));
+        await EmailLog.updateStatus(logEntry._id, 'sent', null, info.response);
       }
 
       if (process.env.NODE_ENV === 'development') {
@@ -109,6 +121,46 @@ class EmailService {
       }
 
       console.error(`Email sending failed to ${options.to}:`, error.message);
+      
+      // Try fallback configuration if first attempt fails (port 587 with TLS)
+      if (error.code === 'ETIMEDOUT' || error.code === 'ECONNREFUSED' || error.code === 'ESOCKET') {
+        console.log('Attempting fallback SMTP configuration (port 587)...');
+        try {
+          const fallbackTransporter = nodemailer.createTransport({
+            host: 'smtp.gmail.com',
+            port: 587,
+            secure: false, // Use TLS for port 587
+            auth: {
+              user: process.env.GMAIL_USER,
+              pass: process.env.GMAIL_APP_PASSWORD
+            },
+            connectionTimeout: 30000,
+            greetingTimeout: 30000,
+            socketTimeout: 30000,
+            requireTLS: true,
+            tls: {
+              rejectUnauthorized: false
+            }
+          });
+
+          const info = await fallbackTransporter.sendMail(mailOptions);
+          
+          if (logEntry) {
+            await EmailLog.updateStatus(logEntry._id, 'sent', null, info.response);
+          }
+          
+          if (process.env.NODE_ENV === 'development') {
+            console.log(`Email sent to ${options.to} using fallback config (port 587)`);
+          }
+          
+          // Update main transporter to fallback if it works
+          this.transporter = fallbackTransporter;
+          return true;
+        } catch (fallbackError) {
+          console.error('Fallback SMTP also failed:', fallbackError.message);
+        }
+      }
+      
       return false;
     }
   }
@@ -1170,19 +1222,43 @@ This password reset was requested for your account security.
       this.initialize();
     }
 
-    if (!this.resend) {
+    if (!this.transporter) {
       return false;
     }
 
     try {
-      // Resend doesn't have a verify method, so we'll just check if API key is set
-      if (!process.env.RESEND_API_KEY) {
-        return false;
-      }
+      await this.transporter.verify();
       return true;
     } catch (error) {
       console.error('Email service connection test failed:', error.message);
-      return false;
+      
+      // Try fallback configuration
+      try {
+        const fallbackTransporter = nodemailer.createTransport({
+          host: 'smtp.gmail.com',
+          port: 587,
+          secure: false,
+          auth: {
+            user: process.env.GMAIL_USER,
+            pass: process.env.GMAIL_APP_PASSWORD
+          },
+          connectionTimeout: 30000,
+          greetingTimeout: 30000,
+          socketTimeout: 30000,
+          requireTLS: true,
+          tls: {
+            rejectUnauthorized: false
+          }
+        });
+        
+        await fallbackTransporter.verify();
+        // Update main transporter to fallback if it works
+        this.transporter = fallbackTransporter;
+        return true;
+      } catch (fallbackError) {
+        console.error('Fallback connection test also failed:', fallbackError.message);
+        return false;
+      }
     }
   }
 }
