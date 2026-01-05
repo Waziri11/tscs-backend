@@ -93,8 +93,11 @@ class EmailService {
     });
 
     try {
+      // Get sender name from environment variable, default to "TSCS"
+      const fromName = process.env.EMAIL_FROM_NAME || 'TSCS';
+      
       const mailOptions = {
-        from: `"TSCS" <${process.env.GMAIL_USER}>`,
+        from: `"${fromName}" <${process.env.GMAIL_USER}>`,
         to: options.to,
         subject: options.subject,
         html: options.html,
