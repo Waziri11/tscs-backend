@@ -1,6 +1,4 @@
 const nodemailer = require('nodemailer');
-const fs = require('fs');
-const path = require('path');
 const EmailLog = require('../models/EmailLog');
 
 /**
@@ -401,39 +399,6 @@ class EmailService {
   }
 
   /**
-   * Get logo as base64 data URI for email embedding
-   * @returns {string} Base64 data URI or empty string if logo not found
-   */
-  getLogoDataURI() {
-    try {
-      const logoPath = path.join(__dirname, '../../tscs-frontend/public/Images/tielogo.png');
-      if (fs.existsSync(logoPath)) {
-        const logoBuffer = fs.readFileSync(logoPath);
-        const base64Logo = logoBuffer.toString('base64');
-        return `data:image/png;base64,${base64Logo}`;
-      }
-    } catch (error) {
-      // Silently fail if logo cannot be loaded
-      if (process.env.NODE_ENV === 'development') {
-        console.warn('Could not load logo for email:', error.message);
-      }
-    }
-    return '';
-  }
-
-  /**
-   * Generate logo HTML snippet for email templates
-   * @returns {string} HTML img tag with logo or empty string
-   */
-  getLogoHTML() {
-    const logoDataURI = this.getLogoDataURI();
-    if (logoDataURI) {
-      return `<img src="${logoDataURI}" alt="TSCS Logo" style="max-width: 120px; height: auto; margin-bottom: 10px; opacity: 0.8;" />`;
-    }
-    return '';
-  }
-
-  /**
    * Generate OTP verification HTML template
    * @param {string} otp - OTP code
    * @param {string} userName - User name
@@ -460,7 +425,6 @@ class EmailService {
       <body>
         <div class="container">
           <div class="header">
-            ${this.getLogoHTML()}
             <h1>Welcome to TSCS!</h1>
             <p>Hi ${userName}, please verify your email address to complete your registration.</p>
           </div>
@@ -541,7 +505,6 @@ This verification code was sent to complete your account setup.
       <body>
         <div class="container">
           <div class="header">
-            ${this.getLogoHTML()}
             <h1>TSCS Notification</h1>
             <p>Hello ${userName},</p>
           </div>
@@ -625,7 +588,6 @@ You received this notification because you are registered with our system.
       <body>
         <div class="container">
           <div class="header">
-            ${this.getLogoHTML()}
             <div class="success-icon">✅</div>
             <h1>Submission Received Successfully!</h1>
             <p>Hello ${userName},</p>
@@ -707,7 +669,6 @@ Thank you for your participation!
       <body>
         <div class="container">
           <div class="header">
-            ${this.getLogoHTML()}
             <div class="result-icon">${icon}</div>
             <h1>${isPromoted ? 'Congratulations!' : 'Evaluation Complete'}</h1>
             <p>Hello ${userName},</p>
@@ -797,7 +758,6 @@ ${isPromoted ? 'Congratulations on your success!' : 'Thank you for your particip
       <body>
         <div class="container">
           <div class="header">
-            ${this.getLogoHTML()}
             <div class="warning-icon">⏰</div>
             <h1>Evaluation Reminder</h1>
             <p>Hello ${userName},</p>
@@ -882,7 +842,6 @@ Your evaluations are important for the competition's success.
       <body>
         <div class="container">
           <div class="header">
-            ${this.getLogoHTML()}
             <div class="notification-icon">📋</div>
             <h1>New Evaluations Available</h1>
             <p>Hello ${userName},</p>
@@ -967,7 +926,6 @@ Your expert evaluation helps maintain the quality of our competitions.
       <body>
         <div class="container">
           <div class="header">
-            ${this.getLogoHTML()}
             <div class="assignment-icon">👨‍⚖️</div>
             <h1>Judge Assignment</h1>
             <p>Hello ${userName},</p>
@@ -1052,7 +1010,6 @@ Thank you for your service as a judge!
       <body>
         <div class="container">
           <div class="header">
-            ${this.getLogoHTML()}
             <div class="admin-icon">🔔</div>
             <h1>${title}</h1>
             <p>Hello ${userName},</p>
@@ -1126,7 +1083,6 @@ This is an official notification from the TSCS administration.
       <body>
         <div class="container">
           <div class="header">
-            ${this.getLogoHTML()}
             <div class="critical-icon">🚨</div>
             <h1>CRITICAL SYSTEM ALERT</h1>
             <p>Hello ${userName},</p>
@@ -1204,7 +1160,6 @@ Critical system alerts require immediate action.
       <body>
         <div class="container">
           <div class="header">
-            ${this.getLogoHTML()}
             <div class="warning-icon">🔐</div>
             <h1>Password Reset Request</h1>
             <p>Hi ${userName},</p>
