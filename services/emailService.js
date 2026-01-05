@@ -1,10 +1,10 @@
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 const EmailLog = require('../models/EmailLog');
 
 /**
  * Email Service
  *
- * Handles email sending using Gmail SMTP with Nodemailer
+ * Handles email sending using Resend API
  * - Asynchronous, non-blocking email sending
  * - Comprehensive email logging
  * - Template support
@@ -12,12 +12,12 @@ const EmailLog = require('../models/EmailLog');
  */
 class EmailService {
   constructor() {
-    this.transporter = null;
+    this.resend = null;
     this.isInitialized = false;
   }
 
   /**
-   * Initialize email transporter with Gmail SMTP
+   * Initialize email service with Resend API
    */
   initialize() {
     if (this.isInitialized) return;
@@ -27,26 +27,11 @@ class EmailService {
     }
 
     try {
-      this.transporter = nodemailer.createTransport({
-        service: 'gmail',
-        host: 'smtp.gmail.com',
-        port: 587,
-        secure: false, // Use TLS (port 587)
-        auth: {
-          user: process.env.GMAIL_USER,
-          pass: process.env.GMAIL_APP_PASSWORD // App-specific password, not regular password
-        },
-        // Connection timeout settings
-        connectionTimeout: 10000, // 10 seconds
-        greetingTimeout: 5000, // 5 seconds
-        socketTimeout: 10000, // 10 seconds
-        // Security settings
-        tls: {
-          rejectUnauthorized: false, // For development/production compatibility
-          ciphers: 'SSLv3'
-        }
-      });
+      if (!process.env.RESEND_API_KEY) {
+        throw new Error('RESEND_API_KEY not set');
+      }
 
+      this.resend = new Resend(process.env.RESEND_API_KEY);
       this.isInitialized = true;
     } catch (error) {
       console.error('Email service initialization failed:', error.message);
@@ -70,14 +55,14 @@ class EmailService {
       this.initialize();
     }
 
-    if (!this.transporter) {
-      console.error('Email transporter not available');
+    if (!this.resend) {
+      console.error('Email service not available');
       return false;
     }
 
     // Validate email configuration
-    if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
-      console.error('Email configuration incomplete: GMAIL_USER or GMAIL_APP_PASSWORD not set');
+    if (!process.env.RESEND_API_KEY) {
+      console.error('Email configuration incomplete: RESEND_API_KEY not set');
       return false;
     }
 
@@ -91,20 +76,25 @@ class EmailService {
     });
 
     try {
-      const mailOptions = {
-        from: `"TSCS" <${process.env.GMAIL_USER}>`,
+      // Resend requires a verified domain, or you can use their default
+      // For production, set RESEND_FROM_EMAIL in env (e.g., "onboarding@resend.dev" or your verified domain)
+      const fromEmail = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
+      
+      const { data, error } = await this.resend.emails.send({
+        from: `TSCS <${fromEmail}>`,
         to: options.to,
         subject: options.subject,
         html: options.html,
         text: options.text
-      };
+      });
 
-      // Send email
-      const info = await this.transporter.sendMail(mailOptions);
+      if (error) {
+        throw new Error(error.message || 'Failed to send email');
+      }
 
       // Update log on success
       if (logEntry) {
-        await EmailLog.updateStatus(logEntry._id, 'sent', null, info.response);
+        await EmailLog.updateStatus(logEntry._id, 'sent', null, JSON.stringify(data));
       }
 
       if (process.env.NODE_ENV === 'development') {
@@ -119,12 +109,6 @@ class EmailService {
       }
 
       console.error(`Email sending failed to ${options.to}:`, error.message);
-      
-      // Log specific Gmail authentication errors
-      if (error.code === 'EAUTH' || error.responseCode === 535) {
-        console.error('Gmail authentication failed. Check GMAIL_USER and GMAIL_APP_PASSWORD.');
-      }
-      
       return false;
     }
   }
@@ -1186,12 +1170,15 @@ This password reset was requested for your account security.
       this.initialize();
     }
 
-    if (!this.transporter) {
+    if (!this.resend) {
       return false;
     }
 
     try {
-      await this.transporter.verify();
+      // Resend doesn't have a verify method, so we'll just check if API key is set
+      if (!process.env.RESEND_API_KEY) {
+        return false;
+      }
       return true;
     } catch (error) {
       console.error('Email service connection test failed:', error.message);
