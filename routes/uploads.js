@@ -85,19 +85,12 @@ const upload = multer({
   }
 });
 
-// File filter for videos - allow common video formats
+// File filter for videos - only MP4 allowed
 const videoFileFilter = (req, file, cb) => {
-  const allowedMimeTypes = [
-    'video/mp4',
-    'video/webm',
-    'video/ogg',
-    'video/quicktime',
-    'video/x-msvideo' // avi
-  ];
-  if (allowedMimeTypes.includes(file.mimetype)) {
+  if (file.mimetype === 'video/mp4') {
     cb(null, true);
   } else {
-    cb(new Error('Only video files (MP4, WebM, OGG, MOV, AVI) are allowed'), false);
+    cb(new Error('Only MP4 video files are allowed'), false);
   }
 };
 
@@ -105,7 +98,7 @@ const videoUpload = multer({
   storage: videoStorage,
   fileFilter: videoFileFilter,
   limits: {
-    fileSize: 500 * 1024 * 1024 // 500MB limit for videos
+    fileSize: 110 * 1024 * 1024 // 110MB limit for videos
   }
 });
 
@@ -216,7 +209,7 @@ router.get('/files/:filename', protect, (req, res) => {
     
     // Determine file type by extension to know which folder to check
     const ext = path.extname(filename).toLowerCase();
-    const isVideo = ['.mp4', '.webm', '.ogg', '.mov', '.avi'].includes(ext);
+    const isVideo = ext === '.mp4'; // Only MP4 videos allowed
     const isPdf = ext === '.pdf';
     
     // Try to find file in appropriate subfolder, or root for backward compatibility
@@ -259,13 +252,9 @@ router.get('/files/:filename', protect, (req, res) => {
     
     if (ext === '.pdf') {
       contentType = 'application/pdf';
-    } else if (['.mp4', '.webm', '.ogg', '.mov', '.avi'].includes(ext)) {
-      // Video files
-      if (ext === '.mp4') contentType = 'video/mp4';
-      else if (ext === '.webm') contentType = 'video/webm';
-      else if (ext === '.ogg') contentType = 'video/ogg';
-      else if (ext === '.mov') contentType = 'video/quicktime';
-      else if (ext === '.avi') contentType = 'video/x-msvideo';
+    } else if (ext === '.mp4') {
+      // Only MP4 videos allowed
+      contentType = 'video/mp4';
       disposition = 'inline'; // Allow inline playback
     }
 
