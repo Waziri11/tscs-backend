@@ -354,12 +354,17 @@ POST /api/auth/login
 |--------|----------|-------------|-------------|
 | GET | `/` | Get submissions (filtered) | All |
 | GET | `/:id` | Get submission details | All |
-| POST | `/` | Create submission | Teacher |
+| POST | `/` | Create submission (creates notification for teacher) | Teacher |
 | PUT | `/:id` | Update submission | Teacher |
 | DELETE | `/:id` | Delete submission | Teacher |
 | GET | `/draft/:id` | Get draft submission | Teacher |
 | POST | `/draft` | Save draft submission | Teacher |
 | PUT | `/draft/:id` | Update draft submission | Teacher |
+
+**Note:** When a submission is successfully created via `POST /`, the system automatically:
+- Creates a system notification for the teacher with type `submission_successful`
+- Sends an email notification to the teacher
+- Includes submission details (subject, round name) in the notification
 
 **Query Parameters (GET /):**
 - `level`: Filter by level (Council, Regional, National)
@@ -497,10 +502,18 @@ router.get('/admin-only', protect, authorize('admin', 'superadmin'), handler);
 
 - **CORS**: Cross-origin resource sharing
 - **Helmet**: Security headers
-- **express-rate-limit**: Rate limiting
+- **express-rate-limit**: Rate limiting with `trustProxy: 1` (trusts only first proxy to prevent IP spoofing)
 - **express-mongo-sanitize**: MongoDB injection prevention
 - **express.json()**: JSON body parser
 - **express.urlencoded()**: URL-encoded body parser
+
+### Trust Proxy Configuration
+
+The application uses `app.set('trust proxy', 1)` to trust only the first proxy (hosting provider). This:
+- Prevents IP spoofing attacks
+- Works correctly behind reverse proxies (Render, Railway, etc.)
+- Ensures accurate client IP detection for rate limiting
+- Rate limiters are configured with `trustProxy: 1` to match this setting
 
 ---
 
@@ -532,6 +545,15 @@ router.get('/admin-only', protect, authorize('admin', 'superadmin'), handler);
 - `createNotification(userId, type, title, message, metadata)`
 - `markAsRead(notificationId)`
 - `getUserNotifications(userId, filters)`
+- `handleSubmissionSuccessful(data)` - Creates notification and sends email when teacher submits successfully
+
+**Notification Types:**
+- `submission_successful` - Sent to teachers when submission is created
+- `submission_promoted` - Sent when submission advances to next round
+- `submission_eliminated` - Sent when submission is eliminated
+- `judge_assigned` - Sent to judges when assigned to a round
+- `evaluation_reminder` - Sent to judges for pending evaluations
+- `round_started`, `round_ending_soon`, `round_ended` - Competition round events
 
 ### OTP Service (`services/otpService.js`)
 
@@ -554,7 +576,7 @@ router.get('/admin-only', protect, authorize('admin', 'superadmin'), handler);
 
 **Multer Configuration:**
 - Lesson Plans: PDF only, 10MB limit
-- Videos: MP4, WebM, OGG, MOV, AVI, 500MB limit
+- Videos: MP4 only, 110MB limit
 
 **File Naming:**
 - Format: `{timestamp}-{userId}-{originalFilename}`
