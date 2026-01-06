@@ -29,7 +29,8 @@ const notificationRoutes = require('./routes/notifications');
 const app = express();
 
 // Trust proxy - needed for Render and other reverse proxies
-app.set('trust proxy', true);
+// Set to 1 to trust only the first proxy (hosting provider) - prevents IP spoofing
+app.set('trust proxy', 1);
 
 // Middleware
 // CORS configuration
