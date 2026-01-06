@@ -2,6 +2,7 @@ const express = require('express');
 const Submission = require('../models/Submission');
 const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
+const notificationService = require('../services/notificationService');
 
 const router = express.Router();
 
@@ -227,6 +228,23 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), async (req, res) =
       },
       'success'
     );
+
+    // Create notification for teacher when submission is successful
+    if (req.user.role === 'teacher' || submissionData.teacherId) {
+      const teacherId = req.user.role === 'teacher' ? req.user._id : submissionData.teacherId;
+      const roundName = `${submission.level} Round`;
+      
+      // Create notification (non-blocking - don't fail submission if notification fails)
+      notificationService.handleSubmissionSuccessful({
+        userId: teacherId,
+        submissionId: submission._id.toString(),
+        roundName: roundName,
+        subject: submission.subject
+      }).catch(error => {
+        // Log error but don't fail the submission
+        console.error('Error creating submission notification:', error);
+      });
+    }
 
     res.status(201).json({
       success: true,
