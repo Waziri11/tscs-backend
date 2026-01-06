@@ -235,6 +235,7 @@ const otpLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
+  trustProxy: 1, // Trust only the first proxy (hosting provider) - prevents IP spoofing
 });
 
 // Stricter rate limiter for OTP verification (prevents brute force)
@@ -247,6 +248,7 @@ const otpVerifyLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
+  trustProxy: 1, // Trust only the first proxy (hosting provider) - prevents IP spoofing
 });
 
 // @route   POST /api/auth/register
@@ -581,6 +583,7 @@ const passwordResetLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
+  trustProxy: 1, // Trust only the first proxy (hosting provider) - prevents IP spoofing
 });
 
 // @route   POST /api/auth/forgot-password
