@@ -1260,7 +1260,7 @@ This password reset was requested for your account security.
         return true;
       } catch (fallbackError) {
         console.error('Fallback connection test also failed:', fallbackError.message);
-        return false;
+      return false;
       }
     }
   }

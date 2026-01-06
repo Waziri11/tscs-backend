@@ -105,7 +105,7 @@ router.post('/login', async (req, res) => {
           'warning'
         ).catch(() => {}); // Silently fail
       }
-      
+
       return res.status(401).json({
         success: false,
         message: 'Invalid email or password'
@@ -135,8 +135,8 @@ router.post('/login', async (req, res) => {
           });
 
         // Log OTP sent for unverified admin/judge (non-blocking)
-        if (logger) {
-          logger.logSecurity(
+      if (logger) {
+        logger.logSecurity(
             'OTP sent for unverified admin/judge login',
             user._id,
             req,
@@ -157,17 +157,17 @@ router.post('/login', async (req, res) => {
         if (logger) {
           logger.logSecurity(
             'Failed login attempt - unverified email (teacher)',
-            user._id,
-            req,
-            { email: email.toLowerCase() },
-            'warning'
-          ).catch(() => {}); // Silently fail
-        }
-
-        return res.status(401).json({
-          success: false,
+          user._id,
+          req,
+          { email: email.toLowerCase() },
+          'warning'
+        ).catch(() => {}); // Silently fail
+      }
+      
+      return res.status(401).json({
+        success: false,
           message: 'Please verify your email address before logging in.'
-        });
+      });
       }
     }
 
@@ -186,41 +186,41 @@ router.post('/login', async (req, res) => {
 
     // Ensure response is sent
     if (!res.headersSent) {
-      res.json({
-        success: true,
-        token,
-        user: {
-          id: user._id,
-          username: user.username,
-          name: user.name,
-          email: user.email,
-          phone: user.phone,
-          gender: user.gender,
-          role: user.role,
-          ...(user.role === 'teacher' && {
-            school: user.school,
-            region: user.region,
-            council: user.council,
-            chequeNumber: user.chequeNumber,
-            subject: user.subject
-          }),
-          ...(user.role === 'judge' && {
-            assignedLevel: user.assignedLevel,
-            assignedRegion: user.assignedRegion,
-            assignedCouncil: user.assignedCouncil,
-            specialization: user.specialization,
-            experience: user.experience
-          })
-        }
-      });
+    res.json({
+      success: true,
+      token,
+      user: {
+        id: user._id,
+        username: user.username,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        gender: user.gender,
+        role: user.role,
+        ...(user.role === 'teacher' && {
+          school: user.school,
+          region: user.region,
+          council: user.council,
+          chequeNumber: user.chequeNumber,
+          subject: user.subject
+        }),
+        ...(user.role === 'judge' && {
+          assignedLevel: user.assignedLevel,
+          assignedRegion: user.assignedRegion,
+          assignedCouncil: user.assignedCouncil,
+          specialization: user.specialization,
+          experience: user.experience
+        })
+      }
+    });
     }
   } catch (error) {
     console.error('Login error:', error);
     if (!res.headersSent) {
-      res.status(500).json({
-        success: false,
+    res.status(500).json({
+      success: false,
         message: error.message || 'Server error during login'
-      });
+    });
     }
   }
 });
@@ -551,14 +551,14 @@ router.post('/resend-otp', otpLimiter, async (req, res) => {
       });
     }
 
-      // Send OTP email (non-blocking)
-      const user = await User.findOne({ email: email.toLowerCase() });
-      if (user) {
-        emailService.sendOTPVerification(user.email, resendResult.otp, user.name)
-          .catch(error => {
+    // Send OTP email (non-blocking)
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (user) {
+      emailService.sendOTPVerification(user.email, resendResult.otp, user.name)
+        .catch(error => {
             console.error('Failed to resend OTP email:', error.message);
-          });
-      }
+        });
+    }
 
     res.json({
       success: true,
