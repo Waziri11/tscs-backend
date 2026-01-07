@@ -103,6 +103,11 @@ const submissionSchema = new mongoose.Schema({
   notes: {
     type: String,
     trim: true
+  },
+  roundId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'CompetitionRound',
+    default: null
   }
 }, {
   timestamps: true
@@ -114,6 +119,8 @@ submissionSchema.index({ level: 1, region: 1, council: 1 });
 submissionSchema.index({ year: 1, category: 1, class: 1, subject: 1 });
 submissionSchema.index({ status: 1 });
 submissionSchema.index({ level: 1, status: 1 });
+submissionSchema.index({ roundId: 1 });
+submissionSchema.index({ roundId: 1, averageScore: -1 }); // For leaderboard queries
 
 module.exports = mongoose.model('Submission', submissionSchema);
 

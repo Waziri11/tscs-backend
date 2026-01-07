@@ -1,6 +1,7 @@
 const express = require('express');
 const Evaluation = require('../models/Evaluation');
 const Submission = require('../models/Submission');
+const CompetitionRound = require('../models/CompetitionRound');
 const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
 
@@ -140,6 +141,66 @@ router.post('/', authorize('judge'), async (req, res) => {
         success: false,
         message: 'Submission not found'
       });
+    }
+
+    // Check if submission belongs to an active round
+    if (submission.roundId) {
+      const round = await CompetitionRound.findById(submission.roundId);
+      if (!round) {
+        return res.status(400).json({
+          success: false,
+          message: 'Submission is associated with a round that no longer exists'
+        });
+      }
+      
+      // Check if round is active
+      if (round.status !== 'active') {
+        return res.status(403).json({
+          success: false,
+          message: `Cannot evaluate submission. Round is ${round.status}. Evaluations are only allowed when the round is active.`
+        });
+      }
+      
+      // Check if round has ended (past endTime)
+      const now = new Date();
+      if (now >= round.endTime) {
+        return res.status(403).json({
+          success: false,
+          message: 'Cannot evaluate submission. Round has ended.'
+        });
+      }
+    } else {
+      // If submission doesn't have a roundId, check if there's an active round for this submission's level/location
+      const activeRoundQuery = {
+        year: submission.year,
+        level: submission.level,
+        status: 'active'
+      };
+      
+      if (submission.level === 'Council' && submission.region && submission.council) {
+        activeRoundQuery.region = submission.region;
+        activeRoundQuery.council = submission.council;
+      } else if (submission.level === 'Regional' && submission.region) {
+        activeRoundQuery.region = submission.region;
+      }
+      
+      const activeRound = await CompetitionRound.findOne(activeRoundQuery);
+      
+      if (!activeRound) {
+        return res.status(403).json({
+          success: false,
+          message: 'Cannot evaluate submission. No active round found for this submission. Please wait for an admin to activate a round.'
+        });
+      }
+      
+      // Check if round has ended
+      const now = new Date();
+      if (now >= activeRound.endTime) {
+        return res.status(403).json({
+          success: false,
+          message: 'Cannot evaluate submission. Active round has ended.'
+        });
+      }
     }
 
     // Calculate totals

@@ -174,6 +174,100 @@ const checkAllJudgesCompleted = async (level, year, region = null, council = nul
   }
 };
 
+// Helper: Advance submissions for a specific round based on leaderboard and quota
+const advanceSubmissionsForRound = async (round, submissions) => {
+  try {
+    const nextLevel = getNextLevel(round.level);
+    if (!nextLevel) {
+      return { success: false, error: 'Already at top level' };
+    }
+
+    if (submissions.length === 0) {
+      return { success: false, error: 'No submissions found for this round' };
+    }
+
+    // Get quota for this level
+    const quotaDoc = await Quota.findOne({ year: round.year, level: round.level });
+    const quota = quotaDoc ? quotaDoc.quota : 0;
+
+    // Group submissions by location for quota application
+    const groups = {};
+    submissions.forEach(sub => {
+      let locationKey;
+      if (round.level === 'Council') {
+        locationKey = `${sub.region}::${sub.council}`;
+      } else if (round.level === 'Regional') {
+        locationKey = sub.region;
+      } else {
+        locationKey = 'national';
+      }
+      
+      if (!groups[locationKey]) {
+        groups[locationKey] = [];
+      }
+      groups[locationKey].push(sub);
+    });
+
+    const toPromote = [];
+    const toEliminate = [];
+
+    // Process each location group based on leaderboard ranking
+    Object.keys(groups).forEach(locationKey => {
+      // Submissions are already sorted by averageScore descending
+      const locationSubs = groups[locationKey];
+
+      if (locationSubs.length <= quota) {
+        // All advance if within quota
+        toPromote.push(...locationSubs);
+      } else {
+        // Top N advance based on leaderboard ranking, rest eliminated
+        toPromote.push(...locationSubs.slice(0, quota));
+        toEliminate.push(...locationSubs.slice(quota));
+      }
+    });
+
+    // Update submissions
+    const promotedIds = [];
+    const eliminatedIds = [];
+
+    for (const sub of toPromote) {
+      await Submission.findByIdAndUpdate(sub._id, {
+        level: nextLevel,
+        status: 'promoted',
+        roundId: null // Clear roundId as submission moves to next level
+      });
+      promotedIds.push(sub._id.toString());
+    }
+
+    for (const sub of toEliminate) {
+      await Submission.findByIdAndUpdate(sub._id, {
+        status: 'eliminated',
+        roundId: null // Clear roundId
+      });
+      eliminatedIds.push(sub._id.toString());
+    }
+
+    return {
+      success: true,
+      promoted: promotedIds.length,
+      eliminated: eliminatedIds.length,
+      promotedIds,
+      eliminatedIds,
+      leaderboard: submissions.map((sub, index) => ({
+        rank: index + 1,
+        submissionId: sub._id.toString(),
+        teacherName: sub.teacherName,
+        averageScore: sub.averageScore || 0,
+        status: promotedIds.includes(sub._id.toString()) ? 'promoted' : 
+               eliminatedIds.includes(sub._id.toString()) ? 'eliminated' : sub.status
+      }))
+    };
+  } catch (error) {
+    console.error('Error advancing submissions for round:', error);
+    return { success: false, error: error.message };
+  }
+};
+
 // Helper: Advance submissions to next level based on quotas
 const advanceSubmissions = async (level, year, region = null, council = null) => {
   try {
@@ -503,7 +597,7 @@ router.put('/:id', async (req, res) => {
 });
 
 // @route   POST /api/competition-rounds/:id/activate
-// @desc    Activate a competition round
+// @desc    Activate a competition round and capture all submissions currently assigned to judges
 // @access  Private (Superadmin)
 router.post('/:id/activate', async (req, res) => {
   try {
@@ -534,10 +628,73 @@ router.post('/:id/activate', async (req, res) => {
       round.startTime = new Date();
     }
 
+    // Get all judges assigned to this round's level and location
+    const judgeQuery = { 
+      role: 'judge', 
+      assignedLevel: round.level, 
+      status: 'active' 
+    };
+    
+    if (round.level === 'Council' && round.region && round.council) {
+      judgeQuery.assignedRegion = round.region;
+      judgeQuery.assignedCouncil = round.council;
+    } else if (round.level === 'Regional' && round.region) {
+      judgeQuery.assignedRegion = round.region;
+    }
+    // For National level, no location filter needed
+
+    const judges = await User.find(judgeQuery).select('_id assignedLevel assignedRegion assignedCouncil');
+    
+    if (judges.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No active judges found for this round. Please assign judges before activating the round.'
+      });
+    }
+
+    // Build query to find all submissions currently assigned to these judges
+    // This includes ALL submissions at this level/location, not just newly submitted ones
+    const submissionQuery = {
+      year: round.year,
+      level: round.level,
+      status: { $in: ['pending', 'submitted', 'under_review', 'evaluated'] } // Include all active statuses
+    };
+    
+    if (round.region) submissionQuery.region = round.region;
+    if (round.council) submissionQuery.council = round.council;
+
+    // Find all submissions that match the round criteria
+    const submissions = await Submission.find(submissionQuery);
+    
+    // Filter submissions to only include those assigned to the judges
+    // A submission is assigned to a judge if it matches their location criteria
+    const assignedSubmissions = submissions.filter(submission => {
+      return judges.some(judge => {
+        if (round.level === 'Council') {
+          return submission.region === judge.assignedRegion && 
+                 submission.council === judge.assignedCouncil;
+        } else if (round.level === 'Regional') {
+          return submission.region === judge.assignedRegion;
+        } else {
+          // National level - all judges see all submissions
+          return true;
+        }
+      });
+    });
+
+    // Link all assigned submissions to this round
+    const submissionIds = assignedSubmissions.map(s => s._id);
+    if (submissionIds.length > 0) {
+      await Submission.updateMany(
+        { _id: { $in: submissionIds } },
+        { roundId: round._id }
+      );
+    }
+
     round.status = 'active';
     await round.save();
 
-    // Log activation
+    // Log activation with submission count
     if (logger) {
       logger.logAdminAction(
         'Superadmin activated competition round',
@@ -546,7 +703,11 @@ router.post('/:id/activate', async (req, res) => {
         {
           roundId: req.params.id,
           year: round.year,
-          level: round.level
+          level: round.level,
+          region: round.region,
+          council: round.council,
+          judgesCount: judges.length,
+          submissionsCaptured: submissionIds.length
         },
         'success'
       ).catch(() => {});
@@ -554,7 +715,12 @@ router.post('/:id/activate', async (req, res) => {
 
     res.json({
       success: true,
-      round
+      round,
+      statistics: {
+        judgesCount: judges.length,
+        submissionsCaptured: submissionIds.length,
+        submissionsLinked: submissionIds
+      }
     });
   } catch (error) {
     console.error('Activate competition round error:', error);
@@ -586,31 +752,73 @@ router.post('/:id/close', async (req, res) => {
       });
     }
 
+    // Get all submissions linked to this round
+    const roundSubmissions = await Submission.find({ roundId: round._id })
+      .populate('teacherId', 'name email')
+      .sort({ averageScore: -1 }); // Sort by average score for leaderboard
+
+    if (roundSubmissions.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No submissions found for this round'
+      });
+    }
+
     // Check if all judges completed (if waitForAllJudges is enabled)
     if (round.waitForAllJudges) {
-      const completionStatus = await checkAllJudgesCompleted(
-        round.level,
-        round.year,
-        round.region,
-        round.council
-      );
+      // Get all judges assigned to this round
+      const judgeQuery = { role: 'judge', assignedLevel: round.level, status: 'active' };
+      if (round.level === 'Council' && round.region && round.council) {
+        judgeQuery.assignedRegion = round.region;
+        judgeQuery.assignedCouncil = round.council;
+      } else if (round.level === 'Regional' && round.region) {
+        judgeQuery.assignedRegion = round.region;
+      }
 
-      if (!completionStatus.allCompleted) {
+      const judges = await User.find(judgeQuery);
+      const roundStartTime = round.startTime || round.createdAt;
+
+      // Check if all submissions have been evaluated by all assigned judges
+      let pendingCount = 0;
+      for (const submission of roundSubmissions) {
+        const evaluations = await Evaluation.find({ 
+          submissionId: submission._id,
+          createdAt: { $gte: roundStartTime }
+        });
+        const evaluatedJudgeIds = evaluations.map(e => e.judgeId.toString());
+        
+        // Get judges assigned to this submission
+        const assignedJudges = judges.filter(judge => {
+          if (round.level === 'Council') {
+            return submission.region === judge.assignedRegion && 
+                   submission.council === judge.assignedCouncil;
+          } else if (round.level === 'Regional') {
+            return submission.region === judge.assignedRegion;
+          }
+          return true; // National level
+        });
+
+        const allJudgesEvaluated = assignedJudges.every(judge => 
+          evaluatedJudgeIds.includes(judge._id.toString())
+        );
+
+        if (!allJudgesEvaluated) {
+          pendingCount++;
+        }
+      }
+
+      if (pendingCount > 0) {
         return res.status(400).json({
           success: false,
-          message: `Cannot close round - ${completionStatus.pendingCount} submissions still pending evaluation`,
-          completionStatus
+          message: `Cannot close round - ${pendingCount} submissions still pending evaluation`,
+          pendingCount,
+          totalSubmissions: roundSubmissions.length
         });
       }
     }
 
-    // Advance submissions
-    const advanceResult = await advanceSubmissions(
-      round.level,
-      round.year,
-      round.region,
-      round.council
-    );
+    // Advance submissions based on leaderboard and quota
+    const advanceResult = await advanceSubmissionsForRound(round, roundSubmissions);
 
     if (!advanceResult.success) {
       return res.status(400).json({
@@ -641,7 +849,37 @@ router.post('/:id/close', async (req, res) => {
     round.closedBy = req.user._id;
     await round.save();
 
-    // Log round closure
+    // Get final statistics for reporting
+    const finalStats = {
+      totalSubmissions: roundSubmissions.length,
+      promoted: advanceResult.promoted,
+      eliminated: advanceResult.eliminated,
+      nextLevel: getNextLevel(round.level),
+      roundDuration: round.closedAt - round.startTime,
+      averageScore: roundSubmissions.length > 0 
+        ? roundSubmissions.reduce((sum, s) => sum + (s.averageScore || 0), 0) / roundSubmissions.length 
+        : 0
+    };
+
+    // Get judge statistics
+    const judgeQuery = { role: 'judge', assignedLevel: round.level, status: 'active' };
+    if (round.level === 'Council' && round.region && round.council) {
+      judgeQuery.assignedRegion = round.region;
+      judgeQuery.assignedCouncil = round.council;
+    } else if (round.level === 'Regional' && round.region) {
+      judgeQuery.assignedRegion = round.region;
+    }
+    const judges = await User.find(judgeQuery);
+    const roundStartTime = round.startTime || round.createdAt;
+    const totalEvaluations = await Evaluation.countDocuments({
+      submissionId: { $in: roundSubmissions.map(s => s._id) },
+      createdAt: { $gte: roundStartTime }
+    });
+
+    finalStats.totalJudges = judges.length;
+    finalStats.totalEvaluations = totalEvaluations;
+
+    // Log round closure with comprehensive details
     if (logger) {
       logger.logAdminAction(
         'Superadmin closed competition round',
@@ -651,8 +889,11 @@ router.post('/:id/close', async (req, res) => {
           roundId: req.params.id,
           year: round.year,
           level: round.level,
-          promoted: advanceResult.promoted,
-          eliminated: advanceResult.eliminated
+          region: round.region,
+          council: round.council,
+          statistics: finalStats,
+          promotedIds: advanceResult.promotedIds,
+          eliminatedIds: advanceResult.eliminatedIds
         },
         'success'
       ).catch(() => {});
@@ -661,7 +902,9 @@ router.post('/:id/close', async (req, res) => {
     res.json({
       success: true,
       round,
-      advancement: advanceResult
+      advancement: advanceResult,
+      statistics: finalStats,
+      leaderboard: advanceResult.leaderboard || []
     });
   } catch (error) {
     console.error('Close competition round error:', error);
@@ -739,6 +982,72 @@ router.post('/:id/extend', async (req, res) => {
   }
 });
 
+// @route   GET /api/competition-rounds/:id/leaderboard
+// @desc    Get leaderboard for a competition round (ranked by average rating)
+// @access  Private (Superadmin)
+router.get('/:id/leaderboard', async (req, res) => {
+  try {
+    const round = await CompetitionRound.findById(req.params.id);
+
+    if (!round) {
+      return res.status(404).json({
+        success: false,
+        message: 'Competition round not found'
+      });
+    }
+
+    // Get all submissions for this round
+    const submissions = await Submission.find({ roundId: round._id })
+      .populate('teacherId', 'name email')
+      .sort({ averageScore: -1 }); // Sort by average score descending
+
+    // Build leaderboard with ranking
+    const leaderboard = submissions.map((submission, index) => ({
+      rank: index + 1,
+      submissionId: submission._id.toString(),
+      teacherName: submission.teacherName || submission.teacherId?.name || 'N/A',
+      teacherEmail: submission.teacherId?.email || 'N/A',
+      subject: submission.subject,
+      class: submission.class,
+      category: submission.category,
+      region: submission.region,
+      council: submission.council,
+      school: submission.school,
+      averageScore: submission.averageScore || 0,
+      totalEvaluations: 0, // Will be populated below
+      status: submission.status
+    }));
+
+    // Get evaluation counts for each submission
+    for (let i = 0; i < leaderboard.length; i++) {
+      const evaluationCount = await Evaluation.countDocuments({
+        submissionId: leaderboard[i].submissionId
+      });
+      leaderboard[i].totalEvaluations = evaluationCount;
+    }
+
+    res.json({
+      success: true,
+      round: {
+        id: round._id.toString(),
+        year: round.year,
+        level: round.level,
+        status: round.status,
+        region: round.region,
+        council: round.council
+      },
+      leaderboard,
+      totalSubmissions: leaderboard.length
+    });
+  } catch (error) {
+    console.error('Get leaderboard error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
 // @route   GET /api/competition-rounds/:id/judge-progress
 // @desc    Get judge progress for a competition round
 // @access  Private (Superadmin)
@@ -759,18 +1068,8 @@ router.get('/:id/judge-progress', async (req, res) => {
     // This ensures we only count evaluations that happened during this round
     const roundStartTime = round.startTime || round.createdAt;
     
-    // Get all submissions at this level that haven't been promoted or eliminated
-    // Only include submissions that are still at this level (not approved/eliminated)
-    const submissionQuery = {
-      level: round.level,
-      year: round.year,
-      status: { $in: ['submitted', 'evaluated', 'under_review', 'pending'] }
-    };
-    
-    if (round.region) submissionQuery.region = round.region;
-    if (round.council) submissionQuery.council = round.council;
-
-    const submissions = await Submission.find(submissionQuery);
+    // Get all submissions linked to this round
+    const submissions = await Submission.find({ roundId: round._id });
 
     // Get all judges assigned to this level
     const judgeQuery = { role: 'judge', assignedLevel: round.level, status: 'active' };
@@ -858,6 +1157,141 @@ router.get('/:id/judge-progress', async (req, res) => {
     });
   } catch (error) {
     console.error('Get judge progress error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   GET /api/competition-rounds/:id/judge-progress/export
+// @desc    Export judge progress report as CSV
+// @access  Private (Superadmin)
+router.get('/:id/judge-progress/export', async (req, res) => {
+  try {
+    const round = await CompetitionRound.findById(req.params.id);
+
+    if (!round) {
+      return res.status(404).json({
+        success: false,
+        message: 'Competition round not found'
+      });
+    }
+
+    // Get round start time
+    const roundStartTime = round.startTime || round.createdAt;
+    
+    // Get all submissions for this round
+    const submissionQuery = {
+      roundId: round._id
+    };
+    
+    const submissions = await Submission.find(submissionQuery);
+
+    // Get all judges assigned to this round's level
+    const judgeQuery = { role: 'judge', assignedLevel: round.level, status: 'active' };
+    if (round.level === 'Council' && round.region && round.council) {
+      judgeQuery.assignedRegion = round.region;
+      judgeQuery.assignedCouncil = round.council;
+    } else if (round.level === 'Regional' && round.region) {
+      judgeQuery.assignedRegion = round.region;
+    }
+
+    const judges = await User.find(judgeQuery).select('name email username assignedLevel assignedRegion assignedCouncil');
+
+    // Calculate progress for each judge
+    const judgeProgress = await Promise.all(judges.map(async (judge) => {
+      const evaluations = await Evaluation.find({ 
+        judgeId: judge._id,
+        createdAt: { $gte: roundStartTime }
+      });
+      const evaluatedSubmissionIds = evaluations.map(e => e.submissionId.toString());
+      
+      const assignedSubmissions = submissions.filter(sub => {
+        if (round.level === 'Council') {
+          return sub.region === judge.assignedRegion && sub.council === judge.assignedCouncil;
+        } else if (round.level === 'Regional') {
+          return sub.region === judge.assignedRegion;
+        }
+        return true; // National level
+      });
+
+      const completed = assignedSubmissions.filter(sub => 
+        evaluatedSubmissionIds.includes(sub._id.toString())
+      ).length;
+
+      const total = assignedSubmissions.length;
+      const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+      return {
+        judgeName: judge.name,
+        judgeEmail: judge.email,
+        judgeUsername: judge.username,
+        assignedLevel: judge.assignedLevel || '',
+        assignedRegion: judge.assignedRegion || '',
+        assignedCouncil: judge.assignedCouncil || '',
+        totalAssigned: total,
+        completed: completed,
+        pending: total - completed,
+        percentage: percentage
+      };
+    }));
+
+    // Generate CSV
+    const csvHeaders = [
+      'Judge Name',
+      'Email',
+      'Username',
+      'Assigned Level',
+      'Assigned Region',
+      'Assigned Council',
+      'Total Assigned',
+      'Completed',
+      'Pending',
+      'Completion Percentage (%)'
+    ];
+
+    const csvRows = judgeProgress.map(judge => [
+      judge.judgeName,
+      judge.judgeEmail,
+      judge.judgeUsername,
+      judge.assignedLevel,
+      judge.assignedRegion,
+      judge.assignedCouncil,
+      judge.totalAssigned,
+      judge.completed,
+      judge.pending,
+      judge.percentage
+    ]);
+
+    // Convert to CSV format
+    const csvContent = [
+      csvHeaders.join(','),
+      ...csvRows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+    ].join('\n');
+
+    // Set response headers for CSV download
+    const filename = `judge-progress-round-${round._id}-${round.year}-${round.level}-${Date.now()}.csv`;
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    // Log export
+    if (logger) {
+      logger.logAdminAction(
+        'Superadmin exported judge progress CSV',
+        req.user._id,
+        req,
+        {
+          roundId: req.params.id,
+          judgesCount: judgeProgress.length
+        },
+        'success'
+      ).catch(() => {});
+    }
+
+    res.send(csvContent);
+  } catch (error) {
+    console.error('Export judge progress error:', error);
     res.status(500).json({
       success: false,
       message: error.message || 'Server error'
