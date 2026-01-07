@@ -226,6 +226,7 @@ router.post('/login', async (req, res) => {
 });
 
 // Rate limiter for OTP endpoints
+// Note: trustProxy is configured on the Express app (server.js), rate limiter uses it automatically
 const otpLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 10, // 10 requests per window
@@ -234,11 +235,11 @@ const otpLimiter = rateLimit({
     message: 'Too many OTP requests. Please try again later.'
   },
   standardHeaders: true,
-  legacyHeaders: false,
-  trustProxy: 1, // Trust only the first proxy (hosting provider) - prevents IP spoofing
+  legacyHeaders: false
 });
 
 // Stricter rate limiter for OTP verification (prevents brute force)
+// Note: trustProxy is configured on the Express app (server.js), rate limiter uses it automatically
 const otpVerifyLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 5, // 5 verification attempts per window
@@ -247,8 +248,7 @@ const otpVerifyLimiter = rateLimit({
     message: 'Too many verification attempts. Please try again later.'
   },
   standardHeaders: true,
-  legacyHeaders: false,
-  trustProxy: 1, // Trust only the first proxy (hosting provider) - prevents IP spoofing
+  legacyHeaders: false
 });
 
 // @route   POST /api/auth/register
@@ -574,6 +574,7 @@ router.post('/resend-otp', otpLimiter, async (req, res) => {
 });
 
 // Rate limiter for password reset requests
+// Note: trustProxy is configured on the Express app (server.js), rate limiter uses it automatically
 const passwordResetLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 5, // 5 password reset requests per window
@@ -582,8 +583,7 @@ const passwordResetLimiter = rateLimit({
     message: 'Too many password reset requests. Please try again later.'
   },
   standardHeaders: true,
-  legacyHeaders: false,
-  trustProxy: 1, // Trust only the first proxy (hosting provider) - prevents IP spoofing
+  legacyHeaders: false
 });
 
 // @route   POST /api/auth/forgot-password
