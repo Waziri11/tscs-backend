@@ -125,8 +125,8 @@ router.get('/', async (req, res) => {
       };
     }
 
-    // Log submission list view
-    await logger.logUserActivity(
+    // Log submission list view (non-blocking - don't let logging delay the response)
+    logger.logUserActivity(
       'User viewed submissions list',
       req.user._id,
       req,
@@ -135,7 +135,10 @@ router.get('/', async (req, res) => {
         filters: { level, status, year, category, subject, region, council },
         count: submissions.length
       }
-    );
+    ).catch(err => {
+      // Log error but don't fail the request
+      console.error('Error logging user activity:', err);
+    });
 
     res.json(response);
   } catch (error) {
