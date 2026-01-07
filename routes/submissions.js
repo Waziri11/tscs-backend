@@ -80,7 +80,13 @@ router.get('/', async (req, res) => {
     }
     
     // Apply additional filters (but don't override role-based filters)
-    if (status) query.status = status;
+    if (status) {
+      query.status = status;
+    } else if (req.user.role === 'judge') {
+      // Judges should not see promoted/eliminated submissions in their active assignment list
+      // Unless they explicitly filter for them via status parameter
+      query.status = { $nin: ['promoted', 'eliminated'] };
+    }
     if (year) query.year = parseInt(year);
     if (category) query.category = category;
     if (classLevel) query.class = classLevel;

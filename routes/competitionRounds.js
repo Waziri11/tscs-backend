@@ -234,7 +234,7 @@ const advanceSubmissionsForRound = async (round, submissions) => {
       await Submission.findByIdAndUpdate(sub._id, {
         level: nextLevel,
         status: 'promoted',
-        roundId: null // Clear roundId as submission moves to next level
+        roundId: round._id // Set roundId for historical tracking
       });
       promotedIds.push(sub._id.toString());
     }
@@ -242,7 +242,7 @@ const advanceSubmissionsForRound = async (round, submissions) => {
     for (const sub of toEliminate) {
       await Submission.findByIdAndUpdate(sub._id, {
         status: 'eliminated',
-        roundId: null // Clear roundId
+        roundId: round._id // Set roundId for historical tracking
       });
       eliminatedIds.push(sub._id.toString());
     }
@@ -652,49 +652,13 @@ router.post('/:id/activate', async (req, res) => {
       });
     }
 
-    // Build query to find all submissions currently assigned to these judges
-    // This includes ALL submissions at this level/location, not just newly submitted ones
-    const submissionQuery = {
-      year: round.year,
-      level: round.level,
-      status: { $in: ['pending', 'submitted', 'under_review', 'evaluated'] } // Include all active statuses
-    };
-    
-    if (round.region) submissionQuery.region = round.region;
-    if (round.council) submissionQuery.council = round.council;
-
-    // Find all submissions that match the round criteria
-    const submissions = await Submission.find(submissionQuery);
-    
-    // Filter submissions to only include those assigned to the judges
-    // A submission is assigned to a judge if it matches their location criteria
-    const assignedSubmissions = submissions.filter(submission => {
-      return judges.some(judge => {
-        if (round.level === 'Council') {
-          return submission.region === judge.assignedRegion && 
-                 submission.council === judge.assignedCouncil;
-        } else if (round.level === 'Regional') {
-          return submission.region === judge.assignedRegion;
-        } else {
-          // National level - all judges see all submissions
-          return true;
-        }
-      });
-    });
-
-    // Link all assigned submissions to this round
-    const submissionIds = assignedSubmissions.map(s => s._id);
-    if (submissionIds.length > 0) {
-      await Submission.updateMany(
-        { _id: { $in: submissionIds } },
-        { roundId: round._id }
-      );
-    }
+    // Note: Submissions are not captured here. The round will track submissions dynamically
+    // based on judge assignments. Submissions are independent of rounds.
 
     round.status = 'active';
     await round.save();
 
-    // Log activation with submission count
+    // Log activation
     if (logger) {
       logger.logAdminAction(
         'Superadmin activated competition round',
@@ -706,8 +670,7 @@ router.post('/:id/activate', async (req, res) => {
           level: round.level,
           region: round.region,
           council: round.council,
-          judgesCount: judges.length,
-          submissionsCaptured: submissionIds.length
+          judgesCount: judges.length
         },
         'success'
       ).catch(() => {});
@@ -716,11 +679,7 @@ router.post('/:id/activate', async (req, res) => {
     res.json({
       success: true,
       round,
-      statistics: {
-        judgesCount: judges.length,
-        submissionsCaptured: submissionIds.length,
-        submissionsLinked: submissionIds
-      }
+      message: 'Round activated. Judges can now evaluate submissions assigned to them.'
     });
   } catch (error) {
     console.error('Activate competition round error:', error);
@@ -752,10 +711,43 @@ router.post('/:id/close', async (req, res) => {
       });
     }
 
-    // Get all submissions linked to this round
-    const roundSubmissions = await Submission.find({ roundId: round._id })
-      .populate('teacherId', 'name email')
-      .sort({ averageScore: -1 }); // Sort by average score for leaderboard
+    // Get all submissions dynamically based on round's level/location
+    // Submissions are not dependent on rounds - we query them based on judge assignments
+    const submissionQuery = {
+      year: round.year,
+      level: round.level,
+      status: { $nin: ['promoted', 'eliminated'] } // Exclude already processed submissions
+    };
+    
+    if (round.region) submissionQuery.region = round.region;
+    if (round.council) submissionQuery.council = round.council;
+
+    const allSubmissions = await Submission.find(submissionQuery)
+      .populate('teacherId', 'name email');
+
+    // Get all judges assigned to this round's level and location
+    const judgeQuery = { role: 'judge', assignedLevel: round.level, status: 'active' };
+    if (round.level === 'Council' && round.region && round.council) {
+      judgeQuery.assignedRegion = round.region;
+      judgeQuery.assignedCouncil = round.council;
+    } else if (round.level === 'Regional' && round.region) {
+      judgeQuery.assignedRegion = round.region;
+    }
+
+    const judges = await User.find(judgeQuery);
+
+    // Filter submissions to only include those assigned to the judges
+    const roundSubmissions = allSubmissions.filter(submission => {
+      return judges.some(judge => {
+        if (round.level === 'Council') {
+          return submission.region === judge.assignedRegion && 
+                 submission.council === judge.assignedCouncil;
+        } else if (round.level === 'Regional') {
+          return submission.region === judge.assignedRegion;
+        }
+        return true; // National level
+      });
+    }).sort((a, b) => (b.averageScore || 0) - (a.averageScore || 0)); // Sort by average score for leaderboard
 
     if (roundSubmissions.length === 0) {
       return res.status(400).json({
@@ -766,16 +758,6 @@ router.post('/:id/close', async (req, res) => {
 
     // Check if all judges completed (if waitForAllJudges is enabled)
     if (round.waitForAllJudges) {
-      // Get all judges assigned to this round
-      const judgeQuery = { role: 'judge', assignedLevel: round.level, status: 'active' };
-      if (round.level === 'Council' && round.region && round.council) {
-        judgeQuery.assignedRegion = round.region;
-        judgeQuery.assignedCouncil = round.council;
-      } else if (round.level === 'Regional' && round.region) {
-        judgeQuery.assignedRegion = round.region;
-      }
-
-      const judges = await User.find(judgeQuery);
       const roundStartTime = round.startTime || round.createdAt;
 
       // Check if all submissions have been evaluated by all assigned judges
@@ -996,10 +978,53 @@ router.get('/:id/leaderboard', async (req, res) => {
       });
     }
 
-    // Get all submissions for this round
-    const submissions = await Submission.find({ roundId: round._id })
-      .populate('teacherId', 'name email')
-      .sort({ averageScore: -1 }); // Sort by average score descending
+    // Get submissions for this round
+    // For closed rounds, use roundId (set when round closed)
+    // For active rounds, query dynamically based on judge assignments
+    let submissions;
+    if (round.status === 'closed') {
+      // Closed rounds: show submissions that were evaluated in this round
+      submissions = await Submission.find({ roundId: round._id })
+        .populate('teacherId', 'name email')
+        .sort({ averageScore: -1 });
+    } else {
+      // Active rounds: query dynamically based on judge assignments
+      const submissionQuery = {
+        year: round.year,
+        level: round.level,
+        status: { $nin: ['promoted', 'eliminated'] }
+      };
+      
+      if (round.region) submissionQuery.region = round.region;
+      if (round.council) submissionQuery.council = round.council;
+
+      const allSubmissions = await Submission.find(submissionQuery)
+        .populate('teacherId', 'name email');
+
+      // Get judges assigned to this round
+      const judgeQuery = { role: 'judge', assignedLevel: round.level, status: 'active' };
+      if (round.level === 'Council' && round.region && round.council) {
+        judgeQuery.assignedRegion = round.region;
+        judgeQuery.assignedCouncil = round.council;
+      } else if (round.level === 'Regional' && round.region) {
+        judgeQuery.assignedRegion = round.region;
+      }
+
+      const judges = await User.find(judgeQuery);
+
+      // Filter submissions assigned to judges
+      submissions = allSubmissions.filter(submission => {
+        return judges.some(judge => {
+          if (round.level === 'Council') {
+            return submission.region === judge.assignedRegion && 
+                   submission.council === judge.assignedCouncil;
+          } else if (round.level === 'Regional') {
+            return submission.region === judge.assignedRegion;
+          }
+          return true; // National level
+        });
+      }).sort((a, b) => (b.averageScore || 0) - (a.averageScore || 0));
+    }
 
     // Build leaderboard with ranking
     const leaderboard = submissions.map((submission, index) => ({
@@ -1068,10 +1093,20 @@ router.get('/:id/judge-progress', async (req, res) => {
     // This ensures we only count evaluations that happened during this round
     const roundStartTime = round.startTime || round.createdAt;
     
-    // Get all submissions linked to this round
-    const submissions = await Submission.find({ roundId: round._id });
+    // Get all submissions dynamically based on round's level/location
+    // Submissions are not dependent on rounds - we query them based on judge assignments
+    const submissionQuery = {
+      year: round.year,
+      level: round.level,
+      status: { $nin: ['promoted', 'eliminated'] } // Exclude already processed submissions
+    };
+    
+    if (round.region) submissionQuery.region = round.region;
+    if (round.council) submissionQuery.council = round.council;
 
-    // Get all judges assigned to this level
+    const allSubmissions = await Submission.find(submissionQuery);
+
+    // Get all judges assigned to this round's level and location
     const judgeQuery = { role: 'judge', assignedLevel: round.level, status: 'active' };
     if (round.level === 'Council' && round.region && round.council) {
       judgeQuery.assignedRegion = round.region;
@@ -1080,7 +1115,23 @@ router.get('/:id/judge-progress', async (req, res) => {
       judgeQuery.assignedRegion = round.region;
     }
 
-    const judges = await User.find(judgeQuery).select('name email username assignedLevel assignedRegion assignedCouncil');
+    const judges = await User.find(judgeQuery).select('_id assignedLevel assignedRegion assignedCouncil');
+
+    // Filter submissions to only include those assigned to the judges
+    const submissions = allSubmissions.filter(submission => {
+      return judges.some(judge => {
+        if (round.level === 'Council') {
+          return submission.region === judge.assignedRegion && 
+                 submission.council === judge.assignedCouncil;
+        } else if (round.level === 'Regional') {
+          return submission.region === judge.assignedRegion;
+        }
+        return true; // National level
+      });
+    });
+
+    // Get full judge details for CSV export
+    const judgesForExport = await User.find(judgeQuery).select('name email username assignedLevel assignedRegion assignedCouncil');
 
     // Calculate progress for each judge
     const judgeProgress = await Promise.all(judges.map(async (judge) => {
@@ -1130,7 +1181,7 @@ router.get('/:id/judge-progress', async (req, res) => {
     // Calculate overall statistics
     // Only count evaluations created AFTER the round started
     const totalSubmissions = submissions.length;
-    const totalJudges = judges.length;
+    const totalJudges = judgesForExport.length;
     const totalEvaluations = await Evaluation.countDocuments({
       submissionId: { $in: submissions.map(s => s._id) },
       createdAt: { $gte: roundStartTime }
