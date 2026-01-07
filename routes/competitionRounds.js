@@ -843,15 +843,7 @@ router.post('/:id/close', async (req, res) => {
         : 0
     };
 
-    // Get judge statistics
-    const judgeQuery = { role: 'judge', assignedLevel: round.level, status: 'active' };
-    if (round.level === 'Council' && round.region && round.council) {
-      judgeQuery.assignedRegion = round.region;
-      judgeQuery.assignedCouncil = round.council;
-    } else if (round.level === 'Regional' && round.region) {
-      judgeQuery.assignedRegion = round.region;
-    }
-    const judges = await User.find(judgeQuery);
+    // Get judge statistics (reuse judges variable already fetched above)
     const roundStartTime = round.startTime || round.createdAt;
     const totalEvaluations = await Evaluation.countDocuments({
       submissionId: { $in: roundSubmissions.map(s => s._id) },
