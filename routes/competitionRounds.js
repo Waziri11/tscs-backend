@@ -1107,7 +1107,8 @@ router.get('/:id/judge-progress', async (req, res) => {
       judgeQuery.assignedRegion = round.region;
     }
 
-    const judges = await User.find(judgeQuery).select('_id assignedLevel assignedRegion assignedCouncil');
+    // Get full judge details (including name, email, username) for both progress calculation and export
+    const judges = await User.find(judgeQuery).select('_id name email username assignedLevel assignedRegion assignedCouncil');
 
     // Filter submissions to only include those assigned to the judges
     const submissions = allSubmissions.filter(submission => {
@@ -1121,9 +1122,6 @@ router.get('/:id/judge-progress', async (req, res) => {
         return true; // National level
       });
     });
-
-    // Get full judge details for CSV export
-    const judgesForExport = await User.find(judgeQuery).select('name email username assignedLevel assignedRegion assignedCouncil');
 
     // Calculate progress for each judge
     const judgeProgress = await Promise.all(judges.map(async (judge) => {
@@ -1173,7 +1171,7 @@ router.get('/:id/judge-progress', async (req, res) => {
     // Calculate overall statistics
     // Only count evaluations created AFTER the round started
     const totalSubmissions = submissions.length;
-    const totalJudges = judgesForExport.length;
+    const totalJudges = judges.length;
     const totalEvaluations = await Evaluation.countDocuments({
       submissionId: { $in: submissions.map(s => s._id) },
       createdAt: { $gte: roundStartTime }
