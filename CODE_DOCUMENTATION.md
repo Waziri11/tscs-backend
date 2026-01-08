@@ -399,6 +399,8 @@ POST /api/auth/login
 | DELETE | `/:id` | Delete round |
 | POST | `/:id/close` | Close round |
 | POST | `/:id/advance` | Advance submissions to next round |
+| GET | `/:id/judge-progress` | Get judge progress for a round |
+| GET | `/:id/judge-progress/export` | Export judge progress as CSV |
 
 ### Evaluation Routes (`/api/evaluations`)
 **File:** `routes/evaluations.js`
@@ -724,6 +726,22 @@ npm run seed:landing   # Seed landing page content
 
 ---
 
-**Last Updated:** 2024
-**Version:** 1.0.0
+---
+
+## Recent Updates (2024-2025)
+
+### Judge Progress Export
+- Added CSV export endpoint for judge progress
+- Includes judge details, location, assigned/completed/pending counts, and progress percentage
+- Accessible via `/api/competition-rounds/:id/judge-progress/export`
+
+### Development Workflow
+- Updated root `package.json` to wait for backend before starting frontend
+- Uses `wait-on` to prevent Vite proxy ECONNREFUSED errors
+- Backend starts first, then frontend waits for port 5000
+
+---
+
+**Last Updated:** January 2025
+**Version:** 1.1.0
 
