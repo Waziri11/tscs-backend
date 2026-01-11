@@ -1108,7 +1108,7 @@ router.get('/:id/judge-progress', async (req, res) => {
     }
 
     // Get full judge details (including name, email, username) for both progress calculation and export
-    const judges = await User.find(judgeQuery).select('_id name email username assignedLevel assignedRegion assignedCouncil');
+    const judges = await User.find(judgeQuery).select('_id name email username assignedLevel assignedRegion assignedCouncil areasOfFocus');
 
     // Filter submissions to only include those assigned to the judges
     const submissions = allSubmissions.filter(submission => {
@@ -1134,12 +1134,22 @@ router.get('/:id/judge-progress', async (req, res) => {
       
       const assignedSubmissions = submissions.filter(sub => {
         // Check if judge is assigned to this submission's location
+        let locationMatch = false;
         if (round.level === 'Council') {
-          return sub.region === judge.assignedRegion && sub.council === judge.assignedCouncil;
+          locationMatch = sub.region === judge.assignedRegion && sub.council === judge.assignedCouncil;
         } else if (round.level === 'Regional') {
-          return sub.region === judge.assignedRegion;
+          locationMatch = sub.region === judge.assignedRegion;
+        } else {
+          locationMatch = true; // National level
         }
-        return true; // National level - all judges see all
+        
+        // Check if judge is assigned to this submission's area of focus
+        let areaMatch = true;
+        if (judge.areasOfFocus && judge.areasOfFocus.length > 0) {
+          areaMatch = judge.areasOfFocus.includes(sub.areaOfFocus);
+        }
+        
+        return locationMatch && areaMatch;
       });
 
       // Count completed: submissions evaluated by this judge AFTER round started
@@ -1238,7 +1248,7 @@ router.get('/:id/judge-progress/export', async (req, res) => {
       judgeQuery.assignedRegion = round.region;
     }
 
-    const judges = await User.find(judgeQuery).select('name email username assignedLevel assignedRegion assignedCouncil');
+    const judges = await User.find(judgeQuery).select('name email username assignedLevel assignedRegion assignedCouncil areasOfFocus');
 
     // Calculate progress for each judge
     const judgeProgress = await Promise.all(judges.map(async (judge) => {
@@ -1249,12 +1259,23 @@ router.get('/:id/judge-progress/export', async (req, res) => {
       const evaluatedSubmissionIds = evaluations.map(e => e.submissionId.toString());
       
       const assignedSubmissions = submissions.filter(sub => {
+        // Check if judge is assigned to this submission's location
+        let locationMatch = false;
         if (round.level === 'Council') {
-          return sub.region === judge.assignedRegion && sub.council === judge.assignedCouncil;
+          locationMatch = sub.region === judge.assignedRegion && sub.council === judge.assignedCouncil;
         } else if (round.level === 'Regional') {
-          return sub.region === judge.assignedRegion;
+          locationMatch = sub.region === judge.assignedRegion;
+        } else {
+          locationMatch = true; // National level
         }
-        return true; // National level
+        
+        // Check if judge is assigned to this submission's area of focus
+        let areaMatch = true;
+        if (judge.areasOfFocus && judge.areasOfFocus.length > 0) {
+          areaMatch = judge.areasOfFocus.includes(sub.areaOfFocus);
+        }
+        
+        return locationMatch && areaMatch;
       });
 
       const completed = assignedSubmissions.filter(sub => 

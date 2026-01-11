@@ -74,6 +74,11 @@ router.get('/', async (req, res) => {
         // No location filter needed
       }
 
+      // Filter by areas of focus if judge has any assigned
+      if (req.user.areasOfFocus && req.user.areasOfFocus.length > 0) {
+        query.areaOfFocus = { $in: req.user.areasOfFocus };
+      }
+
     } else if (req.user.role === 'teacher') {
       // Teachers only see their own submissions
       query.teacherId = req.user._id;
@@ -119,7 +124,8 @@ router.get('/', async (req, res) => {
         judgeAssignment: {
           assignedLevel: req.user.assignedLevel,
           assignedRegion: req.user.assignedRegion,
-          assignedCouncil: req.user.assignedCouncil
+          assignedCouncil: req.user.assignedCouncil,
+          areasOfFocus: req.user.areasOfFocus
         },
         query: query
       };

@@ -93,6 +93,10 @@ const userSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  areasOfFocus: {
+    type: [String],
+    default: []
+  },
   // Admin specific fields
   department: {
     type: String,
