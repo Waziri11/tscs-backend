@@ -44,32 +44,34 @@ if (process.env.NODE_ENV === 'development') {
   allowedOrigins.push(/^http:\/\/127\.0\.0\.1:\d+$/);
 }
 
-app.use(cors({
-  origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
+// app.use(cors({
+//   origin: function (origin, callback) {
+//     // Allow requests with no origin (like mobile apps or curl requests)
+//     if (!origin) return callback(null, true);
     
-    // Check if origin matches allowed origins
-    const isAllowed = allowedOrigins.some(allowed => {
-      if (typeof allowed === 'string') {
-        return origin === allowed;
-      } else if (allowed instanceof RegExp) {
-        return allowed.test(origin);
-      }
-      return false;
-    });
+//     // Check if origin matches allowed origins
+//     const isAllowed = allowedOrigins.some(allowed => {
+//       if (typeof allowed === 'string') {
+//         return origin === allowed;
+//       } else if (allowed instanceof RegExp) {
+//         return allowed.test(origin);
+//       }
+//       return false;
+//     });
     
-    if (isAllowed) {
-      callback(null, true);
-    } else {
-      if (process.env.NODE_ENV === 'development') {
-        console.warn(`CORS blocked origin: ${origin}`);
-      }
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  credentials: true
-}));
+//     if (isAllowed) {
+//       callback(null, true);
+//     } else {
+//       if (process.env.NODE_ENV === 'development') {
+//         console.warn(`CORS blocked origin: ${origin}`);
+//       }
+//       callback(new Error('Not allowed by CORS'));
+//     }
+//   },
+//   credentials: true
+// }));
+
+app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
