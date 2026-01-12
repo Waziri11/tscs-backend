@@ -108,6 +108,23 @@ const submissionSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'CompetitionRound',
     default: null
+  },
+  disqualified: {
+    type: Boolean,
+    default: false
+  },
+  disqualificationReason: {
+    type: String,
+    trim: true
+  },
+  disqualifiedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
+  disqualifiedAt: {
+    type: Date,
+    default: null
   }
 }, {
   timestamps: true

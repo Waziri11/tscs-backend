@@ -3,6 +3,8 @@ const Submission = require('../models/Submission');
 const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
 const notificationService = require('../services/notificationService');
+const { assignJudgeToSubmission } = require('../utils/judgeAssignment');
+const User = require('../models/User');
 
 const router = express.Router();
 
@@ -244,6 +246,41 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), async (req, res) =
       'success'
     );
 
+    // Assign judge to submission (for Council and Regional levels only)
+    let assignmentResult = null;
+    if (submission.level === 'Council' || submission.level === 'Regional') {
+      assignmentResult = await assignJudgeToSubmission(submission);
+      
+      if (assignmentResult.success && assignmentResult.assignment) {
+        // Notify admins and superadmins about the assignment
+        const admins = await User.find({ 
+          role: { $in: ['admin', 'superadmin'] },
+          status: 'active'
+        }).select('_id');
+        
+        for (const admin of admins) {
+          notificationService.createNotification({
+            userId: admin._id,
+            type: 'system_announcement',
+            title: 'New Submission Assignment',
+            message: `Submission from ${submission.teacherName} (${submission.subject} - ${submission.areaOfFocus}) has been assigned to Judge ${assignmentResult.judge.name} for ${submission.level} level evaluation.`,
+            metadata: {
+              submissionId: submission._id.toString(),
+              judgeId: assignmentResult.judge._id.toString(),
+              judgeName: assignmentResult.judge.name,
+              teacherName: submission.teacherName,
+              subject: submission.subject,
+              areaOfFocus: submission.areaOfFocus,
+              level: submission.level
+            },
+            isSystem: true
+          }).catch(error => {
+            console.error('Error creating admin notification:', error);
+          });
+        }
+      }
+    }
+
     // Create notification for teacher when submission is successful
     if (req.user.role === 'teacher' || submissionData.teacherId) {
       const teacherId = req.user.role === 'teacher' ? req.user._id : submissionData.teacherId;
@@ -261,10 +298,20 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), async (req, res) =
       });
     }
 
-    res.status(201).json({
+    // Include assignment info in response
+    const responseData = {
       success: true,
       submission
-    });
+    };
+
+    if (assignmentResult && assignmentResult.assignment) {
+      responseData.assignment = {
+        judgeId: assignmentResult.judge._id,
+        judgeName: assignmentResult.judge.name
+      };
+    }
+
+    res.status(201).json(responseData);
   } catch (error) {
     console.error('Create submission error:', error);
     res.status(500).json({

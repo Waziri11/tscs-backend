@@ -272,21 +272,42 @@ class NotificationService {
 
   /**
    * Handle judge assignment (Email enabled)
+   * Supports two formats:
+   * 1. Round assignment: { judgeId, roundName, level }
+   * 2. Submission assignment: { userId, submissionId, teacherName, subject, areaOfFocus, level, region, council }
    * @param {Object} data - Assignment data
    */
   async handleJudgeAssigned(data) {
-    const { judgeId, roundName, level } = data;
+    // Check if this is a submission assignment (new format)
+    if (data.submissionId) {
+      const { userId, submissionId, teacherName, subject, areaOfFocus, level, region, council } = data;
+      const location = level === 'Council' ? `${region} - ${council}` : region;
+      
+      const notification = await this.createNotification({
+        userId,
+        type: 'judge_assigned',
+        title: 'New Submission Assigned',
+        message: `A new submission has been assigned to you for evaluation: ${subject} - ${areaOfFocus} (${location}).`,
+        metadata: { submissionId, teacherName, subject, areaOfFocus, level, region, council }
+      });
 
-    const notification = await this.createNotification({
-      userId: judgeId,
-      type: 'judge_assigned',
-      title: 'Judge Assignment',
-      message: `You have been assigned as a judge for ${roundName} (${level} level).`,
-      metadata: { roundName, level }
-    });
+      // Send email notification
+      await this.sendEmailNotification(userId, notification);
+    } else {
+      // Legacy format: round assignment
+      const { judgeId, roundName, level } = data;
 
-    // Send email notification
-    await this.sendEmailNotification(judgeId, notification);
+      const notification = await this.createNotification({
+        userId: judgeId,
+        type: 'judge_assigned',
+        title: 'Judge Assignment',
+        message: `You have been assigned as a judge for ${roundName} (${level} level).`,
+        metadata: { roundName, level }
+      });
+
+      // Send email notification
+      await this.sendEmailNotification(judgeId, notification);
+    }
   }
 
   /**
