@@ -191,11 +191,13 @@ const advanceSubmissionsForRound = async (round, submissions) => {
     const quota = quotaDoc ? quotaDoc.quota : 0;
 
     // Group submissions by location for quota application
+    // At council level, group by location AND area of focus for top 3 per area
     const groups = {};
     submissions.forEach(sub => {
       let locationKey;
       if (round.level === 'Council') {
-        locationKey = `${sub.region}::${sub.council}`;
+        // Group by region, council, AND area of focus for top 3 per area
+        locationKey = `${sub.region}::${sub.council}::${sub.areaOfFocus}`;
       } else if (round.level === 'Regional') {
         locationKey = sub.region;
       } else {
