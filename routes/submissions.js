@@ -242,6 +242,42 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), async (req, res) =
       teacherId: req.user.role === 'teacher' ? req.user._id : req.body.teacherId || req.user._id
     };
 
+    // Validate required fields
+    if (!submissionData.areaOfFocus) {
+      return res.status(400).json({
+        success: false,
+        message: 'Area of focus is required'
+      });
+    }
+
+    if (!submissionData.year) {
+      return res.status(400).json({
+        success: false,
+        message: 'Year is required'
+      });
+    }
+
+    // Check if teacher already has a submission in the same area of focus for the same year
+    const existingSubmission = await Submission.findOne({
+      teacherId: submissionData.teacherId,
+      areaOfFocus: submissionData.areaOfFocus,
+      year: submissionData.year
+    });
+
+    if (existingSubmission) {
+      return res.status(400).json({
+        success: false,
+        message: `You have already submitted an entry for "${submissionData.areaOfFocus}" in ${submissionData.year}. Each teacher can only submit one entry per area of focus per year.`,
+        existingSubmission: {
+          id: existingSubmission._id,
+          areaOfFocus: existingSubmission.areaOfFocus,
+          year: existingSubmission.year,
+          status: existingSubmission.status,
+          level: existingSubmission.level
+        }
+      });
+    }
+
     const submission = await Submission.create(submissionData);
 
     // Log submission creation
