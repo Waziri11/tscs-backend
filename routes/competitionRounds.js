@@ -760,32 +760,52 @@ router.post('/:id/close', async (req, res) => {
     if (round.waitForAllJudges) {
       const roundStartTime = round.startTime || round.createdAt;
 
-      // Check if all submissions have been evaluated by all assigned judges
+      // Check if all submissions have been evaluated
       let pendingCount = 0;
       for (const submission of roundSubmissions) {
+        // Skip disqualified submissions
+        if (submission.disqualified) continue;
+
         const evaluations = await Evaluation.find({ 
           submissionId: submission._id,
           createdAt: { $gte: roundStartTime }
         });
         const evaluatedJudgeIds = evaluations.map(e => e.judgeId.toString());
         
-        // Get judges assigned to this submission
-        const assignedJudges = judges.filter(judge => {
-          if (round.level === 'Council') {
-            return submission.region === judge.assignedRegion && 
-                   submission.council === judge.assignedCouncil;
-          } else if (round.level === 'Regional') {
-            return submission.region === judge.assignedRegion;
+        if (round.level === 'Council' || round.level === 'Regional') {
+          // 1-to-1 judging: Check if the assigned judge has evaluated
+          const assignment = await SubmissionAssignment.findOne({ submissionId: submission._id });
+          if (!assignment) {
+            pendingCount++;
+            continue;
           }
-          return true; // National level
-        });
+          
+          const assignedJudgeEvaluated = evaluatedJudgeIds.includes(assignment.judgeId.toString());
+          if (!assignedJudgeEvaluated) {
+            pendingCount++;
+          }
+        } else {
+          // National level: 1-to-many judging - Check if all judges (by area of focus) have evaluated
+          const assignedJudges = judges.filter(judge => {
+            // National judges are assigned by area of focus
+            if (judge.areasOfFocus && judge.areasOfFocus.length > 0) {
+              return judge.areasOfFocus.includes(submission.areaOfFocus);
+            }
+            return false; // Judge has no areas of focus assigned
+          });
 
-        const allJudgesEvaluated = assignedJudges.every(judge => 
-          evaluatedJudgeIds.includes(judge._id.toString())
-        );
+          if (assignedJudges.length === 0) {
+            // No judges assigned to this area of focus - skip
+            continue;
+          }
 
-        if (!allJudgesEvaluated) {
-          pendingCount++;
+          const allJudgesEvaluated = assignedJudges.every(judge => 
+            evaluatedJudgeIds.includes(judge._id.toString())
+          );
+
+          if (!allJudgesEvaluated) {
+            pendingCount++;
+          }
         }
       }
 
