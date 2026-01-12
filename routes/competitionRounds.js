@@ -1130,18 +1130,35 @@ router.get('/:id/judge-progress', async (req, res) => {
     // Get full judge details (including name, email, username) for both progress calculation and export
     const judges = await User.find(judgeQuery).select('_id name email username assignedLevel assignedRegion assignedCouncil areasOfFocus');
 
-    // Filter submissions to only include those assigned to the judges
-    const submissions = allSubmissions.filter(submission => {
-      return judges.some(judge => {
-        if (round.level === 'Council') {
-          return submission.region === judge.assignedRegion && 
-                 submission.council === judge.assignedCouncil;
-        } else if (round.level === 'Regional') {
-          return submission.region === judge.assignedRegion;
-        }
-        return true; // National level
+    // Get all submissions for this round (used for overall stats)
+    let submissions;
+    if (round.level === 'Council' || round.level === 'Regional') {
+      // For Council/Regional: Get submissions that have assignments
+      const assignments = await SubmissionAssignment.find({
+        level: round.level,
+        ...(round.level === 'Council' && round.region && round.council ? {
+          region: round.region,
+          council: round.council
+        } : round.level === 'Regional' && round.region ? {
+          region: round.region
+        } : {})
+      }).select('submissionId');
+      
+      const assignedSubmissionIds = assignments.map(a => a.submissionId);
+      submissions = allSubmissions.filter(sub => 
+        assignedSubmissionIds.some(id => id.toString() === sub._id.toString())
+      );
+    } else {
+      // National level: Filter by judges' areas of focus
+      submissions = allSubmissions.filter(submission => {
+        return judges.some(judge => {
+          if (judge.areasOfFocus && judge.areasOfFocus.length > 0) {
+            return judge.areasOfFocus.includes(submission.areaOfFocus);
+          }
+          return false;
+        });
       });
-    });
+    }
 
     // Calculate progress for each judge
     const judgeProgress = await Promise.all(judges.map(async (judge) => {
@@ -1152,25 +1169,27 @@ router.get('/:id/judge-progress', async (req, res) => {
       });
       const evaluatedSubmissionIds = evaluations.map(e => e.submissionId.toString());
       
-      const assignedSubmissions = submissions.filter(sub => {
-        // Check if judge is assigned to this submission's location
-        let locationMatch = false;
-        if (round.level === 'Council') {
-          locationMatch = sub.region === judge.assignedRegion && sub.council === judge.assignedCouncil;
-        } else if (round.level === 'Regional') {
-          locationMatch = sub.region === judge.assignedRegion;
-        } else {
-          locationMatch = true; // National level
-        }
+      let assignedSubmissions;
+      if (round.level === 'Council' || round.level === 'Regional') {
+        // For Council/Regional: Get only submissions assigned to this judge
+        const assignments = await SubmissionAssignment.find({
+          judgeId: judge._id,
+          level: round.level
+        }).select('submissionId');
         
-        // Check if judge is assigned to this submission's area of focus
-        let areaMatch = true;
-        if (judge.areasOfFocus && judge.areasOfFocus.length > 0) {
-          areaMatch = judge.areasOfFocus.includes(sub.areaOfFocus);
-        }
-        
-        return locationMatch && areaMatch;
-      });
+        const assignedIds = assignments.map(a => a.submissionId.toString());
+        assignedSubmissions = submissions.filter(sub => 
+          assignedIds.includes(sub._id.toString())
+        );
+      } else {
+        // National level: Filter by judge's areas of focus
+        assignedSubmissions = submissions.filter(sub => {
+          if (judge.areasOfFocus && judge.areasOfFocus.length > 0) {
+            return judge.areasOfFocus.includes(sub.areaOfFocus);
+          }
+          return false;
+        });
+      }
 
       // Count completed: submissions evaluated by this judge AFTER round started
       const completed = assignedSubmissions.filter(sub => 
