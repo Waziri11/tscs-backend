@@ -24,7 +24,10 @@ The TSCS (Teacher Submission Competition System) backend is a Node.js/Express RE
 - User authentication and authorization (Teachers, Judges, Admins, Superadmins)
 - Competition and round management
 - Submission handling (lesson plans and videos)
-- Evaluation and scoring system
+- Evaluation and scoring system with 1-to-1 and 1-to-many judging models
+- Judge assignment system (round-robin for Council/Regional levels)
+- Submission disqualification system
+- Leaderboard generation (per area of focus and overall)
 - Quota management
 - Email notifications
 - System logging
@@ -154,6 +157,7 @@ tscs-backend/
 │   ├── Competition.js      # Competition schema
 │   ├── CompetitionRound.js # Round schema
 │   ├── Submission.js       # Submission schema
+│   ├── SubmissionAssignment.js # Judge-submission assignments (1-to-1)
 │   ├── Evaluation.js       # Evaluation schema
 │   ├── Quota.js            # Quota schema
 │   ├── TieBreaking.js      # Tie-breaking schema
@@ -184,7 +188,8 @@ tscs-backend/
 │   ├── errorHandler.js     # Error handling utilities
 │   ├── logger.js           # Logging utilities
 │   ├── notifications.js    # Notification helpers
-│   └── roundScheduler.js   # Automated round processing
+│   ├── roundScheduler.js   # Automated round processing
+│   └── judgeAssignment.js  # Round-robin judge assignment logic
 ├── validation/
 │   └── quotas.js           # Quota validation schemas
 ├── scripts/
@@ -215,12 +220,11 @@ tscs-backend/
 - `gender` (Enum: 'Male', 'Female')
 - `role` (Enum: 'teacher', 'judge', 'admin', 'superadmin')
 - `status` (Enum: 'active', 'inactive', 'suspended')
-- `assignedLevel` (String, for judges)
-- `assignedCategory` (String, for judges)
-- `assignedClass` (String, for judges)
-- `assignedSubject` (String, for judges)
+- `assignedLevel` (String, Enum: 'Council', 'Regional', 'National', for judges)
 - `assignedRegion` (String, for judges)
 - `assignedCouncil` (String, for judges)
+- `areasOfFocus` (Array of Strings, for judges - multiple areas allowed)
+- `department` (String, for admins)
 - `location` (Object: region, council)
 - `createdAt`, `updatedAt` (timestamps)
 
@@ -250,33 +254,73 @@ tscs-backend/
 **File:** `models/Submission.js`
 
 **Fields:**
-- `teacher` (ObjectId, ref: User, required)
-- `round` (ObjectId, ref: CompetitionRound, required)
+- `teacherId` (ObjectId, ref: User, required)
+- `roundId` (ObjectId, ref: CompetitionRound, optional)
+- `year` (Number, required)
+- `level` (String: 'Council', 'Regional', 'National', required)
+- `region` (String, required)
+- `council` (String, optional - for Council level)
 - `subject` (String, required)
 - `class` (String, required)
 - `category` (String, required)
+- `areaOfFocus` (String, required)
+- `school` (String, required)
+- `teacherName` (String, required)
 - `lessonPlanFileName` (String)
 - `lessonPlanFileUrl` (String)
 - `videoLink` (String, Google Drive link)
 - `videoFileName` (String)
 - `videoFileUrl` (String)
 - `preferredLink` (String: 'Google Drive link', 'Video upload')
-- `status` (String: 'pending', 'evaluated', 'promoted', 'eliminated')
-- `score` (Number)
+- `status` (String: 'submitted', 'under_review', 'evaluated', 'promoted', 'eliminated')
+- `averageScore` (Number, calculated from evaluations)
+- `assignedJudgeId` (ObjectId, ref: User, for Council/Regional levels)
+- `isDisqualified` (Boolean, default: false)
+- `disqualificationReason` (String)
+- `disqualifiedBy` (ObjectId, ref: User)
+- `disqualifiedAt` (Date)
 - `evaluations` (Array of ObjectIds, ref: Evaluation)
 - `metadata` (Object)
+- `createdAt`, `updatedAt` (timestamps)
+
+### SubmissionAssignment Model
+**File:** `models/SubmissionAssignment.js`
+
+**Purpose:** Tracks 1-to-1 judge-submission assignments for Council and Regional levels. National level uses 1-to-many judging (no assignments needed).
+
+**Fields:**
+- `submissionId` (ObjectId, ref: Submission, required, unique)
+- `judgeId` (ObjectId, ref: User, required)
+- `level` (String, Enum: 'Council', 'Regional', required)
+- `region` (String, required)
+- `council` (String, optional - for Council level)
+- `assignedAt` (Date, default: Date.now)
+- `judgeNotified` (Boolean, default: false)
+- `createdAt`, `updatedAt` (timestamps)
+
+**Indexes:**
+- `{ judgeId: 1, level: 1 }` - Efficient querying by judge and level
+- `{ submissionId: 1, judgeId: 1 }` - Ensure unique assignment
+- `{ level: 1, region: 1, council: 1 }` - Location-based queries
 
 ### Evaluation Model
 **File:** `models/Evaluation.js`
 
 **Fields:**
-- `submission` (ObjectId, ref: Submission, required)
-- `judge` (ObjectId, ref: User, required)
-- `score` (Number, required, 0-100)
-- `comments` (String)
-- `criteria` (Object: breakdown of scores)
-- `status` (String: 'pending', 'completed')
+- `submissionId` (ObjectId, ref: Submission, required)
+- `judgeId` (ObjectId, ref: User, required)
+- `scores` (Map<String, Number>, required - criteria breakdown)
+- `totalScore` (Number, required, calculated)
+- `averageScore` (Number, required, calculated)
+- `comments` (String, optional)
+- `submittedAt` (Date, default: Date.now)
 - `createdAt`, `updatedAt` (timestamps)
+
+**Indexes:**
+- `{ submissionId: 1, judgeId: 1 }` - Unique evaluation per judge-submission pair
+- `{ submissionId: 1 }` - Query all evaluations for a submission
+
+**Note:** For Council/Regional levels, only one evaluation per submission is allowed (1-to-1 judging). For National level, multiple evaluations are allowed (1-to-many judging).
 
 ### Other Models
 - **Quota**: Manages submission quotas per region/council
@@ -365,16 +409,23 @@ POST /api/auth/login
 - Creates a system notification for the teacher with type `submission_successful`
 - Sends an email notification to the teacher
 - Includes submission details (subject, round name) in the notification
+- **For Council/Regional levels:** Automatically assigns a judge using round-robin algorithm
+- **For Council/Regional levels:** Sends notifications to assigned judge, admins, and superadmins
 
 **Query Parameters (GET /):**
 - `level`: Filter by level (Council, Regional, National)
-- `status`: Filter by status (pending, evaluated, promoted, eliminated)
+- `status`: Filter by status (submitted, under_review, evaluated, promoted, eliminated)
 - `year`: Filter by competition year
 - `subject`: Filter by subject
 - `class`: Filter by class
 - `region`: Filter by region
 - `council`: Filter by council
+- `areaOfFocus`: Filter by area of focus
 - `search`: Search in teacher name/email
+
+**Judge Filtering:**
+- **Council/Regional judges:** Only see submissions explicitly assigned to them via `SubmissionAssignment`
+- **National judges:** See all submissions matching their `areasOfFocus` within their assigned location
 
 ### Competition Routes (`/api/competitions`)
 **File:** `routes/competitions.js`
@@ -408,11 +459,29 @@ POST /api/auth/login
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/` | Get evaluations |
+| GET | `/` | Get evaluations (filtered by judge) |
 | GET | `/:id` | Get evaluation by ID |
-| POST | `/` | Create evaluation |
+| POST | `/` | Create/update evaluation |
 | PUT | `/:id` | Update evaluation |
 | DELETE | `/:id` | Delete evaluation |
+| POST | `/:submissionId/disqualify` | Flag submission for disqualification (Council/Regional only) |
+
+**Evaluation Logic:**
+- **Council/Regional Levels (1-to-1):**
+  - Only the assigned judge (via `SubmissionAssignment`) can evaluate
+  - Single evaluation per submission
+  - Final score = assigned judge's average score
+- **National Level (1-to-many):**
+  - Multiple judges can evaluate the same submission
+  - Judges are filtered by `areasOfFocus` matching submission's `areaOfFocus`
+  - Final score = average of all judges' average scores
+
+**Disqualification Endpoint:**
+- `POST /api/evaluations/:submissionId/disqualify`
+- Only available for Council/Regional level submissions
+- Only the assigned judge can disqualify
+- Requires `reason` in request body
+- Updates submission with `isDisqualified: true` and related fields
 
 ### Upload Routes (`/api/uploads`)
 **File:** `routes/uploads.js`
@@ -426,6 +495,29 @@ POST /api/auth/login
 **File Limits:**
 - Lesson Plans: PDF only, 10MB max
 - Videos: MP4, WebM, OGG, MOV, AVI, 500MB max
+
+### Leaderboard Routes (`/api/submissions/leaderboard`)
+**File:** `routes/submissions.js`
+**Access:** Admin, Superadmin, Judge
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/leaderboard/council` | Get council level leaderboard |
+| GET | `/leaderboard/regional` | Get regional level leaderboard |
+| GET | `/leaderboard/national` | Get national level leaderboard |
+
+**Query Parameters:**
+- `year` (required): Competition year
+- `region` (required for council/regional): Region filter
+- `council` (required for council): Council filter
+- `areaOfFocus` (optional): Filter by area of focus (use 'all' for overall)
+
+**Response Format:**
+- **Council:** Returns `overallLeaderboard` and `leaderboardByArea` (top 3 per area)
+- **Regional/National:** Returns single `leaderboard` array
+- All leaderboards exclude disqualified submissions
+- Sorted by `averageScore` descending (highest first)
+- Includes rank, submission details, teacher info, and scores
 
 ### Other Routes
 - **Quotas** (`/api/quotas`): Manage submission quotas
@@ -548,14 +640,16 @@ The application uses `app.set('trust proxy', 1)` to trust only the first proxy (
 - `markAsRead(notificationId)`
 - `getUserNotifications(userId, filters)`
 - `handleSubmissionSuccessful(data)` - Creates notification and sends email when teacher submits successfully
+- `handleJudgeAssigned(data)` - Creates notification and sends email when judge is assigned to a submission
 
 **Notification Types:**
 - `submission_successful` - Sent to teachers when submission is created
 - `submission_promoted` - Sent when submission advances to next round
 - `submission_eliminated` - Sent when submission is eliminated
-- `judge_assigned` - Sent to judges when assigned to a round
+- `judge_assigned` - Sent to judges when assigned to a submission (Council/Regional)
 - `evaluation_reminder` - Sent to judges for pending evaluations
 - `round_started`, `round_ending_soon`, `round_ended` - Competition round events
+- `admin_notification` - Sent to admins/superadmins when submissions are assigned to judges
 
 ### OTP Service (`services/otpService.js`)
 
@@ -661,6 +755,15 @@ npm run seed:landing   # Seed landing page content
 - Runs every 5 minutes
 - Checks for rounds to close/advance
 
+**judgeAssignment.js**
+- Round-robin judge assignment algorithm
+- Assigns judges to Council/Regional submissions automatically
+- Ensures even distribution of submissions among available judges
+- Finds judges by level, region, and council
+- Creates `SubmissionAssignment` records
+- Sends notifications to judges, admins, and superadmins
+- **Function:** `assignJudgeToSubmission(submission)` - Returns assignment result
+
 ---
 
 ## Best Practices
@@ -728,12 +831,102 @@ npm run seed:landing   # Seed landing page content
 
 ---
 
+## Judging Process
+
+### Judge Assignment System
+
+**Assignment Algorithm:** Round-robin distribution for even workload distribution
+
+**Council Level:**
+- Each submission is assigned to exactly one judge from the same council
+- Judge evaluates and provides final score (1-to-1 judging)
+- Judges see only submissions assigned to them
+- Judges can flag submissions for disqualification
+
+**Regional Level:**
+- Each submission is assigned to exactly one judge from the same region
+- Judge evaluates and provides final score (1-to-1 judging)
+- Judges see only submissions assigned to them
+- Judges can flag submissions for disqualification
+
+**National Level:**
+- No explicit assignment (1-to-many judging)
+- Multiple judges evaluate the same submission simultaneously
+- Judges are filtered by `areasOfFocus` matching submission's area
+- Final score = average of all judges' scores
+
+### Score Calculation
+
+**Council/Regional (1-to-1):**
+```javascript
+finalScore = assignedJudge.averageScore
+```
+
+**National (1-to-many):**
+```javascript
+finalScore = average(allJudges.map(j => j.averageScore))
+```
+
+### Disqualification System
+
+- Only Council/Regional level submissions can be disqualified by judges
+- Only the assigned judge can disqualify their assigned submission
+- Disqualified submissions are excluded from leaderboards
+- Disqualified submissions do not advance to next round
+- Main advancement criteria: Top N based on quota (leaderboard ranking)
+
+### Leaderboard System
+
+**Council Level:**
+- Per area of focus leaderboards (top 3 per area)
+- Overall leaderboard (all submissions ranked)
+- Grouped by region, council, and area of focus
+
+**Regional Level:**
+- Single leaderboard for all submissions in the region
+- Can be filtered by area of focus
+
+**National Level:**
+- Single leaderboard for all submissions
+- Can be filtered by area of focus
+
+**All Levels:**
+- Exclude disqualified submissions
+- Rank by `averageScore` (descending)
+- Include rank, submission details, teacher info, scores
+
+### Round Closure Logic
+
+**Judge Completion Check:**
+- **Council/Regional:** Checks if assigned judge has evaluated
+- **National:** Checks if all judges (matching `areasOfFocus`) have evaluated
+
+**Advancement Logic:**
+- Excludes disqualified submissions
+- Applies quota per location (and area for Council)
+- Promotes top N submissions based on quota
+- Marks remaining as eliminated
+
 ## Recent Updates (2024-2025)
+
+### Judging Process Implementation (January 2025)
+- Implemented 1-to-1 judging for Council/Regional levels
+- Implemented 1-to-many judging for National level
+- Added round-robin judge assignment system
+- Added `SubmissionAssignment` model for tracking assignments
+- Added disqualification system for judges
+- Added leaderboard endpoints (council, regional, national)
+- Updated evaluation logic to differentiate between judging models
+- Updated round closure logic to handle both judging models
+- Added notifications for judge assignments
+- Updated User model: Added `areasOfFocus` field, removed `specialization` and `experience`
+- Updated Submission model: Added disqualification fields and `assignedJudgeId`
 
 ### Judge Progress Export
 - Added CSV export endpoint for judge progress
 - Includes judge details, location, assigned/completed/pending counts, and progress percentage
 - Accessible via `/api/competition-rounds/:id/judge-progress/export`
+- Updated to use `SubmissionAssignment` for Council/Regional judges
 
 ### Development Workflow
 - Updated root `package.json` to wait for backend before starting frontend
@@ -743,5 +936,5 @@ npm run seed:landing   # Seed landing page content
 ---
 
 **Last Updated:** January 2025
-**Version:** 1.1.0
+**Version:** 1.2.0
 
