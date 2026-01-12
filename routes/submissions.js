@@ -58,6 +58,9 @@ router.get('/', async (req, res) => {
         // Match region and council exactly (case-sensitive for now, can be made case-insensitive if needed)
         query.region = req.user.assignedRegion?.trim();
         query.council = req.user.assignedCouncil?.trim();
+        
+        // Council/Regional judges see ALL submissions in their location (not filtered by areaOfFocus)
+        // They only see submissions assigned to them via SubmissionAssignment
       } else if (req.user.assignedLevel === 'Regional') {
         // Regional level: must match region (all councils in that region)
         // Submissions must be at Regional level (after council round)
@@ -71,14 +74,17 @@ router.get('/', async (req, res) => {
         }
         // Match region exactly (case-sensitive for now, can be made case-insensitive if needed)
         query.region = req.user.assignedRegion?.trim();
+        
+        // Council/Regional judges see ALL submissions in their location (not filtered by areaOfFocus)
+        // They only see submissions assigned to them via SubmissionAssignment
       } else if (req.user.assignedLevel === 'National') {
         // National level: see all submissions at National level only
         // No location filter needed
-      }
-
-      // Filter by areas of focus if judge has any assigned
-      if (req.user.areasOfFocus && req.user.areasOfFocus.length > 0) {
-        query.areaOfFocus = { $in: req.user.areasOfFocus };
+        
+        // National judges are filtered by areas of focus (they see submissions matching their assigned areas)
+        if (req.user.areasOfFocus && req.user.areasOfFocus.length > 0) {
+          query.areaOfFocus = { $in: req.user.areasOfFocus };
+        }
       }
 
     } else if (req.user.role === 'teacher') {
@@ -109,9 +115,20 @@ router.get('/', async (req, res) => {
       ];
     }
 
-    const submissions = await Submission.find(query)
+    let submissions = await Submission.find(query)
       .populate('teacherId', 'name email username')
       .sort({ createdAt: -1 });
+
+    // For Council/Regional judges, filter to only show submissions assigned to them
+    if (req.user.role === 'judge' && (req.user.assignedLevel === 'Council' || req.user.assignedLevel === 'Regional')) {
+      const assignedSubmissionIds = await SubmissionAssignment.find({
+        judgeId: req.user._id,
+        level: req.user.assignedLevel
+      }).select('submissionId');
+      
+      const assignedIds = assignedSubmissionIds.map(a => a.submissionId);
+      submissions = submissions.filter(sub => assignedIds.some(id => id.toString() === sub._id.toString()));
+    }
 
 
     const response = {
