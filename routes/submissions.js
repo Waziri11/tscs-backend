@@ -472,5 +472,218 @@ router.delete('/:id', authorize('admin', 'superadmin'), async (req, res) => {
   }
 });
 
+// @route   GET /api/submissions/leaderboard/council
+// @desc    Get council level leaderboard (per area of focus and overall)
+// @access  Private (Admin, Superadmin, Judge)
+router.get('/leaderboard/council', async (req, res) => {
+  try {
+    const { year, region, council, areaOfFocus, includeDisqualified = false } = req.query;
+
+    // Build query for council level submissions
+    const query = {
+      level: 'Council',
+      status: { $in: ['evaluated', 'promoted', 'eliminated'] }
+    };
+
+    if (year) query.year = parseInt(year);
+    if (region) query.region = region;
+    if (council) query.council = council;
+    if (areaOfFocus) query.areaOfFocus = areaOfFocus;
+
+    // Exclude disqualified unless explicitly requested
+    if (!includeDisqualified) {
+      query.disqualified = { $ne: true };
+    }
+
+    // Get submissions sorted by average score (descending)
+    let submissions = await Submission.find(query)
+      .populate('teacherId', 'name email')
+      .sort({ averageScore: -1, createdAt: 1 }); // Secondary sort by creation date for tie-breaking
+
+    // Group by area of focus for per-area leaderboards
+    const byAreaOfFocus = {};
+    submissions.forEach(sub => {
+      const area = sub.areaOfFocus || 'Unknown';
+      if (!byAreaOfFocus[area]) {
+        byAreaOfFocus[area] = [];
+      }
+      byAreaOfFocus[area].push(sub);
+    });
+
+    // Generate rankings
+    const generateRankings = (subs) => {
+      return subs.map((sub, index) => ({
+        ...sub.toObject(),
+        rank: index + 1,
+        willAdvance: index < 3 && !sub.disqualified // Top 3 advance (if not disqualified)
+      }));
+    };
+
+    // Per area of focus leaderboards
+    const areaLeaderboards = {};
+    Object.keys(byAreaOfFocus).forEach(area => {
+      areaLeaderboards[area] = generateRankings(byAreaOfFocus[area]);
+    });
+
+    // Overall leaderboard (all areas combined)
+    const overallLeaderboard = generateRankings(submissions);
+
+    res.json({
+      success: true,
+      leaderboards: {
+        byAreaOfFocus: areaLeaderboards,
+        overall: overallLeaderboard
+      },
+      summary: {
+        totalSubmissions: submissions.length,
+        areasOfFocus: Object.keys(byAreaOfFocus),
+        disqualified: submissions.filter(s => s.disqualified).length
+      }
+    });
+  } catch (error) {
+    console.error('Get council leaderboard error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   GET /api/submissions/leaderboard/regional
+// @desc    Get regional level leaderboard
+// @access  Private (Admin, Superadmin, Judge)
+router.get('/leaderboard/regional', async (req, res) => {
+  try {
+    const { year, region, areaOfFocus, includeDisqualified = false } = req.query;
+
+    const query = {
+      level: 'Regional',
+      status: { $in: ['evaluated', 'promoted', 'eliminated'] }
+    };
+
+    if (year) query.year = parseInt(year);
+    if (region) query.region = region;
+    if (areaOfFocus) query.areaOfFocus = areaOfFocus;
+
+    if (!includeDisqualified) {
+      query.disqualified = { $ne: true };
+    }
+
+    let submissions = await Submission.find(query)
+      .populate('teacherId', 'name email')
+      .sort({ averageScore: -1, createdAt: 1 });
+
+    const byAreaOfFocus = {};
+    submissions.forEach(sub => {
+      const area = sub.areaOfFocus || 'Unknown';
+      if (!byAreaOfFocus[area]) {
+        byAreaOfFocus[area] = [];
+      }
+      byAreaOfFocus[area].push(sub);
+    });
+
+    const generateRankings = (subs) => {
+      return subs.map((sub, index) => ({
+        ...sub.toObject(),
+        rank: index + 1,
+        willAdvance: index < 3 && !sub.disqualified
+      }));
+    };
+
+    const areaLeaderboards = {};
+    Object.keys(byAreaOfFocus).forEach(area => {
+      areaLeaderboards[area] = generateRankings(byAreaOfFocus[area]);
+    });
+
+    const overallLeaderboard = generateRankings(submissions);
+
+    res.json({
+      success: true,
+      leaderboards: {
+        byAreaOfFocus: areaLeaderboards,
+        overall: overallLeaderboard
+      },
+      summary: {
+        totalSubmissions: submissions.length,
+        areasOfFocus: Object.keys(byAreaOfFocus),
+        disqualified: submissions.filter(s => s.disqualified).length
+      }
+    });
+  } catch (error) {
+    console.error('Get regional leaderboard error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   GET /api/submissions/leaderboard/national
+// @desc    Get national level leaderboard
+// @access  Private (Admin, Superadmin, Judge)
+router.get('/leaderboard/national', async (req, res) => {
+  try {
+    const { year, areaOfFocus, includeDisqualified = false } = req.query;
+
+    const query = {
+      level: 'National',
+      status: { $in: ['evaluated', 'promoted', 'eliminated'] }
+    };
+
+    if (year) query.year = parseInt(year);
+    if (areaOfFocus) query.areaOfFocus = areaOfFocus;
+
+    if (!includeDisqualified) {
+      query.disqualified = { $ne: true };
+    }
+
+    let submissions = await Submission.find(query)
+      .populate('teacherId', 'name email')
+      .sort({ averageScore: -1, createdAt: 1 });
+
+    const byAreaOfFocus = {};
+    submissions.forEach(sub => {
+      const area = sub.areaOfFocus || 'Unknown';
+      if (!byAreaOfFocus[area]) {
+        byAreaOfFocus[area] = [];
+      }
+      byAreaOfFocus[area].push(sub);
+    });
+
+    const generateRankings = (subs) => {
+      return subs.map((sub, index) => ({
+        ...sub.toObject(),
+        rank: index + 1
+      }));
+    };
+
+    const areaLeaderboards = {};
+    Object.keys(byAreaOfFocus).forEach(area => {
+      areaLeaderboards[area] = generateRankings(byAreaOfFocus[area]);
+    });
+
+    const overallLeaderboard = generateRankings(submissions);
+
+    res.json({
+      success: true,
+      leaderboards: {
+        byAreaOfFocus: areaLeaderboards,
+        overall: overallLeaderboard
+      },
+      summary: {
+        totalSubmissions: submissions.length,
+        areasOfFocus: Object.keys(byAreaOfFocus),
+        disqualified: submissions.filter(s => s.disqualified).length
+      }
+    });
+  } catch (error) {
+    console.error('Get national leaderboard error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
 module.exports = router;
 
