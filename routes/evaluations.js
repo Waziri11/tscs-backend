@@ -341,5 +341,72 @@ router.get('/submission/:submissionId', async (req, res) => {
   }
 });
 
+// @route   POST /api/evaluations/:submissionId/disqualify
+// @desc    Flag a submission for disqualification (judges only, Council/Regional levels)
+// @access  Private (Judge)
+router.post('/:submissionId/disqualify', authorize('judge'), async (req, res) => {
+  try {
+    const { submissionId } = req.params;
+    const { reason } = req.body;
+
+    const submission = await Submission.findById(submissionId);
+    if (!submission) {
+      return res.status(404).json({
+        success: false,
+        message: 'Submission not found'
+      });
+    }
+
+    // Only allow disqualification at Council/Regional levels
+    if (submission.level !== 'Council' && submission.level !== 'Regional') {
+      return res.status(403).json({
+        success: false,
+        message: 'Disqualification is only allowed at Council and Regional levels'
+      });
+    }
+
+    // Check if judge is assigned to this submission
+    const isAssigned = await isJudgeAssigned(submissionId, req.user._id);
+    if (!isAssigned) {
+      return res.status(403).json({
+        success: false,
+        message: 'You are not assigned to evaluate this submission'
+      });
+    }
+
+    // Update submission with disqualification
+    submission.disqualified = true;
+    submission.disqualificationReason = reason || 'Disqualified by judge';
+    submission.disqualifiedBy = req.user._id;
+    submission.disqualifiedAt = new Date();
+    await submission.save();
+
+    // Log disqualification
+    await logger.logUserActivity(
+      'Judge disqualified submission',
+      req.user._id,
+      req,
+      {
+        submissionId: submissionId.toString(),
+        reason: reason || 'No reason provided',
+        level: submission.level
+      },
+      'warning'
+    );
+
+    res.json({
+      success: true,
+      message: 'Submission has been flagged for disqualification',
+      submission
+    });
+  } catch (error) {
+    console.error('Disqualify submission error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
 module.exports = router;
 
