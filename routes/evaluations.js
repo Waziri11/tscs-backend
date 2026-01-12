@@ -2,8 +2,10 @@ const express = require('express');
 const Evaluation = require('../models/Evaluation');
 const Submission = require('../models/Submission');
 const CompetitionRound = require('../models/CompetitionRound');
+const SubmissionAssignment = require('../models/SubmissionAssignment');
 const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
+const { isJudgeAssigned } = require('../utils/judgeAssignment');
 
 const router = express.Router();
 
@@ -203,6 +205,18 @@ router.post('/', authorize('judge'), async (req, res) => {
       }
     }
 
+    // For Council/Regional levels, enforce 1-to-1 judging: only assigned judge can evaluate
+    if (submission.level === 'Council' || submission.level === 'Regional') {
+      const isAssigned = await isJudgeAssigned(submissionId, req.user._id);
+      if (!isAssigned) {
+        return res.status(403).json({
+          success: false,
+          message: 'You are not assigned to evaluate this submission. Only the assigned judge can evaluate submissions at this level.'
+        });
+      }
+    }
+    // For National level, multiple judges can evaluate (no assignment check needed)
+
     // Calculate totals
     const scoreValues = Object.values(scores);
     const totalScore = scoreValues.reduce((sum, score) => sum + (score || 0), 0);
@@ -258,8 +272,13 @@ router.post('/', authorize('judge'), async (req, res) => {
 });
 
 // Helper function to update submission average score
+// For Council/Regional: use single judge's score (1-to-1)
+// For National: average all judges' scores (1-to-many)
 async function updateSubmissionAverageScore(submissionId) {
   try {
+    const submission = await Submission.findById(submissionId);
+    if (!submission) return;
+
     const evaluations = await Evaluation.find({ submissionId });
     
     if (evaluations.length === 0) {
@@ -267,11 +286,20 @@ async function updateSubmissionAverageScore(submissionId) {
       return;
     }
 
-    const totalAverage = evaluations.reduce((sum, eval) => sum + eval.averageScore, 0);
-    const overallAverage = totalAverage / evaluations.length;
+    let finalScore;
+    
+    if (submission.level === 'Council' || submission.level === 'Regional') {
+      // 1-to-1 judging: use the single judge's score directly
+      // There should only be one evaluation, but if multiple exist, use the first one
+      finalScore = evaluations[0].averageScore;
+    } else {
+      // National level: 1-to-many judging - average all judges' scores
+      const totalAverage = evaluations.reduce((sum, eval) => sum + eval.averageScore, 0);
+      finalScore = totalAverage / evaluations.length;
+    }
 
     await Submission.findByIdAndUpdate(submissionId, {
-      averageScore: Math.round(overallAverage * 100) / 100,
+      averageScore: Math.round(finalScore * 100) / 100,
       status: 'evaluated'
     });
   } catch (error) {
