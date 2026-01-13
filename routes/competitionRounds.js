@@ -47,38 +47,69 @@ router.get('/active', async (req, res) => {
     if (user && user.role === 'judge' && user.assignedLevel) {
       const judgeLevel = user.assignedLevel;
       // Normalize region and council names for comparison (trim and lowercase)
-      const judgeRegion = user.assignedRegion ? user.assignedRegion.trim().toLowerCase() : null;
-      const judgeCouncil = user.assignedCouncil ? user.assignedCouncil.trim().toLowerCase() : null;
+      // Handle null, undefined, empty strings, and ObjectIds
+      const normalize = (str) => {
+        if (!str || str === null || str === undefined) return null;
+        const normalized = str.toString().trim().toLowerCase();
+        return normalized === '' ? null : normalized;
+      };
+      
+      const judgeRegion = normalize(user.assignedRegion);
+      const judgeCouncil = normalize(user.assignedCouncil);
+      
+      // Debug logging
+      console.log('[Active Rounds] Judge info:', {
+        judgeId: user._id,
+        judgeLevel,
+        judgeRegion,
+        judgeCouncil,
+        totalRounds: allRounds.length
+      });
       
       // Filter eligible rounds and score them by specificity
       const eligibleRounds = allRounds.map(round => {
+        // CRITICAL: First check if level matches
+        if (round.level !== judgeLevel) {
+          return { round, matchScore: 0, isEligible: false };
+        }
+        
         // Normalize round location data
-        const roundRegion = round.region ? round.region.toString().trim().toLowerCase() : null;
-        const roundCouncil = round.council ? round.council.toString().trim().toLowerCase() : null;
+        const roundRegion = normalize(round.region);
+        const roundCouncil = normalize(round.council);
         
         let matchScore = 0;
         let isEligible = false;
         
         // Match based on judge level
-        if (judgeLevel === 'Council' && judgeRegion) {
+        if (judgeLevel === 'Council') {
           // Council judges should see:
-          // 1. Rounds for all councils in their region (region matches, council is null/empty) - score: 50
-          // 2. Rounds for their specific council (region and council both match) - score: 100 (most specific)
+          // 1. Rounds for their specific council (region and council both match) - score: 100 (most specific)
+          // 2. Rounds for all councils in their region (region matches, council is null/empty) - score: 50
+          // 3. Nationwide rounds (no region/council) - score: 25 (fallback)
           if (roundRegion === judgeRegion) {
-            if (!roundCouncil) {
-              // Round is for all councils in region
-              matchScore = 50;
-              isEligible = true;
-            } else if (judgeCouncil && roundCouncil === judgeCouncil) {
+            if (roundCouncil === judgeCouncil && judgeCouncil) {
               // Specific council matches - most specific
               matchScore = 100;
               isEligible = true;
+            } else if (!roundCouncil) {
+              // Round is for all councils in region
+              matchScore = 50;
+              isEligible = true;
             }
+          } else if (!roundRegion && !roundCouncil) {
+            // Nationwide round - Council judges can see it as fallback
+            matchScore = 25;
+            isEligible = true;
           }
-        } else if (judgeLevel === 'Regional' && judgeRegion) {
+        } else if (judgeLevel === 'Regional') {
           // Regional judges should see rounds for their region (council must be null/empty)
+          // OR nationwide rounds
           if (roundRegion === judgeRegion && !roundCouncil) {
             matchScore = 100;
+            isEligible = true;
+          } else if (!roundRegion && !roundCouncil) {
+            // Nationwide round
+            matchScore = 50;
             isEligible = true;
           }
         } else if (judgeLevel === 'National') {
@@ -89,6 +120,18 @@ router.get('/active', async (req, res) => {
           }
         }
         
+        // Debug logging for each round
+        if (round.level === judgeLevel) {
+          console.log('[Active Rounds] Round check:', {
+            roundId: round._id,
+            roundLevel: round.level,
+            roundRegion,
+            roundCouncil,
+            matchScore,
+            isEligible
+          });
+        }
+        
         return { round, matchScore, isEligible };
       }).filter(item => item.isEligible);
       
@@ -96,7 +139,12 @@ router.get('/active', async (req, res) => {
       if (eligibleRounds.length > 0) {
         eligibleRounds.sort((a, b) => b.matchScore - a.matchScore);
         rounds = [eligibleRounds[0].round]; // Return only the most specific round
+        console.log('[Active Rounds] Selected round:', {
+          roundId: rounds[0]._id,
+          matchScore: eligibleRounds[0].matchScore
+        });
       } else {
+        console.log('[Active Rounds] No eligible rounds found for judge');
         rounds = [];
       }
     }
