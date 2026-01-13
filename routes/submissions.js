@@ -81,11 +81,7 @@ router.get('/', async (req, res) => {
       } else if (req.user.assignedLevel === 'National') {
         // National level: see all submissions at National level only
         // No location filter needed
-        
-        // National judges are filtered by areas of focus (they see submissions matching their assigned areas)
-        if (req.user.areasOfFocus && req.user.areasOfFocus.length > 0) {
-          query.areaOfFocus = { $in: req.user.areasOfFocus };
-        }
+        // National judges see ALL submissions at National level (not filtered by areaOfFocus)
       }
 
     } else if (req.user.role === 'teacher') {

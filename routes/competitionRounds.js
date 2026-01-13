@@ -787,21 +787,9 @@ router.post('/:id/close', async (req, res) => {
             pendingCount++;
           }
         } else {
-          // National level: 1-to-many judging - Check if all judges (by area of focus) have evaluated
-          const assignedJudges = judges.filter(judge => {
-            // National judges are assigned by area of focus
-            if (judge.areasOfFocus && judge.areasOfFocus.length > 0) {
-              return judge.areasOfFocus.includes(submission.areaOfFocus);
-            }
-            return false; // Judge has no areas of focus assigned
-          });
-
-          if (assignedJudges.length === 0) {
-            // No judges assigned to this area of focus - skip
-            continue;
-          }
-
-          const allJudgesEvaluated = assignedJudges.every(judge => 
+          // National level: 1-to-many judging - All National judges evaluate all National submissions
+          // Judges see ALL submissions at National level (not filtered by areaOfFocus)
+          const allJudgesEvaluated = judges.every(judge => 
             evaluatedJudgeIds.includes(judge._id.toString())
           );
 
@@ -1151,15 +1139,8 @@ router.get('/:id/judge-progress', async (req, res) => {
         assignedSubmissionIds.some(id => id.toString() === sub._id.toString())
       );
     } else {
-      // National level: Filter by judges' areas of focus
-      submissions = allSubmissions.filter(submission => {
-        return judges.some(judge => {
-          if (judge.areasOfFocus && judge.areasOfFocus.length > 0) {
-            return judge.areasOfFocus.includes(submission.areaOfFocus);
-          }
-          return false;
-        });
-      });
+      // National level: Judges see all submissions at National level (not filtered by areaOfFocus)
+      submissions = allSubmissions;
     }
 
     // Calculate progress for each judge
@@ -1184,13 +1165,8 @@ router.get('/:id/judge-progress', async (req, res) => {
           assignedIds.includes(sub._id.toString())
         );
       } else {
-        // National level: Filter by judge's areas of focus
-        assignedSubmissions = submissions.filter(sub => {
-          if (judge.areasOfFocus && judge.areasOfFocus.length > 0) {
-            return judge.areasOfFocus.includes(sub.areaOfFocus);
-          }
-          return false;
-        });
+        // National level: Judges see ALL submissions at National level (not filtered by areaOfFocus)
+        assignedSubmissions = submissions;
       }
 
       // Count completed: submissions evaluated by this judge AFTER round started
@@ -1301,22 +1277,14 @@ router.get('/:id/judge-progress/export', async (req, res) => {
       
       const assignedSubmissions = submissions.filter(sub => {
         // Check if judge is assigned to this submission's location
-        let locationMatch = false;
+        // Judges see ALL submissions in their location (not filtered by areaOfFocus)
         if (round.level === 'Council') {
-          locationMatch = sub.region === judge.assignedRegion && sub.council === judge.assignedCouncil;
+          return sub.region === judge.assignedRegion && sub.council === judge.assignedCouncil;
         } else if (round.level === 'Regional') {
-          locationMatch = sub.region === judge.assignedRegion;
+          return sub.region === judge.assignedRegion;
         } else {
-          locationMatch = true; // National level
+          return true; // National level - see all submissions
         }
-        
-        // Check if judge is assigned to this submission's area of focus
-        let areaMatch = true;
-        if (judge.areasOfFocus && judge.areasOfFocus.length > 0) {
-          areaMatch = judge.areasOfFocus.includes(sub.areaOfFocus);
-        }
-        
-        return locationMatch && areaMatch;
       });
 
       const completed = assignedSubmissions.filter(sub => 
