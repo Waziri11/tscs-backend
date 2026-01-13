@@ -12,7 +12,6 @@ const connectDB = async () => {
     const mongooseOptions = {
       // Disable buffering - throw errors immediately if not connected
       bufferCommands: false,
-      bufferMaxEntries: 0,
       // Connection timeout
       serverSelectionTimeoutMS: 30000, // 30 seconds
       socketTimeoutMS: 45000, // 45 seconds
@@ -21,9 +20,6 @@ const connectDB = async () => {
       // Connection pool settings
       maxPoolSize: 10,
       minPoolSize: 2,
-      // Keep connection alive
-      keepAlive: true,
-      keepAliveInitialDelay: 300000, // 5 minutes
     };
     
     const conn = await mongoose.connect(mongoUri, mongooseOptions);
