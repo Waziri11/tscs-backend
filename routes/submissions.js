@@ -719,9 +719,9 @@ router.get('/leaderboard/national', async (req, res) => {
 });
 
 // @route   GET /api/submissions/:id/eligible-judges
-// @desc    Get eligible judges for a submission (Superadmin only)
-// @access  Private (Superadmin)
-router.get('/:id/eligible-judges', authorize('superadmin'), async (req, res) => {
+// @desc    Get eligible judges for a submission (Admin/Superadmin only)
+// @access  Private (Admin, Superadmin)
+router.get('/:id/eligible-judges', authorize('admin', 'superadmin'), async (req, res) => {
   try {
     const result = await getEligibleJudges(req.params.id);
     
@@ -747,9 +747,9 @@ router.get('/:id/eligible-judges', authorize('superadmin'), async (req, res) => 
 });
 
 // @route   GET /api/submissions/:id/assigned-judge
-// @desc    Get assigned judge for a submission (Superadmin only)
-// @access  Private (Superadmin)
-router.get('/:id/assigned-judge', authorize('superadmin'), async (req, res) => {
+// @desc    Get assigned judge for a submission (Admin/Superadmin only)
+// @access  Private (Admin, Superadmin)
+router.get('/:id/assigned-judge', authorize('admin', 'superadmin'), async (req, res) => {
   try {
     const submission = await Submission.findById(req.params.id);
     
@@ -791,9 +791,9 @@ router.get('/:id/assigned-judge', authorize('superadmin'), async (req, res) => {
 });
 
 // @route   POST /api/submissions/:id/assign-judge
-// @desc    Manually assign or reassign a submission to a judge (Superadmin only)
-// @access  Private (Superadmin)
-router.post('/:id/assign-judge', authorize('superadmin'), async (req, res) => {
+// @desc    Manually assign or reassign a submission to a judge (Admin/Superadmin only)
+// @access  Private (Admin, Superadmin)
+router.post('/:id/assign-judge', authorize('admin', 'superadmin'), async (req, res) => {
   try {
     const { judgeId } = req.body;
 
