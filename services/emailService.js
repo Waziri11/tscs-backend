@@ -334,11 +334,24 @@ class EmailService {
    * @param {string} email - Recipient email
    * @param {string} userName - User name
    * @param {Object} metadata - Assignment metadata
+   *   For submission assignment: { submissionId, teacherName, subject, areaOfFocus, level, region, council }
+   *   For round assignment (legacy): { roundName, level }
    * @returns {Promise<boolean>} Success status
    */
   async sendJudgeAssignmentEmail(email, userName, metadata) {
-    const { roundName, level } = metadata;
-    const subjectLine = `Judge Assignment - ${roundName}`;
+    // Check if this is a submission assignment (new format) or round assignment (legacy)
+    const isSubmissionAssignment = metadata.submissionId !== undefined;
+    
+    let subjectLine;
+    if (isSubmissionAssignment) {
+      const { level, region, council } = metadata;
+      const location = level === 'Council' ? `${region} - ${council}` : region;
+      subjectLine = `Submission Assignment - ${level} Level (${location})`;
+    } else {
+      const { roundName } = metadata;
+      subjectLine = `Judge Assignment - ${roundName}`;
+    }
+    
     const html = this.generateJudgeAssignmentHTML(userName, metadata);
     const text = this.generateJudgeAssignmentText(userName, metadata);
 
@@ -348,7 +361,7 @@ class EmailService {
       html,
       text,
       type: 'judge_assigned',
-      metadata: { roundName, level }
+      metadata
     });
   }
 
@@ -901,10 +914,55 @@ Your expert evaluation helps maintain the quality of our competitions.
    * Generate judge assignment HTML template
    * @param {string} userName - User name
    * @param {Object} metadata - Assignment metadata
+   *   For submission assignment: { submissionId, teacherName, subject, areaOfFocus, level, region, council }
+   *   For round assignment (legacy): { roundName, level }
    * @returns {string} HTML content
    */
   generateJudgeAssignmentHTML(userName, metadata) {
-    const { roundName, level } = metadata;
+    const isSubmissionAssignment = metadata.submissionId !== undefined;
+    
+    let assignmentDetails, assignmentTitle, assignmentMessage;
+    
+    if (isSubmissionAssignment) {
+      const { level, region, council, subject, teacherName } = metadata;
+      const location = level === 'Council' ? `${region} - ${council}` : region;
+      assignmentTitle = 'Submission Assignment Notification';
+      assignmentMessage = 'A new submission has been assigned to you for evaluation.';
+      assignmentDetails = `
+        <div class="detail-row">
+          <span class="detail-label">Assignment Level:</span>
+          <span class="detail-value">${level}</span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">Geographic Location:</span>
+          <span class="detail-value">${location}</span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">Subject Area:</span>
+          <span class="detail-value">${subject}</span>
+        </div>
+        ${teacherName ? `
+        <div class="detail-row">
+          <span class="detail-label">Teacher:</span>
+          <span class="detail-value">${teacherName}</span>
+        </div>
+        ` : ''}
+      `;
+    } else {
+      const { roundName, level } = metadata;
+      assignmentTitle = 'Judge Assignment Notification';
+      assignmentMessage = 'You have been assigned as a judge for an upcoming competition round.';
+      assignmentDetails = `
+        <div class="detail-row">
+          <span class="detail-label">Competition Round:</span>
+          <span class="detail-value">${roundName}</span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">Level:</span>
+          <span class="detail-value">${level}</span>
+        </div>
+      `;
+    }
 
     return `
       <!DOCTYPE html>
@@ -914,38 +972,179 @@ Your expert evaluation helps maintain the quality of our competitions.
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Judge Assignment - TSCS</title>
         <style>
-          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 20px; background-color: #f4f4f4; }
-          .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
-          .header { text-align: center; margin-bottom: 30px; }
-          .assignment-icon { font-size: 48px; color: #722ed1; margin-bottom: 16px; }
-          .content { background: #f9f0ff; border: 1px solid #d3adf7; padding: 20px; border-radius: 8px; margin: 20px 0; }
-          .assignment-details { background: #f8f9fa; padding: 15px; border-radius: 5px; margin: 15px 0; }
-          .footer { margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; text-align: center; color: #666; font-size: 14px; }
+          * { margin: 0; padding: 0; box-sizing: border-box; }
+          body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; 
+            line-height: 1.6; 
+            color: #1a1a1a; 
+            background-color: #f5f5f5; 
+            padding: 20px;
+          }
+          .email-wrapper {
+            max-width: 680px; 
+            margin: 0 auto; 
+            background: #ffffff;
+          }
+          .header {
+            background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
+            color: #ffffff;
+            padding: 40px 30px;
+            text-align: center;
+          }
+          .header h1 {
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            letter-spacing: 0.5px;
+          }
+          .header p {
+            font-size: 14px;
+            opacity: 0.95;
+            margin-top: 8px;
+          }
+          .content {
+            padding: 40px 30px;
+          }
+          .greeting {
+            font-size: 16px;
+            color: #1a1a1a;
+            margin-bottom: 24px;
+            font-weight: 500;
+          }
+          .assignment-section {
+            background: #f8f9fa;
+            border-left: 4px solid #3b82f6;
+            padding: 24px;
+            margin: 24px 0;
+            border-radius: 4px;
+          }
+          .assignment-section h2 {
+            font-size: 18px;
+            font-weight: 600;
+            color: #1a1a1a;
+            margin-bottom: 12px;
+          }
+          .assignment-section p {
+            font-size: 15px;
+            color: #4a5568;
+            margin-bottom: 20px;
+            line-height: 1.7;
+          }
+          .details-box {
+            background: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 4px;
+            padding: 20px;
+            margin-top: 20px;
+          }
+          .detail-row {
+            display: flex;
+            padding: 12px 0;
+            border-bottom: 1px solid #e2e8f0;
+          }
+          .detail-row:last-child {
+            border-bottom: none;
+          }
+          .detail-label {
+            font-weight: 600;
+            color: #4a5568;
+            width: 180px;
+            font-size: 14px;
+            flex-shrink: 0;
+          }
+          .detail-value {
+            color: #1a1a1a;
+            font-size: 14px;
+            flex: 1;
+          }
+          .instructions {
+            background: #fff7ed;
+            border-left: 4px solid #f59e0b;
+            padding: 20px;
+            margin: 24px 0;
+            border-radius: 4px;
+          }
+          .instructions h3 {
+            font-size: 16px;
+            font-weight: 600;
+            color: #92400e;
+            margin-bottom: 12px;
+          }
+          .instructions p {
+            font-size: 14px;
+            color: #78350f;
+            line-height: 1.6;
+            margin-bottom: 8px;
+          }
+          .footer {
+            background: #f8f9fa;
+            padding: 30px;
+            text-align: center;
+            border-top: 1px solid #e2e8f0;
+          }
+          .footer p {
+            font-size: 13px;
+            color: #6b7280;
+            margin: 4px 0;
+            line-height: 1.6;
+          }
+          .footer .system-name {
+            font-weight: 600;
+            color: #1a1a1a;
+            font-size: 14px;
+            margin-bottom: 8px;
+          }
+          .footer .official-note {
+            font-size: 12px;
+            color: #9ca3af;
+            margin-top: 16px;
+            font-style: italic;
+          }
+          @media only screen and (max-width: 600px) {
+            .content { padding: 30px 20px; }
+            .header { padding: 30px 20px; }
+            .detail-row { flex-direction: column; }
+            .detail-label { width: 100%; margin-bottom: 4px; }
+          }
         </style>
       </head>
       <body>
-        <div class="container">
+        <div class="email-wrapper">
           <div class="header">
-            <div class="assignment-icon">👨‍⚖️</div>
-            <h1>Judge Assignment</h1>
-            <p>Hello ${userName},</p>
+            <h1>Teacher Submission Competition System</h1>
+            <p>Official Assignment Notification</p>
           </div>
 
           <div class="content">
-            <h3>You have been assigned as a judge!</h3>
-            <p>You have been selected to evaluate submissions for an upcoming competition round.</p>
-
-            <div class="assignment-details">
-              🏆 <strong>Competition:</strong> ${roundName}<br>
-              📊 <strong>Level:</strong> ${level}
+            <div class="greeting">
+              Dear ${userName},
             </div>
 
-            <p>Your expertise and fair evaluation will help ensure the quality and integrity of our competition results.</p>
+            <div class="assignment-section">
+              <h2>${assignmentTitle}</h2>
+              <p>${assignmentMessage}</p>
+              
+              <div class="details-box">
+                ${assignmentDetails}
+              </div>
+            </div>
+
+            <div class="instructions">
+              <h3>Next Steps</h3>
+              <p>Please log in to the TSCS portal to access the assigned submission and begin your evaluation.</p>
+              <p>Your professional assessment and fair evaluation are essential to maintaining the integrity and quality of this competition.</p>
+            </div>
+
+            <p style="margin-top: 24px; font-size: 14px; color: #4a5568;">
+              If you have any questions or require assistance, please contact the system administrator.
+            </p>
           </div>
 
           <div class="footer">
-            <p><strong>Teacher Submission Competition System (TSCS)</strong></p>
-            <p>Thank you for your service as a judge!</p>
+            <p class="system-name">Teacher Submission Competition System (TSCS)</p>
+            <p>Ministry of Education</p>
+            <p>This is an automated notification. Please do not reply to this email.</p>
+            <p class="official-note">This email contains confidential information and is intended solely for the addressee.</p>
           </div>
         </div>
       </body>
@@ -957,28 +1156,62 @@ Your expert evaluation helps maintain the quality of our competitions.
    * Generate judge assignment text template
    * @param {string} userName - User name
    * @param {Object} metadata - Assignment metadata
+   *   For submission assignment: { submissionId, teacherName, subject, areaOfFocus, level, region, council }
+   *   For round assignment (legacy): { roundName, level }
    * @returns {string} Text content
    */
   generateJudgeAssignmentText(userName, metadata) {
-    const { roundName, level } = metadata;
+    const isSubmissionAssignment = metadata.submissionId !== undefined;
+    
+    let assignmentDetails, assignmentTitle, assignmentMessage;
+    
+    if (isSubmissionAssignment) {
+      const { level, region, council, subject, teacherName } = metadata;
+      const location = level === 'Council' ? `${region} - ${council}` : region;
+      assignmentTitle = 'Submission Assignment Notification';
+      assignmentMessage = 'A new submission has been assigned to you for evaluation.';
+      assignmentDetails = `
+Assignment Level: ${level}
+Geographic Location: ${location}
+Subject Area: ${subject}
+${teacherName ? `Teacher: ${teacherName}` : ''}
+      `.trim();
+    } else {
+      const { roundName, level } = metadata;
+      assignmentTitle = 'Judge Assignment Notification';
+      assignmentMessage = 'You have been assigned as a judge for an upcoming competition round.';
+      assignmentDetails = `
+Competition Round: ${roundName}
+Level: ${level}
+      `.trim();
+    }
 
     return `
-TSCS - Judge Assignment
+TEACHER SUBMISSION COMPETITION SYSTEM (TSCS)
+Official Assignment Notification
 
-Hello ${userName},
+Dear ${userName},
 
-You have been assigned as a judge!
+${assignmentTitle}
 
-You have been selected to evaluate submissions for an upcoming competition round.
+${assignmentMessage}
 
-Competition: ${roundName}
-Level: ${level}
+ASSIGNMENT DETAILS:
+${assignmentDetails}
 
-Your expertise and fair evaluation will help ensure the quality and integrity of our competition results.
+NEXT STEPS:
+Please log in to the TSCS portal to access the assigned submission and begin your evaluation.
+
+Your professional assessment and fair evaluation are essential to maintaining the integrity and quality of this competition.
+
+If you have any questions or require assistance, please contact the system administrator.
 
 ---
 Teacher Submission Competition System (TSCS)
-Thank you for your service as a judge!
+Ministry of Education
+
+This is an automated notification. Please do not reply to this email.
+This email contains confidential information and is intended solely for the addressee.
     `.trim();
   }
 

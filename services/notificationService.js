@@ -287,7 +287,7 @@ class NotificationService {
         userId,
         type: 'judge_assigned',
         title: 'New Submission Assigned',
-        message: `A new submission has been assigned to you for evaluation: ${subject} - ${areaOfFocus} (${location}).`,
+        message: `A new submission has been assigned to you for evaluation: ${subject} - ${location} (${level} Level).`,
         metadata: { submissionId, teacherName, subject, areaOfFocus, level, region, council }
       });
 
