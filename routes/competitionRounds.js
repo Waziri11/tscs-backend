@@ -41,7 +41,7 @@ router.get('/active', async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(50); // Get more rounds, we'll filter them
 
-    // If user is a judge, filter rounds based on their assignment
+    // If user is a judge, filter rounds based on their assignment and return only the most specific one
     let rounds = allRounds;
     if (user && user.role === 'judge' && user.assignedLevel) {
       const judgeLevel = user.assignedLevel;
@@ -49,46 +49,56 @@ router.get('/active', async (req, res) => {
       const judgeRegion = user.assignedRegion ? user.assignedRegion.trim().toLowerCase() : null;
       const judgeCouncil = user.assignedCouncil ? user.assignedCouncil.trim().toLowerCase() : null;
       
-      rounds = allRounds.filter(round => {
+      // Filter eligible rounds and score them by specificity
+      const eligibleRounds = allRounds.map(round => {
         // Normalize round location data
         const roundRegion = round.region ? round.region.toString().trim().toLowerCase() : null;
         const roundCouncil = round.council ? round.council.toString().trim().toLowerCase() : null;
         
-        // Nationwide rounds (no region/council) - all judges can see
-        if (!roundRegion && !roundCouncil) {
-          return true;
-        }
+        let matchScore = 0;
+        let isEligible = false;
         
         // Match based on judge level
         if (judgeLevel === 'Council' && judgeRegion) {
           // Council judges should see:
-          // 1. Rounds for all councils in their region (region matches, council is null/empty)
-          // 2. Rounds for their specific council (region and council both match)
+          // 1. Rounds for all councils in their region (region matches, council is null/empty) - score: 50
+          // 2. Rounds for their specific council (region and council both match) - score: 100 (most specific)
           if (roundRegion === judgeRegion) {
-            // Region matches - check council
             if (!roundCouncil) {
-              // Round is for all councils in region - this judge should see it
-              return true;
+              // Round is for all councils in region
+              matchScore = 50;
+              isEligible = true;
             } else if (judgeCouncil && roundCouncil === judgeCouncil) {
-              // Specific council matches - this judge should see it
-              return true;
+              // Specific council matches - most specific
+              matchScore = 100;
+              isEligible = true;
             }
           }
-          return false;
         } else if (judgeLevel === 'Regional' && judgeRegion) {
           // Regional judges should see rounds for their region (council must be null/empty)
-          return roundRegion === judgeRegion && !roundCouncil;
+          if (roundRegion === judgeRegion && !roundCouncil) {
+            matchScore = 100;
+            isEligible = true;
+          }
         } else if (judgeLevel === 'National') {
-          // National judges only see nationwide rounds (already handled above)
-          return !roundRegion && !roundCouncil;
+          // National judges only see nationwide rounds
+          if (!roundRegion && !roundCouncil) {
+            matchScore = 100;
+            isEligible = true;
+          }
         }
         
-        return false;
-      });
+        return { round, matchScore, isEligible };
+      }).filter(item => item.isEligible);
+      
+      // Sort by match score (descending) and return only the most specific round
+      if (eligibleRounds.length > 0) {
+        eligibleRounds.sort((a, b) => b.matchScore - a.matchScore);
+        rounds = [eligibleRounds[0].round]; // Return only the most specific round
+      } else {
+        rounds = [];
+      }
     }
-
-    // Limit to 20 rounds
-    rounds = rounds.slice(0, 20);
 
     res.json({
       success: true,
@@ -1189,6 +1199,7 @@ router.get('/:id/judge-progress', async (req, res) => {
         completed: completed,
         pending: total - completed,
         percentage: percentage,
+        assignedSubmissionIds: assignedSubmissions.map(sub => sub._id.toString()),
         pendingSubmissionIds: assignedSubmissions
           .filter(sub => !evaluatedSubmissionIds.includes(sub._id.toString()))
           .map(sub => sub._id.toString())
@@ -1207,13 +1218,28 @@ router.get('/:id/judge-progress', async (req, res) => {
       ? Math.round(judgeProgress.reduce((sum, j) => sum + j.percentage, 0) / judgeProgress.length)
       : 0;
 
+    // Calculate actual end time for time remaining
+    const getActualEndTime = () => {
+      if (round.timingType === 'fixed_time') {
+        return round.endTime;
+      } else if (round.timingType === 'countdown' && round.countdownDuration) {
+        const start = round.startTime || round.createdAt;
+        return new Date(start.getTime() + round.countdownDuration);
+      }
+      return round.endTime;
+    };
+
     res.json({
       success: true,
       round: {
         id: round._id.toString(),
         year: round.year,
         level: round.level,
-        status: round.status
+        status: round.status,
+        endTime: getActualEndTime(),
+        timingType: round.timingType,
+        startTime: round.startTime,
+        countdownDuration: round.countdownDuration
       },
       statistics: {
         totalSubmissions,
@@ -1363,6 +1389,118 @@ router.get('/:id/judge-progress/export', async (req, res) => {
     res.send(csvContent);
   } catch (error) {
     console.error('Export judge progress error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/competition-rounds/:id/remind-judge/:judgeId
+// @desc    Send custom reminder to a specific judge
+// @access  Private (Superadmin)
+router.post('/:id/remind-judge/:judgeId', async (req, res) => {
+  try {
+    const { id, judgeId } = req.params;
+    const { message: reminderMessage } = req.body;
+
+    if (!reminderMessage || !reminderMessage.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Reminder message is required'
+      });
+    }
+
+    const round = await CompetitionRound.findById(id);
+    if (!round) {
+      return res.status(404).json({
+        success: false,
+        message: 'Competition round not found'
+      });
+    }
+
+    const judge = await User.findById(judgeId);
+    if (!judge || judge.role !== 'judge') {
+      return res.status(404).json({
+        success: false,
+        message: 'Judge not found'
+      });
+    }
+
+    // Send reminder via notification service
+    const notificationService = require('../services/notificationService');
+    await notificationService.sendCustomReminder(
+      judgeId,
+      reminderMessage.trim(),
+      {
+        roundId: round._id.toString(),
+        roundName: `${round.level} Level Round (${round.year})`,
+        level: round.level,
+        year: round.year
+      }
+    );
+
+    res.json({
+      success: true,
+      message: 'Reminder sent successfully'
+    });
+  } catch (error) {
+    console.error('Send judge reminder error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/competition-rounds/:id/remind-location
+// @desc    Send custom reminder to all judges in a location
+// @access  Private (Superadmin)
+router.post('/:id/remind-location', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { message: reminderMessage, region, council } = req.body;
+
+    if (!reminderMessage || !reminderMessage.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Reminder message is required'
+      });
+    }
+
+    const round = await CompetitionRound.findById(id);
+    if (!round) {
+      return res.status(404).json({
+        success: false,
+        message: 'Competition round not found'
+      });
+    }
+
+    // Build location query
+    const locationQuery = {
+      region: region || null,
+      council: council || null
+    };
+
+    // Send reminder via notification service
+    const notificationService = require('../services/notificationService');
+    await notificationService.sendLocationReminder(
+      locationQuery,
+      reminderMessage.trim(),
+      {
+        roundId: round._id.toString(),
+        roundName: `${round.level} Level Round (${round.year})`,
+        level: round.level,
+        year: round.year
+      }
+    );
+
+    res.json({
+      success: true,
+      message: 'Reminder sent to all judges in the location successfully'
+    });
+  } catch (error) {
+    console.error('Send location reminder error:', error);
     res.status(500).json({
       success: false,
       message: error.message || 'Server error'

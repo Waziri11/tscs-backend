@@ -406,6 +406,71 @@ class NotificationService {
   }
 
   /**
+   * Send custom reminder to a specific judge
+   * @param {String} judgeId - Judge user ID
+   * @param {String} message - Custom reminder message
+   * @param {Object} roundInfo - Round information
+   */
+  async sendCustomReminder(judgeId, message, roundInfo) {
+    const { roundName, roundId, level, year } = roundInfo;
+
+    const notification = await this.createNotification({
+      userId: judgeId,
+      type: 'evaluation_reminder',
+      title: `Reminder: ${roundName}`,
+      message: message,
+      metadata: { roundId, roundName, level, year, isCustom: true }
+    });
+
+    // Send email notification
+    await this.sendEmailNotification(judgeId, notification);
+  }
+
+  /**
+   * Send reminder to all judges in a location
+   * @param {Object} location - Location object with region and council
+   * @param {String} message - Custom reminder message
+   * @param {Object} roundInfo - Round information
+   */
+  async sendLocationReminder(location, message, roundInfo) {
+    const { roundName, roundId, level, year } = roundInfo;
+    const User = require('../models/User');
+
+    // Build query for judges in the location
+    const judgeQuery = {
+      role: 'judge',
+      status: 'active',
+      assignedLevel: level
+    };
+
+    if (location.council) {
+      judgeQuery.assignedRegion = location.region;
+      judgeQuery.assignedCouncil = location.council;
+    } else if (location.region) {
+      judgeQuery.assignedRegion = location.region;
+    }
+
+    // Find all judges in the location
+    const judges = await User.find(judgeQuery).select('_id');
+
+    // Send reminder to each judge
+    const promises = judges.map(async (judge) => {
+      const notification = await this.createNotification({
+        userId: judge._id.toString(),
+        type: 'evaluation_reminder',
+        title: `Reminder: ${roundName}`,
+        message: message,
+        metadata: { roundId, roundName, level, year, isCustom: true, isLocationReminder: true }
+      });
+
+      // Send email notification
+      await this.sendEmailNotification(judge._id.toString(), notification);
+    });
+
+    await Promise.all(promises);
+  }
+
+  /**
    * Handle admin notification (Email enabled)
    * @param {Object} data - Admin notification data
    */
