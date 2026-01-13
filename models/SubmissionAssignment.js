@@ -54,3 +54,6 @@ submissionAssignmentSchema.index({ level: 1, region: 1, council: 1 });
 
 module.exports = mongoose.model('SubmissionAssignment', submissionAssignmentSchema);
 
+
+
+
