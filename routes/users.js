@@ -2,6 +2,7 @@ const express = require('express');
 const User = require('../models/User');
 const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
+const { assignUnassignedSubmissionsToJudge } = require('../utils/judgeAssignment');
 
 const router = express.Router();
 
@@ -132,6 +133,22 @@ router.post('/', async (req, res) => {
 
     const user = await User.create(userData);
 
+    // If a judge was created, assign unassigned submissions to them (and other judges in the location)
+    let assignmentResult = null;
+    if (user.role === 'judge' && (user.assignedLevel === 'Council' || user.assignedLevel === 'Regional')) {
+      try {
+        // Assign unassigned submissions using round-robin
+        assignmentResult = await assignUnassignedSubmissionsToJudge(user);
+        if (assignmentResult.success && assignmentResult.assignedCount > 0) {
+          console.log(`Auto-assigned ${assignmentResult.assignedCount} submission(s) for new judge ${user.name}`);
+        }
+      } catch (error) {
+        console.error('Error auto-assigning submissions to new judge:', error);
+        // Don't fail user creation if assignment fails
+        assignmentResult = { success: false, assignedCount: 0, error: error.message };
+      }
+    }
+
     // Log user creation
     await logger.logAdminAction(
       'Admin created new user account',
@@ -141,15 +158,26 @@ router.post('/', async (req, res) => {
         targetUserId: user._id.toString(),
         targetUserRole: user.role,
         targetUserEmail: user.email,
-        targetUserName: user.name
+        targetUserName: user.name,
+        ...(assignmentResult && { autoAssignedSubmissions: assignmentResult.assignedCount })
       },
       'success'
     );
 
-    res.status(201).json({
+    const response = {
       success: true,
       user: user.toJSON()
-    });
+    };
+
+    // Include assignment info if available
+    if (assignmentResult) {
+      response.assignmentInfo = {
+        assignedCount: assignmentResult.assignedCount,
+        message: assignmentResult.message || assignmentResult.error
+      };
+    }
+
+    res.status(201).json(response);
   } catch (error) {
     console.error('Create user error:', error);
     res.status(500).json({

@@ -4,7 +4,7 @@ const SubmissionAssignment = require('../models/SubmissionAssignment');
 const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
 const notificationService = require('../services/notificationService');
-const { assignJudgeToSubmission } = require('../utils/judgeAssignment');
+const { assignJudgeToSubmission, manuallyAssignSubmission, getEligibleJudges, getAssignedJudge } = require('../utils/judgeAssignment');
 const User = require('../models/User');
 
 const router = express.Router();
@@ -714,6 +714,133 @@ router.get('/leaderboard/national', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Server error'
+    });
+  }
+});
+
+// @route   GET /api/submissions/:id/eligible-judges
+// @desc    Get eligible judges for a submission (Superadmin only)
+// @access  Private (Superadmin)
+router.get('/:id/eligible-judges', authorize('superadmin'), async (req, res) => {
+  try {
+    const result = await getEligibleJudges(req.params.id);
+    
+    if (!result.success) {
+      return res.status(404).json({
+        success: false,
+        message: result.error
+      });
+    }
+
+    res.json({
+      success: true,
+      judges: result.judges,
+      message: result.message || `${result.judges.length} eligible judge(s) found`
+    });
+  } catch (error) {
+    console.error('Get eligible judges error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   GET /api/submissions/:id/assigned-judge
+// @desc    Get assigned judge for a submission (Superadmin only)
+// @access  Private (Superadmin)
+router.get('/:id/assigned-judge', authorize('superadmin'), async (req, res) => {
+  try {
+    const submission = await Submission.findById(req.params.id);
+    
+    if (!submission) {
+      return res.status(404).json({
+        success: false,
+        message: 'Submission not found'
+      });
+    }
+
+    // Only Council and Regional levels have assignments
+    if (submission.level === 'National') {
+      return res.json({
+        success: true,
+        assignment: null,
+        message: 'National level does not require assignment'
+      });
+    }
+
+    const assignment = await getAssignedJudge(req.params.id);
+    
+    res.json({
+      success: true,
+      assignment: assignment ? {
+        judgeId: assignment.judgeId._id,
+        judgeName: assignment.judgeId.name,
+        judgeEmail: assignment.judgeId.email,
+        assignedAt: assignment.assignedAt
+      } : null,
+      message: assignment ? 'Judge assigned' : 'No judge assigned'
+    });
+  } catch (error) {
+    console.error('Get assigned judge error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/submissions/:id/assign-judge
+// @desc    Manually assign or reassign a submission to a judge (Superadmin only)
+// @access  Private (Superadmin)
+router.post('/:id/assign-judge', authorize('superadmin'), async (req, res) => {
+  try {
+    const { judgeId } = req.body;
+
+    if (!judgeId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Judge ID is required'
+      });
+    }
+
+    const result = await manuallyAssignSubmission(req.params.id, judgeId);
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        message: result.error
+      });
+    }
+
+    // Log the assignment/reassignment
+    await logger.logAdminAction(
+      result.message.includes('reassigned') ? 'Admin reassigned submission to judge' : 'Admin assigned submission to judge',
+      req.user._id,
+      req,
+      {
+        submissionId: req.params.id,
+        judgeId: judgeId,
+        assignmentId: result.assignment._id.toString()
+      },
+      'success'
+    );
+
+    res.json({
+      success: true,
+      assignment: {
+        id: result.assignment._id,
+        submissionId: result.assignment.submissionId,
+        judgeId: result.assignment.judgeId,
+        assignedAt: result.assignment.assignedAt
+      },
+      message: result.message
+    });
+  } catch (error) {
+    console.error('Assign judge error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
     });
   }
 });
