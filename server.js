@@ -6,7 +6,7 @@ const dotenv = require('dotenv');
 dotenv.config();
 
 // Import database connection
-const connectDB = require('./config/database');
+const { connectDB, isConnected } = require('./config/database');
 
 // Import services
 const emailService = require('./services/emailService');
@@ -50,9 +50,6 @@ app.use(cors({
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-// MongoDB Connection
-connectDB();
 
 // Initialize email service
 emailService.initialize();
@@ -106,13 +103,32 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 5000;
 
-// Start round scheduler
-const { startScheduler } = require('./utils/roundScheduler');
-startScheduler();
+// Start server after MongoDB connection
+const startServer = async () => {
+  try {
+    // Connect to MongoDB first
+    await connectDB();
+    
+    // Start round scheduler only after connection is established
+    const { startScheduler } = require('./utils/roundScheduler');
+    startScheduler();
 
-app.listen(PORT, () => {
-  if (process.env.NODE_ENV === 'development') {
-    console.log(`Server running on port ${PORT} (${process.env.NODE_ENV || 'development'})`);
+    // Start HTTP server
+    app.listen(PORT, () => {
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`Server running on port ${PORT} (${process.env.NODE_ENV || 'development'})`);
+      }
+    });
+  } catch (error) {
+    console.error('Failed to start server:', error.message);
+    // Retry connection after 5 seconds
+    setTimeout(() => {
+      console.log('Retrying MongoDB connection...');
+      startServer();
+    }, 5000);
   }
-});
+};
+
+// Start the server
+startServer();
 

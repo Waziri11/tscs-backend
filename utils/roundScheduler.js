@@ -174,6 +174,16 @@ const advanceSubmissions = async (level, year, region = null, council = null) =>
 // Check and process rounds that should end
 const checkAndProcessRounds = async () => {
   try {
+    // Check if MongoDB is connected before running queries
+    const mongoose = require('mongoose');
+    if (mongoose.connection.readyState !== 1) {
+      // Connection not ready, skip this check
+      if (process.env.NODE_ENV === 'development') {
+        console.log('MongoDB not connected, skipping round check');
+      }
+      return;
+    }
+
     const now = new Date();
     
     // Find active rounds that should end
@@ -281,8 +291,10 @@ const startScheduler = () => {
     clearInterval(schedulerInterval);
   }
 
-  // Check immediately on start
-  checkAndProcessRounds();
+  // Wait a bit for connection to be fully established before first check
+  setTimeout(() => {
+    checkAndProcessRounds();
+  }, 2000); // Wait 2 seconds after connection
 
   // Then check every minute
   schedulerInterval = setInterval(checkAndProcessRounds, 60 * 1000);
