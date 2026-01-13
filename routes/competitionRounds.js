@@ -4,6 +4,7 @@ const Submission = require('../models/Submission');
 const Evaluation = require('../models/Evaluation');
 const User = require('../models/User');
 const Quota = require('../models/Quota');
+const SubmissionAssignment = require('../models/SubmissionAssignment');
 const { protect, authorize } = require('../middleware/auth');
 
 // Safely import logger
