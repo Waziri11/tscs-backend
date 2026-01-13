@@ -1,5 +1,6 @@
 const express = require('express');
 const Submission = require('../models/Submission');
+const SubmissionAssignment = require('../models/SubmissionAssignment');
 const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
 const notificationService = require('../services/notificationService');
