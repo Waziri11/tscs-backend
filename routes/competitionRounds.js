@@ -72,69 +72,69 @@ router.get('/active', async (req, res) => {
       
       // Filter eligible rounds and score them by specificity
       const eligibleRounds = allRounds.map(round => {
-        // CRITICAL: First check if level matches
-        if (round.level !== judgeLevel) {
-          return { round, matchScore: 0, isEligible: false };
-        }
-        
-        // Normalize round location data
+        // Normalize round location data first
         const roundRegion = normalize(round.region);
         const roundCouncil = normalize(round.council);
+        const isNationwide = !roundRegion && !roundCouncil;
         
         let matchScore = 0;
         let isEligible = false;
         
-        // Match based on judge level
-        if (judgeLevel === 'Council') {
-          // Council judges should see:
-          // 1. Rounds for their specific council (region and council both match) - score: 100 (most specific)
-          // 2. Rounds for all councils in their region (region matches, council is null/empty) - score: 50
-          // 3. Nationwide rounds (no region/council) - score: 25 (fallback)
-          if (roundRegion === judgeRegion) {
-            if (roundCouncil === judgeCouncil && judgeCouncil) {
-              // Specific council matches - most specific
-              matchScore = 100;
-              isEligible = true;
-            } else if (!roundCouncil) {
-              // Round is for all councils in region
-              matchScore = 50;
-              isEligible = true;
-            }
-          } else if (!roundRegion && !roundCouncil) {
-            // Nationwide round - Council judges can see it as fallback
-            matchScore = 25;
+        // FIRST: Check for nationwide rounds (these can be seen by all judges regardless of level)
+        if (isNationwide) {
+          if (judgeLevel === 'National') {
+            matchScore = 100; // Perfect match for National judges
             isEligible = true;
-          }
-        } else if (judgeLevel === 'Regional') {
-          // Regional judges should see rounds for their region (council must be null/empty)
-          // OR nationwide rounds
-          if (roundRegion === judgeRegion && !roundCouncil) {
-            matchScore = 100;
+          } else if (judgeLevel === 'Regional') {
+            matchScore = 50; // Fallback for Regional judges
             isEligible = true;
-          } else if (!roundRegion && !roundCouncil) {
-            // Nationwide round
-            matchScore = 50;
-            isEligible = true;
-          }
-        } else if (judgeLevel === 'National') {
-          // National judges only see nationwide rounds
-          if (!roundRegion && !roundCouncil) {
-            matchScore = 100;
+          } else if (judgeLevel === 'Council') {
+            matchScore = 25; // Fallback for Council judges
             isEligible = true;
           }
         }
         
-        // Debug logging for each round
+        // THEN: Check level-specific matches (only if level matches)
         if (round.level === judgeLevel) {
-          console.log('[Active Rounds] Round check:', {
-            roundId: round._id,
-            roundLevel: round.level,
-            roundRegion,
-            roundCouncil,
-            matchScore,
-            isEligible
-          });
+          // Match based on judge level
+          if (judgeLevel === 'Council') {
+            // Council judges should see:
+            // 1. Rounds for their specific council (region and council both match) - score: 100 (most specific)
+            // 2. Rounds for all councils in their region (region matches, council is null/empty) - score: 50
+            if (roundRegion === judgeRegion) {
+              if (roundCouncil === judgeCouncil && judgeCouncil) {
+                // Specific council matches - most specific (overwrite nationwide if already set)
+                matchScore = 100;
+                isEligible = true;
+              } else if (!roundCouncil) {
+                // Round is for all councils in region (overwrite nationwide if already set)
+                matchScore = 50;
+                isEligible = true;
+              }
+            }
+            // Note: Nationwide already handled above
+          } else if (judgeLevel === 'Regional') {
+            // Regional judges should see rounds for their region (council must be null/empty)
+            if (roundRegion === judgeRegion && !roundCouncil) {
+              matchScore = 100; // Overwrite nationwide if already set
+              isEligible = true;
+            }
+            // Note: Nationwide already handled above
+          }
+          // Note: National level already handled above in nationwide check
         }
+        
+        // Debug logging for each round
+        console.log('[Active Rounds] Round check:', {
+          roundId: round._id,
+          roundLevel: round.level,
+          roundRegion,
+          roundCouncil,
+          isNationwide,
+          judgeLevel,
+          matchScore,
+          isEligible
+        });
         
         return { round, matchScore, isEligible };
       }).filter(item => item.isEligible);
