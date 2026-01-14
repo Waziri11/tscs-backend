@@ -172,32 +172,96 @@ router.post('/', authorize('judge'), async (req, res) => {
         });
       }
     } else {
-      // If submission doesn't have a roundId, check if there's an active round for this submission's level/location
-      const activeRoundQuery = {
-        year: submission.year,
-        level: submission.level,
-        status: 'active'
+      // If submission doesn't have a roundId, find active round using same matching logic as /active endpoint
+      // This handles nationwide rounds and uses normalized matching
+      
+      // Fetch all active rounds
+      const allActiveRounds = await CompetitionRound.find({ status: 'active' })
+        .sort({ createdAt: -1 })
+        .limit(50);
+      
+      // Normalize helper (same as /active endpoint)
+      const normalize = (str) => {
+        if (!str) return null;
+        return str.toString().trim().toLowerCase() || null;
       };
       
-      if (submission.level === 'Council' && submission.region && submission.council) {
-        activeRoundQuery.region = submission.region;
-        activeRoundQuery.council = submission.council;
-      } else if (submission.level === 'Regional' && submission.region) {
-        activeRoundQuery.region = submission.region;
+      const submissionLevel = submission.level;
+      const submissionRegion = normalize(submission.region);
+      const submissionCouncil = normalize(submission.council);
+      
+      // Find best matching round using priority system
+      let bestRound = null;
+      let bestPriority = -1;
+      
+      for (const round of allActiveRounds) {
+        const roundRegion = normalize(round.region);
+        const roundCouncil = normalize(round.council);
+        const isRoundNationwide = !roundRegion && !roundCouncil;
+        
+        let priority = -1;
+        
+        // Rule 1: Exact level + location match (highest priority = 100)
+        if (round.level === submissionLevel) {
+          if (submissionLevel === 'Council') {
+            // Council: exact region + council match
+            if (roundRegion === submissionRegion && roundCouncil === submissionCouncil) {
+              priority = 100;
+            }
+            // Council: region match, no specific council (all councils in region)
+            else if (roundRegion === submissionRegion && !roundCouncil) {
+              priority = 80;
+            }
+          } else if (submissionLevel === 'Regional') {
+            // Regional: exact region match, no council
+            if (roundRegion === submissionRegion && !roundCouncil) {
+              priority = 100;
+            }
+          } else if (submissionLevel === 'National') {
+            // National: must be nationwide
+            if (isRoundNationwide) {
+              priority = 100;
+            }
+          }
+        }
+        
+        // Rule 2: Nationwide rounds (lower priority, but still eligible)
+        if (isRoundNationwide && priority === -1) {
+          // Any submission can match nationwide rounds as fallback
+          if (submissionLevel === 'National') {
+            priority = 90;
+          } else if (submissionLevel === 'Regional') {
+            priority = 50;
+          } else if (submissionLevel === 'Council') {
+            priority = 30;
+          }
+        }
+        
+        // Keep track of best match
+        if (priority > bestPriority) {
+          bestPriority = priority;
+          bestRound = round;
+        }
       }
       
-      const activeRound = await CompetitionRound.findOne(activeRoundQuery);
-      
-      if (!activeRound) {
+      if (!bestRound) {
         return res.status(403).json({
           success: false,
           message: 'Cannot evaluate submission. No active round found for this submission. Please wait for an admin to activate a round.'
         });
       }
       
-      // Check if round has ended
+      // Check if round has ended (use actual end time based on timing type)
       const now = new Date();
-      if (now >= activeRound.endTime) {
+      let actualEndTime = bestRound.endTime;
+      
+      // Calculate actual end time for countdown rounds
+      if (bestRound.timingType === 'countdown' && bestRound.countdownDuration) {
+        const start = bestRound.startTime || bestRound.createdAt;
+        actualEndTime = new Date(start.getTime() + bestRound.countdownDuration);
+      }
+      
+      if (now >= actualEndTime) {
         return res.status(403).json({
           success: false,
           message: 'Cannot evaluate submission. Active round has ended.'
