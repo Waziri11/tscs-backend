@@ -177,8 +177,24 @@ const advanceSubmissions = async (level, year, region = null, council = null) =>
       }
     });
 
+    // Build leaderboard with positions (sorted by score descending)
+    const allSubmissionsSorted = submissions.sort((a, b) => 
+      (b.averageScore || 0) - (a.averageScore || 0)
+    );
+    
+    // Create a map of submission ID to leaderboard position
+    const leaderboardMap = {};
+    allSubmissionsSorted.forEach((sub, index) => {
+      leaderboardMap[sub._id.toString()] = {
+        rank: index + 1,
+        averageScore: sub.averageScore || 0,
+        totalSubmissions: allSubmissionsSorted.length
+      };
+    });
+
     const promotedIds = [];
     const eliminatedIds = [];
+    const leaderboard = [];
 
     for (const sub of toPromote) {
       await Submission.findByIdAndUpdate(sub._id, {
@@ -186,6 +202,18 @@ const advanceSubmissions = async (level, year, region = null, council = null) =>
         status: 'approved'
       });
       promotedIds.push(sub._id.toString());
+      
+      // Add to leaderboard with status
+      const lbData = leaderboardMap[sub._id.toString()];
+      leaderboard.push({
+        submissionId: sub._id.toString(),
+        teacherId: sub.teacherId?._id?.toString() || sub.teacherId?.toString(),
+        rank: lbData.rank,
+        averageScore: lbData.averageScore,
+        totalSubmissions: lbData.totalSubmissions,
+        status: 'promoted',
+        newLevel: nextLevel
+      });
     }
 
     for (const sub of toEliminate) {
@@ -193,6 +221,17 @@ const advanceSubmissions = async (level, year, region = null, council = null) =>
         status: 'eliminated'
       });
       eliminatedIds.push(sub._id.toString());
+      
+      // Add to leaderboard with status
+      const lbData = leaderboardMap[sub._id.toString()];
+      leaderboard.push({
+        submissionId: sub._id.toString(),
+        teacherId: sub.teacherId?._id?.toString() || sub.teacherId?.toString(),
+        rank: lbData.rank,
+        averageScore: lbData.averageScore,
+        totalSubmissions: lbData.totalSubmissions,
+        status: 'eliminated'
+      });
     }
 
     return {
@@ -200,7 +239,8 @@ const advanceSubmissions = async (level, year, region = null, council = null) =>
       promoted: promotedIds.length,
       eliminated: eliminatedIds.length,
       promotedIds,
-      eliminatedIds
+      eliminatedIds,
+      leaderboard
     };
   } catch (error) {
     console.error('Error advancing submissions:', error);
