@@ -236,10 +236,6 @@ const checkAndProcessRounds = async () => {
     // Check if MongoDB is connected before running queries
     const mongoose = require('mongoose');
     if (mongoose.connection.readyState !== 1) {
-      // Connection not ready, skip this check
-      if (process.env.NODE_ENV === 'development') {
-        console.log('MongoDB not connected, skipping round check');
-      }
       return;
     }
 
@@ -254,8 +250,6 @@ const checkAndProcessRounds = async () => {
       const actualEndTime = round.getActualEndTime();
       
       if (now >= actualEndTime) {
-        console.log(`[Round Scheduler] Round ${round._id} (${round.level}) has ended`);
-        
         // Check if we should wait for all judges
         if (round.waitForAllJudges) {
           const completionStatus = await checkAllJudgesCompleted(
@@ -266,7 +260,6 @@ const checkAndProcessRounds = async () => {
           );
 
           if (!completionStatus.allCompleted) {
-            console.log(`[Round Scheduler] Round ${round._id} waiting for judges: ${completionStatus.pendingCount} pending`);
             // Don't advance yet, but mark as ended (will be closed when judges finish)
             round.status = 'ended';
             round.endedAt = now;
@@ -277,7 +270,6 @@ const checkAndProcessRounds = async () => {
 
         // Auto-advance if enabled
         if (round.autoAdvance) {
-          console.log(`[Round Scheduler] Auto-advancing round ${round._id} (${round.level})`);
           const advanceResult = await advanceSubmissions(
             round.level,
             round.year,
@@ -286,8 +278,6 @@ const checkAndProcessRounds = async () => {
           );
 
           if (advanceResult.success) {
-            console.log(`[Round Scheduler] Advanced: ${advanceResult.promoted} promoted, ${advanceResult.eliminated} eliminated`);
-            
             // Send notifications to teachers with leaderboard data
             const { notifyTeachersOnPromotion, notifyTeachersOnElimination } = require('./notifications');
             const leaderboard = advanceResult.leaderboard || [];
@@ -336,7 +326,6 @@ const checkAndProcessRounds = async () => {
           round.closedAt = now;
         }
         await round.save();
-        console.log(`[Round Scheduler] Round ${round._id} marked as ${round.status}`);
       }
     }
   } catch (error) {
@@ -368,10 +357,6 @@ const startScheduler = () => {
 
   // Then check every minute
   schedulerInterval = setInterval(checkAndProcessRounds, 60 * 1000);
-  
-  if (process.env.NODE_ENV === 'development') {
-    console.log('Round scheduler started');
-  }
 };
 
 const stopScheduler = () => {

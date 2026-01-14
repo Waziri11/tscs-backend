@@ -111,21 +111,6 @@ router.get('/active', async (req, res) => {
 
     // Return the best matching round (or empty array)
     const rounds = bestRound ? [bestRound] : [];
-    
-    console.log('[Active Rounds] Result:', {
-      judgeId: user._id,
-      judgeLevel,
-      judgeRegion,
-      judgeCouncil,
-      totalActiveRounds: allRounds.length,
-      selectedRound: bestRound ? {
-        id: bestRound._id,
-        level: bestRound.level,
-        region: bestRound.region,
-        council: bestRound.council,
-        priority: bestPriority
-      } : null
-    });
 
     res.json({
       success: true,
