@@ -856,18 +856,20 @@ router.post('/:id/close', async (req, res) => {
       });
     }
 
-    // Send notifications to teachers
+    // Send notifications to teachers with leaderboard data
     const { notifyTeachersOnPromotion, notifyTeachersOnElimination } = require('../utils/notifications');
+    const leaderboard = advanceResult.leaderboard || [];
+    
     if (advanceResult.promotedIds && advanceResult.promotedIds.length > 0) {
       const nextLevel = getNextLevel(round.level);
       if (nextLevel) {
-        notifyTeachersOnPromotion(advanceResult.promotedIds, nextLevel).catch(err => 
+        notifyTeachersOnPromotion(advanceResult.promotedIds, nextLevel, leaderboard).catch(err => 
           console.error('Error sending promotion notifications:', err)
         );
       }
     }
     if (advanceResult.eliminatedIds && advanceResult.eliminatedIds.length > 0) {
-      notifyTeachersOnElimination(advanceResult.eliminatedIds).catch(err => 
+      notifyTeachersOnElimination(advanceResult.eliminatedIds, leaderboard).catch(err => 
         console.error('Error sending elimination notifications:', err)
       );
     }
