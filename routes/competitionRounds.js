@@ -33,11 +33,15 @@ router.get('/active', async (req, res) => {
     // Build query for active rounds
     let query = { status: 'active' };
     
-    if (level) {
+    // For judges, don't filter by level in the query - fetch all active rounds
+    // and let the matching logic handle level filtering (so judges can see
+    // nationwide rounds at different levels, e.g., Council judges can see National nationwide rounds)
+    if (level && (!user || user.role !== 'judge')) {
       query.level = level;
     }
+    // If user is a judge, we'll filter by level in code after fetching all active rounds
 
-    // Fetch all active rounds for the level (we'll filter by location in code for better reliability)
+    // Fetch all active rounds (or filtered by level for non-judges)
     const allRounds = await CompetitionRound.find(query)
       .sort({ createdAt: -1 })
       .limit(50); // Get more rounds, we'll filter them
