@@ -1,6 +1,7 @@
 const Notification = require('../models/Notification');
 const User = require('../models/User');
 const Submission = require('../models/Submission');
+const notificationService = require('../services/notificationService');
 
 // Safely import logger
 let logger = null;
@@ -81,7 +82,7 @@ const notifyTeachersOnPromotion = async (submissionIds, newLevel, leaderboard = 
         const rankText = rank !== 'N/A' ? `#${rank}` : 'N/A';
         const positionText = totalSubmissions > 0 ? `${rankText} out of ${totalSubmissions}` : rankText;
         
-        await createNotification({
+        const notification = await createNotification({
           userId: submission.teacherId._id,
           type: 'submission_promoted',
           title: '🎉 Submission Promoted!',
@@ -98,9 +99,18 @@ const notifyTeachersOnPromotion = async (submissionIds, newLevel, leaderboard = 
             rank,
             averageScore,
             totalSubmissions,
-            status: 'promoted'
+            status: 'promoted',
+            roundName: `${submission.level} Level Round`
           }
         });
+        
+        // Send email notification
+        try {
+          await notificationService.sendEmailNotification(submission.teacherId._id, notification);
+        } catch (emailError) {
+          console.error('Error sending promotion email:', emailError);
+          // Don't fail the notification if email fails
+        }
       }
     }
   } catch (error) {
@@ -131,7 +141,7 @@ const notifyTeachersOnElimination = async (submissionIds, leaderboard = []) => {
         const rankText = rank !== 'N/A' ? `#${rank}` : 'N/A';
         const positionText = totalSubmissions > 0 ? `${rankText} out of ${totalSubmissions}` : rankText;
         
-        await createNotification({
+        const notification = await createNotification({
           userId: submission.teacherId._id,
           type: 'submission_eliminated',
           title: 'Round Results',
@@ -147,9 +157,18 @@ const notifyTeachersOnElimination = async (submissionIds, leaderboard = []) => {
             rank,
             averageScore,
             totalSubmissions,
-            status: 'eliminated'
+            status: 'eliminated',
+            roundName: `${submission.level} Level Round`
           }
         });
+        
+        // Send email notification
+        try {
+          await notificationService.sendEmailNotification(submission.teacherId._id, notification);
+        } catch (emailError) {
+          console.error('Error sending elimination email:', emailError);
+          // Don't fail the notification if email fails
+        }
       }
     }
   } catch (error) {

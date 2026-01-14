@@ -658,10 +658,16 @@ Thank you for your participation!
    * @returns {string} HTML content
    */
   generateSubmissionResultHTML(userName, result, metadata) {
-    const { roundName, nextRound } = metadata;
+    const { roundName, nextRound, rank, averageScore, totalSubmissions } = metadata;
     const isPromoted = result === 'promoted';
     const icon = isPromoted ? '🎉' : '📋';
     const color = isPromoted ? '#52c41a' : '#faad14';
+    
+    // Format score and position
+    const scoreText = averageScore ? averageScore.toFixed(2) : '0.00';
+    const rankText = rank && rank !== 'N/A' ? `#${rank}` : 'N/A';
+    const positionText = totalSubmissions ? `${rankText} out of ${totalSubmissions}` : rankText;
+    const statusText = isPromoted ? `Advanced to ${nextRound || 'the next round'}` : 'Did not advance';
 
     return `
       <!DOCTYPE html>
@@ -676,6 +682,11 @@ Thank you for your participation!
           .header { text-align: center; margin-bottom: 30px; }
           .result-icon { font-size: 48px; margin-bottom: 16px; }
           .content { background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid ${color}; }
+          .results-box { background: white; padding: 20px; border-radius: 8px; margin: 20px 0; border: 2px solid ${color}; }
+          .result-item { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #eee; }
+          .result-item:last-child { border-bottom: none; }
+          .result-label { font-weight: bold; color: #666; }
+          .result-value { color: #333; font-size: 16px; }
           .footer { margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; text-align: center; color: #666; font-size: 14px; }
         </style>
       </head>
@@ -683,7 +694,7 @@ Thank you for your participation!
         <div class="container">
           <div class="header">
             <div class="result-icon">${icon}</div>
-            <h1>${isPromoted ? 'Congratulations!' : 'Evaluation Complete'}</h1>
+            <h1>${isPromoted ? 'Congratulations!' : 'Round Results'}</h1>
             <p>Hello ${userName},</p>
           </div>
 
@@ -693,6 +704,23 @@ Thank you for your participation!
               ? `Great news! Your submission has been selected to advance to ${nextRound || 'the next round'}.`
               : 'The evaluation period has ended. Unfortunately, your submission was not selected to advance to the next round.'
             }</p>
+            
+            <div class="results-box">
+              <h4 style="margin-top: 0; color: ${color};">📊 Your Results</h4>
+              <div class="result-item">
+                <span class="result-label">Score:</span>
+                <span class="result-value">${scoreText}/10</span>
+              </div>
+              <div class="result-item">
+                <span class="result-label">Position:</span>
+                <span class="result-value">${positionText}</span>
+              </div>
+              <div class="result-item">
+                <span class="result-label">Status:</span>
+                <span class="result-value" style="color: ${color}; font-weight: bold;">${statusText}</span>
+              </div>
+            </div>
+            
             ${isPromoted
               ? '<p>Keep up the excellent work and continue participating in future competitions!</p>'
               : '<p>Don\'t be discouraged! We encourage you to participate in future competitions and continue developing your teaching skills.</p>'
@@ -716,8 +744,14 @@ Thank you for your participation!
    * @returns {string} Text content
    */
   generateSubmissionResultText(userName, result, metadata) {
-    const { roundName, nextRound } = metadata;
+    const { roundName, nextRound, rank, averageScore, totalSubmissions } = metadata;
     const isPromoted = result === 'promoted';
+    
+    // Format score and position
+    const scoreText = averageScore ? averageScore.toFixed(2) : '0.00';
+    const rankText = rank && rank !== 'N/A' ? `#${rank}` : 'N/A';
+    const positionText = totalSubmissions ? `${rankText} out of ${totalSubmissions}` : rankText;
+    const statusText = isPromoted ? `Advanced to ${nextRound || 'the next round'}` : 'Did not advance';
 
     return `
 TSCS - Submission Results
@@ -730,6 +764,11 @@ ${isPromoted
   ? `Congratulations! Your submission has been selected to advance to ${nextRound || 'the next round'}.`
   : 'The evaluation period has ended. Unfortunately, your submission was not selected to advance to the next round.'
 }
+
+📊 Your Results:
+• Score: ${scoreText}/10
+• Position: ${positionText}
+• Status: ${statusText}
 
 ${isPromoted
   ? 'Keep up the excellent work and continue participating in future competitions!'
