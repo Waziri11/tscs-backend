@@ -121,6 +121,8 @@ const advanceSubmissions = async (level, year, region = null, council = null) =>
       status: { $in: ['submitted', 'evaluated'] }
     };
     
+    // Only add region/council filters if round is not nationwide
+    // If region/council are null, query all submissions at that level (nationwide)
     if (region) query.region = region;
     if (council) query.council = council;
 
@@ -135,14 +137,18 @@ const advanceSubmissions = async (level, year, region = null, council = null) =>
     const quotaDoc = await Quota.findOne({ year: parseInt(year), level });
     const quota = quotaDoc ? quotaDoc.quota : 0;
 
+    // Group submissions by location for quota application
     const groups = {};
     submissions.forEach(sub => {
       let locationKey;
       if (level === 'Council') {
-        locationKey = `${sub.region}::${sub.council}`;
+        // Group by region and council
+        locationKey = `${sub.region || 'unknown'}::${sub.council || 'unknown'}`;
       } else if (level === 'Regional') {
-        locationKey = sub.region;
+        // Group by region
+        locationKey = sub.region || 'unknown';
       } else {
+        // National level: single group
         locationKey = 'national';
       }
       
@@ -155,14 +161,17 @@ const advanceSubmissions = async (level, year, region = null, council = null) =>
     const toPromote = [];
     const toEliminate = [];
 
+    // Process each location group based on quota
     Object.keys(groups).forEach(locationKey => {
       const locationSubs = groups[locationKey].sort((a, b) => 
         (b.averageScore || 0) - (a.averageScore || 0)
       );
 
       if (locationSubs.length <= quota) {
+        // All advance if within quota
         toPromote.push(...locationSubs);
       } else {
+        // Top N advance based on quota, rest eliminated
         toPromote.push(...locationSubs.slice(0, quota));
         toEliminate.push(...locationSubs.slice(quota));
       }
