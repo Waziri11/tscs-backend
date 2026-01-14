@@ -61,8 +61,9 @@ const createNotification = async ({ userId, type, title, message, metadata = {},
  * Notify teachers when their submission is promoted
  * @param {Array} submissionIds - Array of submission IDs that were promoted
  * @param {String} newLevel - New level (Regional or National)
+ * @param {Array} leaderboard - Array of leaderboard entries with rank, score, etc.
  */
-const notifyTeachersOnPromotion = async (submissionIds, newLevel) => {
+const notifyTeachersOnPromotion = async (submissionIds, newLevel, leaderboard = []) => {
   try {
     const submissions = await Submission.find({
       _id: { $in: submissionIds }
@@ -70,15 +71,34 @@ const notifyTeachersOnPromotion = async (submissionIds, newLevel) => {
 
     for (const submission of submissions) {
       if (submission.teacherId) {
+        // Find leaderboard entry for this submission
+        const lbEntry = leaderboard.find(lb => lb.submissionId === submission._id.toString());
+        const rank = lbEntry?.rank || 'N/A';
+        const averageScore = lbEntry?.averageScore || submission.averageScore || 0;
+        const totalSubmissions = lbEntry?.totalSubmissions || 0;
+        
+        const scoreText = averageScore > 0 ? averageScore.toFixed(2) : '0.00';
+        const rankText = rank !== 'N/A' ? `#${rank}` : 'N/A';
+        const positionText = totalSubmissions > 0 ? `${rankText} out of ${totalSubmissions}` : rankText;
+        
         await createNotification({
           userId: submission.teacherId._id,
           type: 'submission_promoted',
-          title: 'Submission Promoted!',
-          message: `Congratulations! Your submission "${submission.title || submission._id}" has been promoted to ${newLevel} level.`,
+          title: '🎉 Submission Promoted!',
+          message: `Congratulations! Your submission has been promoted to ${newLevel} level.\n\n` +
+                   `📊 Your Results:\n` +
+                   `• Score: ${scoreText}/10\n` +
+                   `• Position: ${positionText}\n` +
+                   `• Status: Advanced to ${newLevel} level\n\n` +
+                   `Keep up the excellent work!`,
           metadata: {
             submissionId: submission._id.toString(),
             newLevel,
-            oldLevel: submission.level
+            oldLevel: submission.level,
+            rank,
+            averageScore,
+            totalSubmissions,
+            status: 'promoted'
           }
         });
       }
@@ -91,8 +111,9 @@ const notifyTeachersOnPromotion = async (submissionIds, newLevel) => {
 /**
  * Notify teachers when their submission is eliminated
  * @param {Array} submissionIds - Array of submission IDs that were eliminated
+ * @param {Array} leaderboard - Array of leaderboard entries with rank, score, etc.
  */
-const notifyTeachersOnElimination = async (submissionIds) => {
+const notifyTeachersOnElimination = async (submissionIds, leaderboard = []) => {
   try {
     const submissions = await Submission.find({
       _id: { $in: submissionIds }
@@ -100,14 +121,33 @@ const notifyTeachersOnElimination = async (submissionIds) => {
 
     for (const submission of submissions) {
       if (submission.teacherId) {
+        // Find leaderboard entry for this submission
+        const lbEntry = leaderboard.find(lb => lb.submissionId === submission._id.toString());
+        const rank = lbEntry?.rank || 'N/A';
+        const averageScore = lbEntry?.averageScore || submission.averageScore || 0;
+        const totalSubmissions = lbEntry?.totalSubmissions || 0;
+        
+        const scoreText = averageScore > 0 ? averageScore.toFixed(2) : '0.00';
+        const rankText = rank !== 'N/A' ? `#${rank}` : 'N/A';
+        const positionText = totalSubmissions > 0 ? `${rankText} out of ${totalSubmissions}` : rankText;
+        
         await createNotification({
           userId: submission.teacherId._id,
           type: 'submission_eliminated',
-          title: 'Submission Status Update',
-          message: `Your submission "${submission.title || submission._id}" did not advance to the next level. Thank you for participating!`,
+          title: 'Round Results',
+          message: `The ${submission.level} level round has ended.\n\n` +
+                   `📊 Your Results:\n` +
+                   `• Score: ${scoreText}/10\n` +
+                   `• Position: ${positionText}\n` +
+                   `• Status: Did not advance\n\n` +
+                   `Thank you for participating in the competition!`,
           metadata: {
             submissionId: submission._id.toString(),
-            level: submission.level
+            level: submission.level,
+            rank,
+            averageScore,
+            totalSubmissions,
+            status: 'eliminated'
           }
         });
       }
