@@ -232,18 +232,20 @@ const checkAndProcessRounds = async () => {
       const actualEndTime = round.getActualEndTime();
       
       if (now >= actualEndTime) {
+        console.log(`[Round Scheduler] Round ${round._id} (${round.level}) has ended`);
         
         // Check if we should wait for all judges
         if (round.waitForAllJudges) {
           const completionStatus = await checkAllJudgesCompleted(
             round.level,
             round.year,
-            round.region,
-            round.council
+            round.region || null,  // Explicitly pass null for nationwide
+            round.council || null  // Explicitly pass null for nationwide
           );
 
           if (!completionStatus.allCompleted) {
-            // Don't end yet, but mark as ended (will be closed when judges finish)
+            console.log(`[Round Scheduler] Round ${round._id} waiting for judges: ${completionStatus.pendingCount} pending`);
+            // Don't advance yet, but mark as ended (will be closed when judges finish)
             round.status = 'ended';
             round.endedAt = now;
             await round.save();
@@ -253,14 +255,16 @@ const checkAndProcessRounds = async () => {
 
         // Auto-advance if enabled
         if (round.autoAdvance) {
+          console.log(`[Round Scheduler] Auto-advancing round ${round._id} (${round.level})`);
           const advanceResult = await advanceSubmissions(
             round.level,
             round.year,
-            round.region,
-            round.council
+            round.region || null,  // Explicitly pass null for nationwide
+            round.council || null  // Explicitly pass null for nationwide
           );
 
           if (advanceResult.success) {
+            console.log(`[Round Scheduler] Advanced: ${advanceResult.promoted} promoted, ${advanceResult.eliminated} eliminated`);
             
             // Send notifications to teachers
             const { notifyTeachersOnPromotion, notifyTeachersOnElimination } = require('./notifications');
@@ -287,12 +291,16 @@ const checkAndProcessRounds = async () => {
                   roundId: round._id.toString(),
                   year: round.year,
                   level: round.level,
+                  region: round.region,
+                  council: round.council,
                   promoted: advanceResult.promoted,
                   eliminated: advanceResult.eliminated
                 },
                 'success'
               ).catch(() => {});
             }
+          } else {
+            console.error(`[Round Scheduler] Failed to advance round ${round._id}:`, advanceResult.error);
           }
         }
 
@@ -304,6 +312,7 @@ const checkAndProcessRounds = async () => {
           round.closedAt = now;
         }
         await round.save();
+        console.log(`[Round Scheduler] Round ${round._id} marked as ${round.status}`);
       }
     }
   } catch (error) {
