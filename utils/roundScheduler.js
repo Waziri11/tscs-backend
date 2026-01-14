@@ -160,41 +160,40 @@ const advanceSubmissions = async (level, year, region = null, council = null) =>
 
     const toPromote = [];
     const toEliminate = [];
+    const leaderboard = [];
 
-    // Process each location group based on quota
+    // Process each location group based on quota and build leaderboard per location
     Object.keys(groups).forEach(locationKey => {
       const locationSubs = groups[locationKey].sort((a, b) => 
         (b.averageScore || 0) - (a.averageScore || 0)
       );
 
-      if (locationSubs.length <= quota) {
-        // All advance if within quota
-        toPromote.push(...locationSubs);
-      } else {
-        // Top N advance based on quota, rest eliminated
-        toPromote.push(...locationSubs.slice(0, quota));
-        toEliminate.push(...locationSubs.slice(quota));
-      }
-    });
-
-    // Build leaderboard with positions (sorted by score descending)
-    const allSubmissionsSorted = submissions.sort((a, b) => 
-      (b.averageScore || 0) - (a.averageScore || 0)
-    );
-    
-    // Create a map of submission ID to leaderboard position
-    const leaderboardMap = {};
-    allSubmissionsSorted.forEach((sub, index) => {
-      leaderboardMap[sub._id.toString()] = {
-        rank: index + 1,
-        averageScore: sub.averageScore || 0,
-        totalSubmissions: allSubmissionsSorted.length
-      };
+      // Build leaderboard for this location group
+      locationSubs.forEach((sub, index) => {
+        const rank = index + 1;
+        const isPromoted = locationSubs.length <= quota || index < quota;
+        
+        if (isPromoted) {
+          toPromote.push(sub);
+        } else {
+          toEliminate.push(sub);
+        }
+        
+        // Add to leaderboard with position within location group
+        leaderboard.push({
+          submissionId: sub._id.toString(),
+          teacherId: sub.teacherId?._id?.toString() || sub.teacherId?.toString(),
+          rank: rank,
+          averageScore: sub.averageScore || 0,
+          totalSubmissions: locationSubs.length,
+          locationKey: locationKey,
+          status: isPromoted ? 'promoted' : 'eliminated'
+        });
+      });
     });
 
     const promotedIds = [];
     const eliminatedIds = [];
-    const leaderboard = [];
 
     for (const sub of toPromote) {
       await Submission.findByIdAndUpdate(sub._id, {
@@ -203,17 +202,11 @@ const advanceSubmissions = async (level, year, region = null, council = null) =>
       });
       promotedIds.push(sub._id.toString());
       
-      // Add to leaderboard with status
-      const lbData = leaderboardMap[sub._id.toString()];
-      leaderboard.push({
-        submissionId: sub._id.toString(),
-        teacherId: sub.teacherId?._id?.toString() || sub.teacherId?.toString(),
-        rank: lbData.rank,
-        averageScore: lbData.averageScore,
-        totalSubmissions: lbData.totalSubmissions,
-        status: 'promoted',
-        newLevel: nextLevel
-      });
+      // Update leaderboard entry with new level
+      const lbEntry = leaderboard.find(lb => lb.submissionId === sub._id.toString());
+      if (lbEntry) {
+        lbEntry.newLevel = nextLevel;
+      }
     }
 
     for (const sub of toEliminate) {
@@ -221,17 +214,6 @@ const advanceSubmissions = async (level, year, region = null, council = null) =>
         status: 'eliminated'
       });
       eliminatedIds.push(sub._id.toString());
-      
-      // Add to leaderboard with status
-      const lbData = leaderboardMap[sub._id.toString()];
-      leaderboard.push({
-        submissionId: sub._id.toString(),
-        teacherId: sub.teacherId?._id?.toString() || sub.teacherId?.toString(),
-        rank: lbData.rank,
-        averageScore: lbData.averageScore,
-        totalSubmissions: lbData.totalSubmissions,
-        status: 'eliminated'
-      });
     }
 
     return {
