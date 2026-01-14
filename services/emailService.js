@@ -265,7 +265,7 @@ class EmailService {
    * @returns {Promise<boolean>} Success status
    */
   async sendSubmissionResultEmail(email, userName, result, metadata) {
-    const { roundName, nextRound } = metadata;
+    const { roundName, nextRound, rank, averageScore, totalSubmissions } = metadata;
     const subjectLine = result === 'promoted'
       ? `Congratulations! Submission Promoted - ${roundName}`
       : `Submission Results - ${roundName}`;
@@ -279,7 +279,7 @@ class EmailService {
       html,
       text,
       type: `submission_${result}`,
-      metadata: { roundName, result, nextRound }
+      metadata: { roundName, result, nextRound, rank, averageScore, totalSubmissions }
     });
   }
 
