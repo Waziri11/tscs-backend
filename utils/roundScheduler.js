@@ -32,6 +32,7 @@ const checkAllJudgesCompleted = async (level, year, region = null, council = nul
       status: { $in: ['submitted', 'evaluated'] }
     };
     
+    // Only add region/council filters if round is not nationwide
     if (region) submissionQuery.region = region;
     if (council) submissionQuery.council = council;
 
@@ -39,31 +40,58 @@ const checkAllJudgesCompleted = async (level, year, region = null, council = nul
     
     if (submissions.length === 0) return { allCompleted: true, pendingCount: 0 };
 
+    // Get judges assigned to this round's level and location
     const judgeQuery = { role: 'judge', assignedLevel: level, status: 'active' };
-    if (level === 'Council' && region && council) {
+    
+    // For nationwide rounds, get all judges at that level
+    // For specific locations, filter by location
+    if (region && council) {
+      // Council-level round with specific location
       judgeQuery.assignedRegion = region;
       judgeQuery.assignedCouncil = council;
-    } else if (level === 'Regional' && region) {
+    } else if (region) {
+      // Regional-level round with specific region
       judgeQuery.assignedRegion = region;
     }
-    
+    // If no region/council, it's nationwide - get all judges at that level
+
     const judges = await User.find(judgeQuery);
     
     if (judges.length === 0) {
       return { allCompleted: false, pendingCount: submissions.length, reason: 'No judges assigned' };
     }
 
+    // For Council/Regional: Check if assigned judge evaluated each submission
+    // For National: Check if all judges evaluated each submission
     let pendingCount = 0;
+    
     for (const submission of submissions) {
       const evaluations = await Evaluation.find({ submissionId: submission._id });
       const evaluatedJudgeIds = evaluations.map(e => e.judgeId.toString());
       
-      const allJudgesEvaluated = judges.every(judge => 
-        evaluatedJudgeIds.includes(judge._id.toString())
-      );
-      
-      if (!allJudgesEvaluated) {
-        pendingCount++;
+      if (level === 'Council' || level === 'Regional') {
+        // 1-to-1 judging: Check if assigned judge evaluated
+        const SubmissionAssignment = require('../models/SubmissionAssignment');
+        const assignment = await SubmissionAssignment.findOne({ submissionId: submission._id });
+        
+        if (!assignment) {
+          pendingCount++;
+          continue;
+        }
+        
+        const assignedJudgeEvaluated = evaluatedJudgeIds.includes(assignment.judgeId.toString());
+        if (!assignedJudgeEvaluated) {
+          pendingCount++;
+        }
+      } else {
+        // National level: All judges must evaluate
+        const allJudgesEvaluated = judges.every(judge => 
+          evaluatedJudgeIds.includes(judge._id.toString())
+        );
+        
+        if (!allJudgesEvaluated) {
+          pendingCount++;
+        }
       }
     }
 
