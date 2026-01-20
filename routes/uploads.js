@@ -102,6 +102,18 @@ const videoUpload = multer({
   }
 });
 
+router.get('/watch/:filename/stream', protect, (req, res) => {
+  const filename = decodeURIComponent(req.params.filename).split('?')[0];
+  const filePath = path.join(videosDir, filename);
+  if (!fs.existsSync(filePath)) return res.sendStatus(404);
+
+  res.setHeader('Content-Type', 'video/mp4');
+  res.setHeader('Content-Disposition', 'inline');
+  res.sendFile(filePath);
+});
+
+
+
 // @route   POST /api/uploads/lesson-plan
 // @desc    Upload lesson plan PDF
 // @access  Private
@@ -209,6 +221,7 @@ router.get('/files/:filename', protect, (req, res) => {
     
     // Determine file type by extension to know which folder to check
     const ext = path.extname(filename).toLowerCase();
+    console.log("Requested file extension:", ext);
     const isVideo = ext === '.mp4'; // Only MP4 videos allowed
     const isPdf = ext === '.pdf';
     

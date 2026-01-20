@@ -70,21 +70,6 @@ emailService.testConnection().catch((error) => {
   console.error("Email service connection test error:", error.message);
 });
 
-app.get("/api/uploads/video/:filename", (req, res) => {
-  const filename = req.params.filename;
-
-  // IMPORTANT: point to your actual uploads directory
-  const filePath = path.resolve(process.cwd(), "uploads", "video", filename);
-
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ message: "Video not found" });
-  }
-
-  // Let the browser stream the file
-  res.setHeader("Content-Type", "video/mp4");
-  res.sendFile(filePath);
-});
-
 // Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
