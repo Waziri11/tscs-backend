@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const morgan = require("morgan");
+const path = require("path");
 
 // Load environment variables
 dotenv.config();
@@ -45,31 +46,6 @@ if (process.env.NODE_ENV === "development") {
   allowedOrigins.push(/^http:\/\/127\.0\.0\.1:\d+$/);
 }
 
-// app.use(cors({
-//   origin: (origin, callback) => {
-//     // Allow requests with no origin (like mobile apps or curl requests)
-//     if (!origin) return callback(null, true);
-
-//     // Check if origin matches any allowed pattern
-//     const isAllowed = allowedOrigins.some(allowedOrigin => {
-//       if (typeof allowedOrigin === 'string') {
-//         return origin === allowedOrigin;
-//       } else if (allowedOrigin instanceof RegExp) {
-//         return allowedOrigin.test(origin);
-//       }
-//       return false;
-//     });
-
-//     if (isAllowed) {
-//       callback(null, true);
-//     } else {
-//       callback(new Error('Not allowed by CORS'));
-//     }
-//   },
-//   credentials: true
-// }));
-// 
-
 // Logger
 app.use((req, res, next) => {
   if (process.env.NODE_ENV === "development") {
@@ -92,6 +68,21 @@ emailService.initialize();
 // Test email connection (silent in production, verbose in development)
 emailService.testConnection().catch((error) => {
   console.error("Email service connection test error:", error.message);
+});
+
+app.get("/api/uploads/video/:filename", (req, res) => {
+  const filename = req.params.filename;
+
+  // IMPORTANT: point to your actual uploads directory
+  const filePath = path.resolve(process.cwd(), "uploads", "video", filename);
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ message: "Video not found" });
+  }
+
+  // Let the browser stream the file
+  res.setHeader("Content-Type", "video/mp4");
+  res.sendFile(filePath);
 });
 
 // Routes
