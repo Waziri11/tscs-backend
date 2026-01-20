@@ -102,6 +102,10 @@ const videoUpload = multer({
   }
 });
 
+
+// @route   GET /api/uploads/watch/:filename/stream
+// @desc    Stream video file
+// @access  Private
 router.get('/watch/:filename/stream', protect, (req, res) => {
   const filename = decodeURIComponent(req.params.filename).split('?')[0];
   const filePath = path.join(videosDir, filename);
@@ -112,6 +116,25 @@ router.get('/watch/:filename/stream', protect, (req, res) => {
   res.sendFile(filePath);
 });
 
+
+// @route   GET /api/uploads/watch/lesson-plan/:filename/view
+// @desc    View lesson plan PDF inline
+// @access  Private
+router.get('/watch/lesson-plan/:filename/view', protect, (req, res) => {
+  const filename = decodeURIComponent(req.params.filename).split('?')[0];
+
+  // security: prevent ../
+  if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+    return res.status(400).json({ success: false, message: 'Invalid filename' });
+  }
+
+  const filePath = path.join(lessonPlanDir, filename);
+  if (!fs.existsSync(filePath)) return res.sendStatus(404);
+
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+  res.sendFile(filePath);
+});
 
 
 // @route   POST /api/uploads/lesson-plan
