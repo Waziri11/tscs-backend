@@ -69,12 +69,19 @@ router.get('/', optionalAuth, async (req, res) => {
         siteName: settings.siteName || "Teacher's Skills Competition System",
         footerText: settings.footerText || "© 2024 Teacher's Skills Competition System. All rights reserved."
       },
+      header: settings.header || null,
+      footer: settings.footer || null,
+      theme: settings.theme || null,
+      navigation: settings.navigation || null,
+      seo: settings.seo || null,
       sections: visibleSections.map(section => ({
         id: section.id,
         type: section.type,
         enabled: section.enabled,
         order: section.order,
-        content: section.content
+        content: section.content,
+        styling: section.styling || {},
+        animation: section.animation || {}
       }))
     };
 
@@ -126,7 +133,7 @@ router.get('/section/:id', protect, authorize('admin', 'superadmin'), async (req
 // @access  Private (Admin/Superadmin)
 router.post('/', protect, authorize('admin', 'superadmin'), async (req, res) => {
   try {
-    const { settings, sections } = req.body;
+    const { settings, sections, header, footer, theme, navigation, seo } = req.body;
 
     // Validate input
     if (!sections || !Array.isArray(sections)) {
@@ -147,6 +154,51 @@ router.post('/', protect, authorize('admin', 'superadmin'), async (req, res) => 
       }
     }
 
+    // Save header configuration
+    if (header !== undefined) {
+      await LandingPageSettings.findOneAndUpdate(
+        { key: 'header' },
+        { key: 'header', value: header },
+        { upsert: true, new: true }
+      );
+    }
+
+    // Save footer configuration
+    if (footer !== undefined) {
+      await LandingPageSettings.findOneAndUpdate(
+        { key: 'footer' },
+        { key: 'footer', value: footer },
+        { upsert: true, new: true }
+      );
+    }
+
+    // Save theme configuration
+    if (theme !== undefined) {
+      await LandingPageSettings.findOneAndUpdate(
+        { key: 'theme' },
+        { key: 'theme', value: theme },
+        { upsert: true, new: true }
+      );
+    }
+
+    // Save navigation configuration
+    if (navigation !== undefined) {
+      await LandingPageSettings.findOneAndUpdate(
+        { key: 'navigation' },
+        { key: 'navigation', value: navigation },
+        { upsert: true, new: true }
+      );
+    }
+
+    // Save SEO configuration
+    if (seo !== undefined) {
+      await LandingPageSettings.findOneAndUpdate(
+        { key: 'seo' },
+        { key: 'seo', value: seo },
+        { upsert: true, new: true }
+      );
+    }
+
     // Delete all existing sections
     await LandingPage.deleteMany({});
 
@@ -157,7 +209,9 @@ router.post('/', protect, authorize('admin', 'superadmin'), async (req, res) => 
         type: section.type,
         enabled: section.enabled !== undefined ? section.enabled : true,
         order: section.order,
-        content: section.content || {}
+        content: section.content || {},
+        styling: section.styling || {},
+        animation: section.animation || {}
       }))
     );
 
@@ -234,14 +288,24 @@ router.post('/section', protect, authorize('admin', 'superadmin'), async (req, r
 // @access  Private (Admin/Superadmin)
 router.put('/section/:id', protect, authorize('admin', 'superadmin'), async (req, res) => {
   try {
+    const updateData = {
+      type: req.body.type,
+      enabled: req.body.enabled,
+      order: req.body.order,
+      content: req.body.content
+    };
+
+    if (req.body.styling !== undefined) {
+      updateData.styling = req.body.styling;
+    }
+
+    if (req.body.animation !== undefined) {
+      updateData.animation = req.body.animation;
+    }
+
     const section = await LandingPage.findOneAndUpdate(
       { id: req.params.id },
-      {
-        type: req.body.type,
-        enabled: req.body.enabled,
-        order: req.body.order,
-        content: req.body.content
-      },
+      updateData,
       { new: true, runValidators: true }
     );
 
@@ -270,11 +334,324 @@ router.put('/section/:id', protect, authorize('admin', 'superadmin'), async (req
         type: section.type,
         enabled: section.enabled,
         order: section.order,
-        content: section.content
+        content: section.content,
+        styling: section.styling || {},
+        animation: section.animation || {}
       }
     });
   } catch (error) {
     console.error('Update landing page section error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   GET /api/landing-page/header
+// @desc    Get header configuration
+// @access  Public
+router.get('/header', optionalAuth, async (req, res) => {
+  try {
+    const setting = await LandingPageSettings.findOne({ key: 'header' });
+    res.json({
+      success: true,
+      header: setting ? setting.value : null
+    });
+  } catch (error) {
+    console.error('Get header configuration error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/landing-page/header
+// @desc    Save header configuration
+// @access  Private (Admin/Superadmin)
+router.post('/header', protect, authorize('admin', 'superadmin'), async (req, res) => {
+  try {
+    const header = req.body;
+    await LandingPageSettings.findOneAndUpdate(
+      { key: 'header' },
+      { key: 'header', value: header },
+      { upsert: true, new: true }
+    );
+
+    if (logger) {
+      logger.logAdminAction(
+        'Admin saved header configuration',
+        req.user._id,
+        req,
+        {},
+        'success'
+      ).catch(() => {});
+    }
+
+    res.json({
+      success: true,
+      message: 'Header configuration saved successfully'
+    });
+  } catch (error) {
+    console.error('Save header configuration error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   GET /api/landing-page/footer
+// @desc    Get footer configuration
+// @access  Public
+router.get('/footer', optionalAuth, async (req, res) => {
+  try {
+    const setting = await LandingPageSettings.findOne({ key: 'footer' });
+    res.json({
+      success: true,
+      footer: setting ? setting.value : null
+    });
+  } catch (error) {
+    console.error('Get footer configuration error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/landing-page/footer
+// @desc    Save footer configuration
+// @access  Private (Admin/Superadmin)
+router.post('/footer', protect, authorize('admin', 'superadmin'), async (req, res) => {
+  try {
+    const footer = req.body;
+    await LandingPageSettings.findOneAndUpdate(
+      { key: 'footer' },
+      { key: 'footer', value: footer },
+      { upsert: true, new: true }
+    );
+
+    if (logger) {
+      logger.logAdminAction(
+        'Admin saved footer configuration',
+        req.user._id,
+        req,
+        {},
+        'success'
+      ).catch(() => {});
+    }
+
+    res.json({
+      success: true,
+      message: 'Footer configuration saved successfully'
+    });
+  } catch (error) {
+    console.error('Save footer configuration error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   GET /api/landing-page/theme
+// @desc    Get theme configuration
+// @access  Public
+router.get('/theme', optionalAuth, async (req, res) => {
+  try {
+    const setting = await LandingPageSettings.findOne({ key: 'theme' });
+    res.json({
+      success: true,
+      theme: setting ? setting.value : null
+    });
+  } catch (error) {
+    console.error('Get theme configuration error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/landing-page/theme
+// @desc    Save theme configuration
+// @access  Private (Admin/Superadmin)
+router.post('/theme', protect, authorize('admin', 'superadmin'), async (req, res) => {
+  try {
+    const theme = req.body;
+    await LandingPageSettings.findOneAndUpdate(
+      { key: 'theme' },
+      { key: 'theme', value: theme },
+      { upsert: true, new: true }
+    );
+
+    if (logger) {
+      logger.logAdminAction(
+        'Admin saved theme configuration',
+        req.user._id,
+        req,
+        {},
+        'success'
+      ).catch(() => {});
+    }
+
+    res.json({
+      success: true,
+      message: 'Theme configuration saved successfully'
+    });
+  } catch (error) {
+    console.error('Save theme configuration error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   GET /api/landing-page/navigation
+// @desc    Get navigation configuration
+// @access  Public
+router.get('/navigation', optionalAuth, async (req, res) => {
+  try {
+    const setting = await LandingPageSettings.findOne({ key: 'navigation' });
+    res.json({
+      success: true,
+      navigation: setting ? setting.value : null
+    });
+  } catch (error) {
+    console.error('Get navigation configuration error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/landing-page/navigation
+// @desc    Save navigation configuration
+// @access  Private (Admin/Superadmin)
+router.post('/navigation', protect, authorize('admin', 'superadmin'), async (req, res) => {
+  try {
+    const navigation = req.body;
+    await LandingPageSettings.findOneAndUpdate(
+      { key: 'navigation' },
+      { key: 'navigation', value: navigation },
+      { upsert: true, new: true }
+    );
+
+    if (logger) {
+      logger.logAdminAction(
+        'Admin saved navigation configuration',
+        req.user._id,
+        req,
+        {},
+        'success'
+      ).catch(() => {});
+    }
+
+    res.json({
+      success: true,
+      message: 'Navigation configuration saved successfully'
+    });
+  } catch (error) {
+    console.error('Save navigation configuration error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   GET /api/landing-page/seo
+// @desc    Get SEO configuration
+// @access  Public
+router.get('/seo', optionalAuth, async (req, res) => {
+  try {
+    const setting = await LandingPageSettings.findOne({ key: 'seo' });
+    res.json({
+      success: true,
+      seo: setting ? setting.value : null
+    });
+  } catch (error) {
+    console.error('Get SEO configuration error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/landing-page/seo
+// @desc    Save SEO configuration
+// @access  Private (Admin/Superadmin)
+router.post('/seo', protect, authorize('admin', 'superadmin'), async (req, res) => {
+  try {
+    const seo = req.body;
+    await LandingPageSettings.findOneAndUpdate(
+      { key: 'seo' },
+      { key: 'seo', value: seo },
+      { upsert: true, new: true }
+    );
+
+    if (logger) {
+      logger.logAdminAction(
+        'Admin saved SEO configuration',
+        req.user._id,
+        req,
+        {},
+        'success'
+      ).catch(() => {});
+    }
+
+    res.json({
+      success: true,
+      message: 'SEO configuration saved successfully'
+    });
+  } catch (error) {
+    console.error('Save SEO configuration error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   PUT /api/landing-page/section/:id/styling
+// @desc    Update section-specific styling
+// @access  Private (Admin/Superadmin)
+router.put('/section/:id/styling', protect, authorize('admin', 'superadmin'), async (req, res) => {
+  try {
+    const section = await LandingPage.findOneAndUpdate(
+      { id: req.params.id },
+      { styling: req.body },
+      { new: true, runValidators: true }
+    );
+
+    if (!section) {
+      return res.status(404).json({
+        success: false,
+        message: 'Landing page section not found'
+      });
+    }
+
+    if (logger) {
+      logger.logAdminAction(
+        'Admin updated section styling',
+        req.user._id,
+        req,
+        { sectionId: req.params.id },
+        'info'
+      ).catch(() => {});
+    }
+
+    res.json({
+      success: true,
+      styling: section.styling || {}
+    });
+  } catch (error) {
+    console.error('Update section styling error:', error);
     res.status(500).json({
       success: false,
       message: error.message || 'Server error'

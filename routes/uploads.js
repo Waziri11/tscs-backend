@@ -29,6 +29,7 @@ const router = express.Router();
 const uploadsDir = path.join(__dirname, '../uploads');
 const lessonPlanDir = path.join(uploadsDir, 'lesson-plan');
 const videosDir = path.join(uploadsDir, 'videos');
+const imagesDir = path.join(uploadsDir, 'images');
 
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
@@ -38,6 +39,9 @@ if (!fs.existsSync(lessonPlanDir)) {
 }
 if (!fs.existsSync(videosDir)) {
   fs.mkdirSync(videosDir, { recursive: true });
+}
+if (!fs.existsSync(imagesDir)) {
+  fs.mkdirSync(imagesDir, { recursive: true });
 }
 
 // Configure multer for lesson plan storage
@@ -61,6 +65,20 @@ const videoStorage = multer.diskStorage({
   },
   filename: (req, file, cb) => {
     // Generate unique filename: timestamp-teacherId-originalname
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const ext = path.extname(file.originalname);
+    const name = path.basename(file.originalname, ext);
+    cb(null, `${uniqueSuffix}-${name}${ext}`);
+  }
+});
+
+// Configure multer for image storage
+const imageStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, imagesDir);
+  },
+  filename: (req, file, cb) => {
+    // Generate unique filename: timestamp-random-originalname
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
     const ext = path.extname(file.originalname);
     const name = path.basename(file.originalname, ext);
@@ -99,6 +117,31 @@ const videoUpload = multer({
   fileFilter: videoFileFilter,
   limits: {
     fileSize: 110 * 1024 * 1024 // 110MB limit for videos
+  }
+});
+
+// File filter for images - allow JPG, PNG, GIF, WebP, SVG
+const imageFileFilter = (req, file, cb) => {
+  const allowedMimes = [
+    'image/jpeg',
+    'image/jpg',
+    'image/png',
+    'image/gif',
+    'image/webp',
+    'image/svg+xml'
+  ];
+  if (allowedMimes.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only image files (JPG, PNG, GIF, WebP, SVG) are allowed'), false);
+  }
+};
+
+const imageUpload = multer({
+  storage: imageStorage,
+  fileFilter: imageFileFilter,
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10MB limit for images
   }
 });
 
@@ -188,8 +231,51 @@ router.post('/video', protect, videoUpload.single('file'), async (req, res) => {
   }
 });
 
+// @route   POST /api/uploads/image
+// @desc    Upload image file
+// @access  Private
+router.post('/image', protect, imageUpload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No file uploaded'
+      });
+    }
+
+    // Log file upload (non-blocking)
+    if (logger) {
+      logger.logUserActivity(
+        'User uploaded image file',
+        req.user._id,
+        req,
+        {
+          filename: req.file.filename,
+          originalName: req.file.originalname,
+          fileSize: req.file.size
+        }
+      ).catch(() => {}); // Silently fail
+    }
+
+    res.json({
+      success: true,
+      file: {
+        filename: req.file.filename,
+        originalName: req.file.originalname,
+        url: `/api/uploads/files/${req.file.filename}`
+      }
+    });
+  } catch (error) {
+    console.error('Image upload error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Image upload failed'
+    });
+  }
+});
+
 // @route   GET /api/uploads/files/:filename
-// @desc    Serve uploaded file (checks both lesson-plan and videos subfolders, and root for backward compatibility)
+// @desc    Serve uploaded file (checks lesson-plan, videos, images subfolders, and root for backward compatibility)
 // @access  Private (via token in query or header)
 router.get('/files/:filename', protect, (req, res) => {
   try {
@@ -211,6 +297,7 @@ router.get('/files/:filename', protect, (req, res) => {
     const ext = path.extname(filename).toLowerCase();
     const isVideo = ext === '.mp4'; // Only MP4 videos allowed
     const isPdf = ext === '.pdf';
+    const isImage = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg'].includes(ext);
     
     // Try to find file in appropriate subfolder, or root for backward compatibility
     let filePath = null;
@@ -230,6 +317,15 @@ router.get('/files/:filename', protect, (req, res) => {
       const rootPath = path.join(uploadsDir, filename);
       if (fs.existsSync(lessonPlanPath)) {
         filePath = lessonPlanPath;
+      } else if (fs.existsSync(rootPath)) {
+        filePath = rootPath;
+      }
+    } else if (isImage) {
+      // Check images folder first, then root for backward compatibility
+      const imagePath = path.join(imagesDir, filename);
+      const rootPath = path.join(uploadsDir, filename);
+      if (fs.existsSync(imagePath)) {
+        filePath = imagePath;
       } else if (fs.existsSync(rootPath)) {
         filePath = rootPath;
       }
@@ -256,6 +352,16 @@ router.get('/files/:filename', protect, (req, res) => {
       // Only MP4 videos allowed
       contentType = 'video/mp4';
       disposition = 'inline'; // Allow inline playback
+    } else if (ext === '.jpg' || ext === '.jpeg') {
+      contentType = 'image/jpeg';
+    } else if (ext === '.png') {
+      contentType = 'image/png';
+    } else if (ext === '.gif') {
+      contentType = 'image/gif';
+    } else if (ext === '.webp') {
+      contentType = 'image/webp';
+    } else if (ext === '.svg') {
+      contentType = 'image/svg+xml';
     }
 
     // Set appropriate headers
