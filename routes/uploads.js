@@ -2,7 +2,10 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const { nanoid } = require('nanoid');
 const { protect } = require('../middleware/auth');
+const VideoProcessingJob = require('../models/VideoProcessingJob');
+const { enqueueVideoCompression } = require('../services/videoProcessingQueue');
 
 // Safely import logger - if it fails, app should still work
 let logger = null;
@@ -25,10 +28,72 @@ try {
 
 const router = express.Router();
 
+function removeListenerCompat(emitter, event, handler) {
+  if (!handler) return;
+  if (typeof emitter.off === 'function') emitter.off(event, handler);
+  else emitter.removeListener(event, handler);
+}
+
+function logUploadProgress(label = 'upload') {
+  return (req, res, next) => {
+    const totalBytes = Number(req.headers['content-length'] || 0);
+    const start = Date.now();
+
+    if (!totalBytes) {
+      console.log(`[upload] ${label}: request started (unknown total size)`);
+      return next();
+    }
+
+    console.log(`[upload] ${label}: request started. total=${totalBytes} bytes`);
+
+    let loaded = 0;
+    let lastLogged = Date.now();
+    const logIntervalMs = 1000;
+
+    const handleData = (chunk) => {
+      loaded += chunk.length;
+      const now = Date.now();
+      if (now - lastLogged >= logIntervalMs) {
+        const pct = ((loaded / totalBytes) * 100).toFixed(2);
+        console.log(`[upload] ${label}: ${pct}% (${loaded}/${totalBytes} bytes)`);
+        lastLogged = now;
+      }
+    };
+
+    const handleEnd = () => {
+      console.log(
+        `[upload] ${label}: complete (${loaded} bytes) in ${Date.now() - start}ms`
+      );
+      cleanup();
+    };
+
+    const handleError = (err) => {
+      console.error(`[upload] ${label}: stream error`, err.message);
+      cleanup();
+    };
+
+    function cleanup() {
+      removeListenerCompat(req, 'data', handleData);
+      removeListenerCompat(req, 'end', handleEnd);
+      removeListenerCompat(req, 'error', handleError);
+    }
+
+    req.on('data', handleData);
+    req.on('end', handleEnd);
+    req.on('error', handleError);
+
+    next();
+  };
+}
+
 // Ensure uploads directory and subdirectories exist
 const uploadsDir = path.join(__dirname, '../uploads');
 const lessonPlanDir = path.join(uploadsDir, 'lesson-plan');
 const videosDir = path.join(uploadsDir, 'videos');
+const originalVideosDir = path.join(videosDir, 'original');
+const compressedVideosDir = path.join(videosDir, 'compressed');
+const MAX_VIDEO_UPLOAD_GB = Number(process.env.MAX_VIDEO_UPLOAD_GB || 15);
+const VIDEO_TARGET_MB = Number(process.env.VIDEO_TARGET_MB || 100);
 
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
@@ -38,6 +103,12 @@ if (!fs.existsSync(lessonPlanDir)) {
 }
 if (!fs.existsSync(videosDir)) {
   fs.mkdirSync(videosDir, { recursive: true });
+}
+if (!fs.existsSync(originalVideosDir)) {
+  fs.mkdirSync(originalVideosDir, { recursive: true });
+}
+if (!fs.existsSync(compressedVideosDir)) {
+  fs.mkdirSync(compressedVideosDir, { recursive: true });
 }
 
 // Configure multer for lesson plan storage
@@ -57,14 +128,13 @@ const lessonPlanStorage = multer.diskStorage({
 // Configure multer for video storage
 const videoStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, videosDir);
+    cb(null, originalVideosDir);
   },
   filename: (req, file, cb) => {
-    // Generate unique filename: timestamp-teacherId-originalname
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const ext = path.extname(file.originalname);
-    const name = path.basename(file.originalname, ext);
-    cb(null, `${uniqueSuffix}-${name}${ext}`);
+    const id = nanoid();
+    req.videoId = id;
+    const ext = path.extname(file.originalname) || '.mp4';
+    cb(null, `${id}${ext}`);
   }
 });
 
@@ -98,7 +168,7 @@ const videoUpload = multer({
   storage: videoStorage,
   fileFilter: videoFileFilter,
   limits: {
-    fileSize: 110 * 1024 * 1024 // 110MB limit for videos
+    fileSize: MAX_VIDEO_UPLOAD_GB * 1024 * 1024 * 1024
   }
 });
 
@@ -183,7 +253,9 @@ router.post('/lesson-plan', protect, upload.single('file'), async (req, res) => 
 // @route   POST /api/uploads/video
 // @desc    Upload video file
 // @access  Private
-router.post('/video', protect, videoUpload.single('file'), async (req, res) => {
+const buildVideoFileUrl = (filename) => `/api/uploads/watch/${encodeURIComponent(filename)}/stream`;
+
+router.post('/video', protect, logUploadProgress('video upload'), videoUpload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -192,26 +264,49 @@ router.post('/video', protect, videoUpload.single('file'), async (req, res) => {
       });
     }
 
-    // Log file upload (non-blocking)
+    const videoId = req.videoId || nanoid();
+    const targetMb = Number(req.body?.targetMb) || VIDEO_TARGET_MB;
+    const outputFilename = `${videoId}.mp4`;
+
+    console.log(`[video] Received upload for user=${req.user._id} name=${req.file.originalname} bytes=${req.file.size}`);
+
+    const job = await VideoProcessingJob.create({
+      videoId,
+      teacherId: req.user._id,
+      originalName: req.file.originalname,
+      originalPath: req.file.path,
+      status: 'QUEUED',
+      originalBytes: req.file.size,
+      targetMb,
+      videoFileName: outputFilename,
+      videoFileUrl: buildVideoFileUrl(outputFilename)
+    });
+
+    console.log(`[video] Job queued id=${videoId} target=${targetMb}MB path=${req.file.path}`);
+    await enqueueVideoCompression(videoId);
+
     if (logger) {
       logger.logUserActivity(
         'User uploaded video file',
         req.user._id,
         req,
         {
-          filename: req.file.filename,
-          originalName: req.file.originalname,
-          fileSize: req.file.size
+          filename: job.videoFileName,
+          originalName: job.originalName,
+          fileSize: job.originalBytes,
+          videoId: job.videoId
         }
-      ).catch(() => {}); // Silently fail
+      ).catch(() => {});
     }
 
-    res.json({
+    res.status(202).json({
       success: true,
-      file: {
-        filename: req.file.filename,
-        originalName: req.file.originalname,
-        url: `/api/uploads/files/${req.file.filename}`
+      video: {
+        videoId: job.videoId,
+        status: job.status,
+        originalBytes: job.originalBytes,
+        targetMb: job.targetMb,
+        videoFileName: job.videoFileName
       }
     });
   } catch (error) {
@@ -220,6 +315,26 @@ router.post('/video', protect, videoUpload.single('file'), async (req, res) => {
       success: false,
       message: error.message || 'Video upload failed'
     });
+  }
+});
+
+router.get('/video-status/:videoId', protect, async (req, res) => {
+  try {
+    const job = await VideoProcessingJob.findOne({ videoId: req.params.videoId }).lean();
+    if (!job) {
+      return res.status(404).json({ success: false, message: 'Video job not found' });
+    }
+
+    const isOwner = job.teacherId && job.teacherId.toString() === req.user._id.toString();
+    const isPrivileged = ['admin', 'superadmin'].includes(req.user.role);
+    if (!isOwner && !isPrivileged) {
+      return res.status(403).json({ success: false, message: 'Not authorized to view this job' });
+    }
+
+    res.json({ success: true, video: job });
+  } catch (error) {
+    console.error('Video status error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to fetch status' });
   }
 });
 
@@ -329,9 +444,13 @@ router.get('/watch/:filename/stream', protect, (req, res) => {
   let filePath = null;
 
   if (isVideo) {
-    const p1 = path.join(videosDir, filename);
-    const p2 = path.join(uploadsDir, filename); // backward compat
-    filePath = fs.existsSync(p1) ? p1 : (fs.existsSync(p2) ? p2 : null);
+    const candidatePaths = [
+      path.join(compressedVideosDir, filename),
+      path.join(videosDir, filename),
+      path.join(originalVideosDir, filename),
+      path.join(uploadsDir, filename)
+    ];
+    filePath = candidatePaths.find((p) => fs.existsSync(p)) || null;
     res.setHeader('Content-Type', 'video/mp4');
   } else if (isPdf) {
     const p1 = path.join(lessonPlanDir, filename);
@@ -350,4 +469,3 @@ router.get('/watch/:filename/stream', protect, (req, res) => {
 
 
 module.exports = router;
-

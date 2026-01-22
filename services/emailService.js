@@ -39,6 +39,8 @@ class EmailService {
       this.senderName = process.env.BREVO_SENDER_NAME || process.env.EMAIL_FROM_NAME || 'TSCS';
 
       this.isInitialized = true;
+
+      console.log('Email service initialized with Brevo.');
     } catch (error) {
       console.error('Email service initialization failed:', error.message);
       this.isInitialized = false;

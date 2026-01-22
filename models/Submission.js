@@ -85,6 +85,28 @@ const submissionSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  videoProcessingJobId: {
+    type: String,
+    trim: true
+  },
+  videoProcessingStatus: {
+    type: String,
+    enum: ['IDLE', 'QUEUED', 'PROCESSING', 'READY', 'FAILED'],
+    default: 'IDLE'
+  },
+  videoProcessingError: {
+    type: String,
+    trim: true
+  },
+  videoOriginalBytes: {
+    type: Number
+  },
+  videoCompressedBytes: {
+    type: Number
+  },
+  videoTargetMb: {
+    type: Number
+  },
   score: {
     type: Number,
     default: 0
@@ -141,4 +163,3 @@ submissionSchema.index({ roundId: 1, averageScore: -1 }); // For leaderboard que
 submissionSchema.index({ teacherId: 1, areaOfFocus: 1, year: 1 }); // For duplicate submission check
 
 module.exports = mongoose.model('Submission', submissionSchema);
-

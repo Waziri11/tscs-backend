@@ -6,6 +6,7 @@ const { logger } = require('../utils/logger');
 const notificationService = require('../services/notificationService');
 const { assignJudgeToSubmission, manuallyAssignSubmission, getEligibleJudges, getAssignedJudge } = require('../utils/judgeAssignment');
 const User = require('../models/User');
+const VideoProcessingJob = require('../models/VideoProcessingJob');
 
 const router = express.Router();
 
@@ -239,6 +240,59 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), async (req, res) =
       teacherId: req.user.role === 'teacher' ? req.user._id : req.body.teacherId || req.user._id
     };
 
+    const { videoJobId } = req.body;
+    let attachedVideoJob = null;
+    const teacherIdStr = submissionData.teacherId.toString();
+
+    if (videoJobId) {
+      attachedVideoJob = await VideoProcessingJob.findOne({ videoId: videoJobId });
+      if (!attachedVideoJob) {
+        return res.status(400).json({
+          success: false,
+          message: 'Video upload not found. Please re-upload your video.'
+        });
+      }
+
+      if (attachedVideoJob.submissionId) {
+        return res.status(400).json({
+          success: false,
+          message: 'Video upload already attached to another submission.'
+        });
+      }
+
+      const teacherMatch = attachedVideoJob.teacherId?.toString() === teacherIdStr;
+      if (!teacherMatch && req.user.role === 'teacher') {
+        return res.status(403).json({
+          success: false,
+          message: 'Video upload does not belong to this teacher.'
+        });
+      }
+
+      let processingStatus = 'PROCESSING';
+      if (attachedVideoJob.status === 'READY') processingStatus = 'READY';
+      else if (attachedVideoJob.status === 'FAILED') processingStatus = 'FAILED';
+      else if (attachedVideoJob.status === 'QUEUED') processingStatus = 'QUEUED';
+
+      submissionData.videoProcessingJobId = attachedVideoJob.videoId;
+      submissionData.videoProcessingStatus = processingStatus;
+      submissionData.videoProcessingError = attachedVideoJob.error || null;
+      submissionData.videoOriginalBytes = attachedVideoJob.originalBytes;
+      submissionData.videoTargetMb = attachedVideoJob.targetMb;
+      if (attachedVideoJob.status === 'READY') {
+        submissionData.videoCompressedBytes = attachedVideoJob.compressedBytes;
+      } else {
+        delete submissionData.videoCompressedBytes;
+      }
+
+      if (attachedVideoJob.status === 'READY') {
+        submissionData.videoFileName = attachedVideoJob.videoFileName;
+        submissionData.videoFileUrl = attachedVideoJob.videoFileUrl;
+      } else {
+        delete submissionData.videoFileName;
+        delete submissionData.videoFileUrl;
+      }
+    }
+
     // Validate required fields
     if (!submissionData.areaOfFocus) {
       return res.status(400).json({
@@ -276,6 +330,19 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), async (req, res) =
     }
 
     const submission = await Submission.create(submissionData);
+
+    if (attachedVideoJob) {
+      await VideoProcessingJob.updateOne(
+        { videoId: attachedVideoJob.videoId },
+        {
+          submissionId: submission._id,
+          teacherId: submission.teacherId,
+          status: attachedVideoJob.status,
+          videoFileName: attachedVideoJob.videoFileName,
+          videoFileUrl: attachedVideoJob.videoFileUrl
+        }
+      );
+    }
 
     // Log submission creation
     const logAction = req.user.role === 'teacher' 
@@ -846,4 +913,3 @@ router.post('/:id/assign-judge', authorize('admin', 'superadmin'), async (req, r
 });
 
 module.exports = router;
-
