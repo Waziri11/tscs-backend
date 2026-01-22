@@ -42,6 +42,7 @@ const evaluationSchema = new mongoose.Schema({
 evaluationSchema.index({ submissionId: 1, judgeId: 1 }, { unique: true });
 evaluationSchema.index({ submissionId: 1 });
 evaluationSchema.index({ judgeId: 1 });
+evaluationSchema.index({ judgeId: 1, submittedAt: -1 }); // For judge evaluation history queries
 
 module.exports = mongoose.model('Evaluation', evaluationSchema);
 

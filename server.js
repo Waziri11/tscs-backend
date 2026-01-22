@@ -3,6 +3,7 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const morgan = require("morgan");
 const path = require("path");
+const compression = require("compression");
 
 // Load environment variables
 dotenv.config();
@@ -13,7 +14,6 @@ const { connectDB, isConnected } = require("./config/database");
 // Import services
 const emailService = require("./services/emailService");
 const notificationService = require("./services/notificationService");
-const { startVideoCompressionWorker } = require("./workers/videoCompressionWorker");
 
 // Import routes
 const authRoutes = require("./routes/auth");
@@ -28,6 +28,8 @@ const systemLogRoutes = require("./routes/systemLogs");
 const landingPageRoutes = require("./routes/landingPage");
 const uploadRoutes = require("./routes/uploads");
 const notificationRoutes = require("./routes/notifications");
+const leaderboardRoutes = require("./routes/leaderboard");
+const { generalLimiter } = require("./middleware/rateLimiter");
 
 const app = express();
 
@@ -63,6 +65,18 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Compression middleware - compress responses > 1KB, skip health checks
+app.use(compression({
+  filter: (req, res) => {
+    // Skip compression for health checks
+    if (req.path === '/api/health') {
+      return false;
+    }
+    // Use default compression filter (compresses if response size > 1KB)
+    return compression.filter(req, res);
+  }
+}));
+
 // Initialize email service
 emailService.initialize();
 
@@ -84,6 +98,7 @@ app.use("/api/system-logs", systemLogRoutes);
 app.use("/api/landing-page", landingPageRoutes);
 app.use("/api/uploads", uploadRoutes);
 app.use("/api/notifications", notificationRoutes);
+app.use("/api/leaderboard", leaderboardRoutes);
 
 // Health check endpoint
 app.get("/api/health", (req, res) => {
@@ -123,12 +138,6 @@ const startServer = async () => {
     // Start round scheduler only after connection is established
     const { startScheduler } = require("./utils/roundScheduler");
     startScheduler();
-
-    if (process.env.ENABLE_VIDEO_WORKER !== "false") {
-      startVideoCompressionWorker().catch((err) => {
-        console.error("Video worker failed to start", err);
-      });
-    }
 
     // Start HTTP server
     app.listen(PORT, () => {

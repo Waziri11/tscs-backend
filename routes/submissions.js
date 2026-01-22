@@ -6,7 +6,7 @@ const { logger } = require('../utils/logger');
 const notificationService = require('../services/notificationService');
 const { assignJudgeToSubmission, manuallyAssignSubmission, getEligibleJudges, getAssignedJudge } = require('../utils/judgeAssignment');
 const User = require('../models/User');
-const VideoProcessingJob = require('../models/VideoProcessingJob');
+const { cacheMiddleware, invalidateCacheOnChange } = require('../middleware/cache');
 
 const router = express.Router();
 
@@ -16,7 +16,7 @@ router.use(protect);
 // @route   GET /api/submissions
 // @desc    Get all submissions (with filters)
 // @access  Private
-router.get('/', async (req, res) => {
+router.get('/', cacheMiddleware(30), async (req, res) => {
   try {
     const { 
       level, 
@@ -27,7 +27,9 @@ router.get('/', async (req, res) => {
       subject, 
       region, 
       council,
-      search 
+      search,
+      page = 1,
+      limit = 20
     } = req.query;
     
     let query = {};
@@ -113,25 +115,46 @@ router.get('/', async (req, res) => {
       ];
     }
 
-    let submissions = await Submission.find(query)
-      .populate('teacherId', 'name email username')
-      .sort({ createdAt: -1 });
-
     // For Council/Regional judges, filter to only show submissions assigned to them
+    // Move this into MongoDB query to avoid N+1 problem
     if (req.user.role === 'judge' && (req.user.assignedLevel === 'Council' || req.user.assignedLevel === 'Regional')) {
       const assignedSubmissionIds = await SubmissionAssignment.find({
         judgeId: req.user._id,
         level: req.user.assignedLevel
-      }).select('submissionId');
+      }).select('submissionId').lean();
       
       const assignedIds = assignedSubmissionIds.map(a => a.submissionId);
-      submissions = submissions.filter(sub => assignedIds.some(id => id.toString() === sub._id.toString()));
+      if (assignedIds.length > 0) {
+        query._id = { $in: assignedIds };
+      } else {
+        // If no assignments, return empty result
+        query._id = { $in: [] };
+      }
     }
 
+    // Parse pagination parameters
+    const pageNum = parseInt(page, 10) || 1;
+    const limitNum = parseInt(limit, 10) || 20;
+    const skip = (pageNum - 1) * limitNum;
+
+    // Get total count for pagination metadata
+    const total = await Submission.countDocuments(query);
+
+    // Fetch submissions with pagination, using lean() for better performance on read-only queries
+    const submissions = await Submission.find(query)
+      .populate('teacherId', 'name email username')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum)
+      .lean();
 
     const response = {
       success: true,
       count: submissions.length,
+      total,
+      page: pageNum,
+      pages: Math.ceil(total / limitNum),
+      limit: limitNum,
       submissions
     };
 
@@ -233,7 +256,7 @@ router.get('/:id', async (req, res) => {
 // @route   POST /api/submissions
 // @desc    Create new submission
 // @access  Private (Teacher, Admin, Superadmin)
-router.post('/', authorize('teacher', 'admin', 'superadmin'), async (req, res) => {
+router.post('/', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnChange('cache:/api/submissions*'), async (req, res) => {
   try {
     const submissionData = {
       ...req.body,
@@ -441,7 +464,7 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), async (req, res) =
 // @route   PUT /api/submissions/:id
 // @desc    Update submission
 // @access  Private (Teacher owns it, or Admin/Superadmin)
-router.put('/:id', async (req, res) => {
+router.put('/:id', invalidateCacheOnChange('cache:/api/submissions*'), async (req, res) => {
   try {
     const submission = await Submission.findById(req.params.id);
 
@@ -530,7 +553,7 @@ router.put('/:id', async (req, res) => {
 // @route   DELETE /api/submissions/:id
 // @desc    Delete submission
 // @access  Private (Admin/Superadmin only)
-router.delete('/:id', authorize('admin', 'superadmin'), async (req, res) => {
+router.delete('/:id', authorize('admin', 'superadmin'), invalidateCacheOnChange('cache:/api/submissions*'), async (req, res) => {
   try {
     const submission = await Submission.findById(req.params.id);
 

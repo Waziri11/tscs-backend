@@ -1,6 +1,7 @@
 const express = require('express');
 const { LandingPage, LandingPageSettings } = require('../models/LandingPage');
 const { protect, authorize } = require('../middleware/auth');
+const { cacheMiddleware, invalidateCacheOnChange } = require('../middleware/cache');
 
 // Safely import logger
 let logger = null;
@@ -45,7 +46,7 @@ const optionalAuth = async (req, res, next) => {
 // @route   GET /api/landing-page
 // @desc    Get all landing page content (sections + settings) - Public endpoint
 // @access  Public (for display)
-router.get('/', optionalAuth, async (req, res) => {
+router.get('/', optionalAuth, cacheMiddleware(3600), async (req, res) => {
   try {
     const sections = await LandingPage.find()
       .sort({ order: 1, createdAt: 1 });
@@ -131,7 +132,7 @@ router.get('/section/:id', protect, authorize('admin', 'superadmin'), async (req
 // @route   POST /api/landing-page
 // @desc    Save all landing page content (sections + settings) - bulk operation
 // @access  Private (Admin/Superadmin)
-router.post('/', protect, authorize('admin', 'superadmin'), async (req, res) => {
+router.post('/', protect, authorize('admin', 'superadmin'), invalidateCacheOnChange('cache:/api/landing-page*'), async (req, res) => {
   try {
     const { settings, sections, header, footer, theme, navigation, seo } = req.body;
 

@@ -6,6 +6,7 @@ const { nanoid } = require('nanoid');
 const { protect } = require('../middleware/auth');
 const VideoProcessingJob = require('../models/VideoProcessingJob');
 const { enqueueVideoCompression } = require('../services/videoProcessingQueue');
+const { uploadLimiter } = require('../middleware/rateLimiter');
 
 // Safely import logger - if it fails, app should still work
 let logger = null;
@@ -228,7 +229,7 @@ const videoUpload = multer({
 // @route   POST /api/uploads/lesson-plan
 // @desc    Upload lesson plan PDF
 // @access  Private
-router.post('/lesson-plan', protect, upload.single('file'), async (req, res) => {
+router.post('/lesson-plan', protect, uploadLimiter, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -273,7 +274,7 @@ router.post('/lesson-plan', protect, upload.single('file'), async (req, res) => 
 // @access  Private
 const buildVideoFileUrl = (filename) => `/api/uploads/watch/${encodeURIComponent(filename)}/stream`;
 
-router.post('/video', protect, logUploadProgress('video upload'), videoUpload.single('file'), async (req, res) => {
+router.post('/video', protect, uploadLimiter, logUploadProgress('video upload'), videoUpload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({

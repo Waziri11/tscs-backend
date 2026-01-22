@@ -6,6 +6,7 @@ const SubmissionAssignment = require('../models/SubmissionAssignment');
 const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
 const { isJudgeAssigned } = require('../utils/judgeAssignment');
+const { cacheMiddleware, invalidateCacheOnChange } = require('../middleware/cache');
 
 const router = express.Router();
 
@@ -15,7 +16,7 @@ router.use(protect);
 // @route   GET /api/evaluations
 // @desc    Get all evaluations (with filters)
 // @access  Private
-router.get('/', async (req, res) => {
+router.get('/', cacheMiddleware(15), async (req, res) => {
   try {
     const { submissionId, judgeId } = req.query;
     

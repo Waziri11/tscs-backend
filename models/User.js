@@ -138,5 +138,10 @@ userSchema.methods.toJSON = function() {
   return obj;
 };
 
+// Indexes for better query performance
+userSchema.index({ email: 1 }); // Already unique, but ensure index exists
+userSchema.index({ role: 1, status: 1 });
+userSchema.index({ role: 1, assignedLevel: 1, assignedRegion: 1, assignedCouncil: 1 }); // For judge queries
+
 module.exports = mongoose.model('User', userSchema);
 

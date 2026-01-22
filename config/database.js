@@ -17,9 +17,11 @@ const connectDB = async () => {
       socketTimeoutMS: 45000, // 45 seconds
       // Retry configuration
       retryWrites: true,
-      // Connection pool settings
-      maxPoolSize: 10,
-      minPoolSize: 2,
+      // Connection pool settings - optimized for high concurrency
+      maxPoolSize: 50, // Increased from 10 to handle more concurrent connections
+      minPoolSize: 5, // Increased from 2 to maintain more persistent connections
+      // Auto-indexing - disable in production for better performance
+      autoIndex: process.env.NODE_ENV !== 'production',
     };
     
     const conn = await mongoose.connect(mongoUri, mongooseOptions);

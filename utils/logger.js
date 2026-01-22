@@ -50,6 +50,89 @@ const getUserAgent = (req) => {
 };
 
 /**
+ * LogBatcher - Batches log writes to reduce database operations
+ */
+class LogBatcher {
+  constructor(batchSize = 50, batchDelay = 5000) {
+    this.batchSize = batchSize;
+    this.batchDelay = batchDelay;
+    this.batch = [];
+    this.flushTimer = null;
+  }
+
+  /**
+   * Add log to batch
+   */
+  addLog(logData) {
+    this.batch.push(logData);
+
+    // Flush if batch is full
+    if (this.batch.length >= this.batchSize) {
+      this.flush();
+    } else if (!this.flushTimer) {
+      // Schedule flush after delay
+      this.flushTimer = setTimeout(() => {
+        this.flush();
+      }, this.batchDelay);
+    }
+  }
+
+  /**
+   * Flush batch to database
+   */
+  async flush() {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+
+    if (this.batch.length === 0) {
+      return;
+    }
+
+    const logsToWrite = [...this.batch];
+    this.batch = [];
+
+    try {
+      if (SystemLog && SystemLog.insertMany) {
+        await SystemLog.insertMany(logsToWrite, { ordered: false });
+      }
+    } catch (error) {
+      // Silently fail - don't break the app if logging fails
+      // Try to write logs individually as fallback
+      if (SystemLog && SystemLog.create) {
+        logsToWrite.forEach(log => {
+          SystemLog.create(log).catch(() => {
+            // Silently fail
+          });
+        });
+      }
+    }
+  }
+
+  /**
+   * Force immediate flush (for critical logs)
+   */
+  async forceFlush() {
+    await this.flush();
+  }
+}
+
+// Create singleton instance
+const logBatcher = new LogBatcher(50, 5000);
+
+// Flush logs on process exit
+process.on('SIGTERM', async () => {
+  await logBatcher.forceFlush();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  await logBatcher.forceFlush();
+  process.exit(0);
+});
+
+/**
  * Create a system log entry
  * @param {Object} options - Log options
  * @param {String} options.type - Log type (user_activity, admin_action, etc.)
@@ -87,14 +170,12 @@ const createLog = async ({
       userAgent: req ? getUserAgent(req) : null
     };
 
-    // Create log asynchronously (don't block the request)
+    // Add to batch for efficient batch writes
     // Use setImmediate to ensure this doesn't block the event loop
     setImmediate(() => {
       try {
-        if (SystemLog && SystemLog.create) {
-          SystemLog.create(logData).catch(() => {
-            // Silently fail - don't log errors about logging
-          });
+        if (SystemLog) {
+          logBatcher.addLog(logData);
         }
       } catch (err) {
         // Silently fail
