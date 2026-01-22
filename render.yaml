@@ -17,10 +17,11 @@ services:
         sync: false
       - key: CLIENT_URL
         sync: false
-      - key: GMAIL_USER
+      - key: BREVO_API_KEY
         sync: false
-      - key: GMAIL_APP_PASSWORD
+      - key: BREVO_SENDER_EMAIL
+        sync: false
+      - key: BREVO_SENDER_NAME
         sync: false
       - key: EMAIL_FROM_NAME
         sync: false
-

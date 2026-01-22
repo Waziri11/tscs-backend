@@ -1,25 +1,25 @@
-const nodemailer = require('nodemailer');
+const https = require('https');
 const EmailLog = require('../models/EmailLog');
 
 /**
  * Email Service
  *
- * Handles email sending using Gmail SMTP with Nodemailer
+ * Handles email sending using Brevo Transactional Emails API
  * - Asynchronous, non-blocking email sending
  * - Comprehensive email logging
  * - Template support
  * - Error handling and retries
- * - Fallback configurations for Railway compatibility
  */
 class EmailService {
   constructor() {
-    this.transporter = null;
+    this.apiKey = null;
+    this.senderEmail = null;
+    this.senderName = process.env.BREVO_SENDER_NAME || process.env.EMAIL_FROM_NAME || 'TSCS';
     this.isInitialized = false;
   }
 
   /**
-   * Initialize email transporter with Gmail SMTP
-   * Uses port 465 (SSL) first, with improved timeout settings for Railway
+   * Initialize Brevo API client
    */
   initialize() {
     if (this.isInitialized) return;
@@ -29,25 +29,14 @@ class EmailService {
     }
 
     try {
-      // Primary configuration: Port 465 with SSL (most reliable)
-      this.transporter = nodemailer.createTransport({
-        host: 'smtp.gmail.com',
-        port: 465,
-        secure: true, // Use SSL for port 465
-        auth: {
-          user: process.env.GMAIL_USER,
-          pass: process.env.GMAIL_APP_PASSWORD // App-specific password, not regular password
-        },
-        // Increased timeouts for Railway compatibility
-        connectionTimeout: 30000, // 30 seconds
-        greetingTimeout: 30000, // 30 seconds
-        socketTimeout: 30000, // 30 seconds
-        // Security settings
-        tls: {
-          rejectUnauthorized: false, // For Railway compatibility
-          ciphers: 'SSLv3'
-        }
-      });
+      if (!process.env.BREVO_API_KEY || !process.env.BREVO_SENDER_EMAIL) {
+        console.error('Brevo configuration incomplete: BREVO_API_KEY or BREVO_SENDER_EMAIL not set');
+        return;
+      }
+
+      this.apiKey = process.env.BREVO_API_KEY;
+      this.senderEmail = process.env.BREVO_SENDER_EMAIL;
+      this.senderName = process.env.BREVO_SENDER_NAME || process.env.EMAIL_FROM_NAME || 'TSCS';
 
       this.isInitialized = true;
     } catch (error) {
@@ -72,14 +61,13 @@ class EmailService {
       this.initialize();
     }
 
-    if (!this.transporter) {
-      console.error('Email transporter not available');
+    if (!this.apiKey) {
+      console.error('Brevo API key not configured');
       return false;
     }
 
-    // Validate email configuration
-    if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
-      console.error('Email configuration incomplete: GMAIL_USER or GMAIL_APP_PASSWORD not set');
+    if (!this.senderEmail) {
+      console.error('Brevo sender email not configured');
       return false;
     }
 
@@ -93,23 +81,19 @@ class EmailService {
     });
 
     try {
-      // Get sender name from environment variable, default to "TSCS"
-      const fromName = process.env.EMAIL_FROM_NAME || 'TSCS';
-      
-      const mailOptions = {
-        from: `"${fromName}" <${process.env.GMAIL_USER}>`,
-        to: options.to,
+      const payload = {
+        sender: { name: this.senderName, email: this.senderEmail },
+        to: [{ email: options.to }],
         subject: options.subject,
-        html: options.html,
-        text: options.text
+        htmlContent: options.html,
+        textContent: options.text || undefined
       };
 
-      // Send email
-      const info = await this.transporter.sendMail(mailOptions);
+      const info = await this.sendBrevoRequest('/v3/smtp/email', 'POST', payload);
 
       // Update log on success
       if (logEntry) {
-        await EmailLog.updateStatus(logEntry._id, 'sent', null, info.response);
+        await EmailLog.updateStatus(logEntry._id, 'sent', null, info.messageId || 'Brevo accepted');
       }
 
       if (process.env.NODE_ENV === 'development') {
@@ -118,51 +102,13 @@ class EmailService {
       return true;
 
     } catch (error) {
-      // Update log on failure
+      const errorMessage = this.extractBrevoError(error) || error.message;
+
       if (logEntry) {
-        await EmailLog.updateStatus(logEntry._id, 'failed', error.message);
+        await EmailLog.updateStatus(logEntry._id, 'failed', errorMessage);
       }
 
-      console.error(`Email sending failed to ${options.to}:`, error.message);
-      
-      // Try fallback configuration if first attempt fails (port 587 with TLS)
-      if (error.code === 'ETIMEDOUT' || error.code === 'ECONNREFUSED' || error.code === 'ESOCKET') {
-        console.log('Attempting fallback SMTP configuration (port 587)...');
-        try {
-          const fallbackTransporter = nodemailer.createTransport({
-            host: 'smtp.gmail.com',
-            port: 587,
-            secure: false, // Use TLS for port 587
-            auth: {
-              user: process.env.GMAIL_USER,
-              pass: process.env.GMAIL_APP_PASSWORD
-            },
-            connectionTimeout: 30000,
-            greetingTimeout: 30000,
-            socketTimeout: 30000,
-            requireTLS: true,
-            tls: {
-              rejectUnauthorized: false
-            }
-          });
-
-          const info = await fallbackTransporter.sendMail(mailOptions);
-          
-          if (logEntry) {
-            await EmailLog.updateStatus(logEntry._id, 'sent', null, info.response);
-          }
-          
-          if (process.env.NODE_ENV === 'development') {
-            console.log(`Email sent to ${options.to} using fallback config (port 587)`);
-          }
-          
-          // Update main transporter to fallback if it works
-          this.transporter = fallbackTransporter;
-          return true;
-        } catch (fallbackError) {
-          console.error('Fallback SMTP also failed:', fallbackError.message);
-        }
-      }
+      console.error(`Email sending failed to ${options.to}:`, errorMessage);
       
       return false;
     }
@@ -1497,43 +1443,117 @@ This password reset was requested for your account security.
       this.initialize();
     }
 
-    if (!this.transporter) {
+    if (!this.apiKey) {
       return false;
     }
 
     try {
-      await this.transporter.verify();
+      await this.sendBrevoRequest('/v3/account', 'GET');
       return true;
     } catch (error) {
-      console.error('Email service connection test failed:', error.message);
-      
-      // Try fallback configuration
-      try {
-        const fallbackTransporter = nodemailer.createTransport({
-          host: 'smtp.gmail.com',
-          port: 587,
-          secure: false,
-          auth: {
-            user: process.env.GMAIL_USER,
-            pass: process.env.GMAIL_APP_PASSWORD
-          },
-          connectionTimeout: 30000,
-          greetingTimeout: 30000,
-          socketTimeout: 30000,
-          requireTLS: true,
-          tls: {
-            rejectUnauthorized: false
+      console.error('Email service connection test failed:', this.extractBrevoError(error) || error.message);
+      return false;
+    }
+  }
+
+  /**
+   * Extracts a readable message from Brevo errors
+   * @param {Error} error - error returned by Brevo SDK
+   * @returns {string|undefined}
+   */
+  extractBrevoError(error) {
+    if (!error) return undefined;
+    if (error.responseBody) {
+      if (typeof error.responseBody === 'string') {
+        try {
+          const parsed = JSON.parse(error.responseBody);
+          return parsed.message || parsed.code || error.message;
+        } catch (parseError) {
+          return error.responseBody;
+        }
+      }
+      if (typeof error.responseBody === 'object') {
+        return error.responseBody.message || error.responseBody.code;
+      }
+    }
+    return error.message;
+  }
+
+  /**
+   * Perform HTTPS request to Brevo API
+   * @param {string} path - API path (e.g., /v3/smtp/email)
+   * @param {string} method - HTTP method
+   * @param {Object} body - Optional JSON body
+   * @returns {Promise<Object>} Parsed response body
+   */
+  async sendBrevoRequest(path, method, body) {
+    if (!this.apiKey) {
+      throw new Error('Brevo API key not configured');
+    }
+
+    const payload = body ? JSON.stringify(body) : null;
+
+    const options = {
+      hostname: 'api.brevo.com',
+      path,
+      method,
+      headers: {
+        accept: 'application/json',
+        'api-key': this.apiKey
+      }
+    };
+
+    if (payload) {
+      options.headers['content-type'] = 'application/json';
+      options.headers['content-length'] = Buffer.byteLength(payload);
+    }
+
+    return new Promise((resolve, reject) => {
+      const req = https.request(options, (res) => {
+        let data = '';
+
+        res.on('data', (chunk) => {
+          data += chunk;
+        });
+
+        res.on('end', () => {
+          const isSuccess = res.statusCode >= 200 && res.statusCode < 300;
+          const parsed = this.safeJsonParse(data);
+
+          if (isSuccess) {
+            resolve(parsed);
+          } else {
+            const err = new Error(parsed?.message || `Brevo API error (${res.statusCode})`);
+            err.statusCode = res.statusCode;
+            err.responseBody = parsed || data;
+            reject(err);
           }
         });
-        
-        await fallbackTransporter.verify();
-        // Update main transporter to fallback if it works
-        this.transporter = fallbackTransporter;
-        return true;
-      } catch (fallbackError) {
-        console.error('Fallback connection test also failed:', fallbackError.message);
-      return false;
+      });
+
+      req.on('error', (error) => {
+        reject(error);
+      });
+
+      if (payload) {
+        req.write(payload);
       }
+
+      req.end();
+    });
+  }
+
+  /**
+   * Safely parse JSON responses
+   * @param {string} data
+   * @returns {Object|string|undefined}
+   */
+  safeJsonParse(data) {
+    if (!data) return {};
+    try {
+      return JSON.parse(data);
+    } catch (error) {
+      return data;
     }
   }
 }

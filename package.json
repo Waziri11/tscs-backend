@@ -9,6 +9,7 @@
     "dev": "nodemon server.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "seed:landing": "node scripts/seedLandingPage.js",
+    "email:test": "node scripts/sendTestEmail.js",
     "create-superadmin": "node create-superadmin.js",
     "verify-superadmin": "node verify-superadmin.js"
   },
@@ -21,6 +22,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@getbrevo/brevo": "^3.0.1",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
