@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const morgan = require("morgan");
+const path = require("path");
 
 // Load environment variables
 dotenv.config();
@@ -44,31 +45,6 @@ if (process.env.NODE_ENV === "development") {
   allowedOrigins.push(/^http:\/\/localhost:\d+$/);
   allowedOrigins.push(/^http:\/\/127\.0\.0\.1:\d+$/);
 }
-
-// app.use(cors({
-//   origin: (origin, callback) => {
-//     // Allow requests with no origin (like mobile apps or curl requests)
-//     if (!origin) return callback(null, true);
-
-//     // Check if origin matches any allowed pattern
-//     const isAllowed = allowedOrigins.some(allowedOrigin => {
-//       if (typeof allowedOrigin === 'string') {
-//         return origin === allowedOrigin;
-//       } else if (allowedOrigin instanceof RegExp) {
-//         return allowedOrigin.test(origin);
-//       }
-//       return false;
-//     });
-
-//     if (isAllowed) {
-//       callback(null, true);
-//     } else {
-//       callback(new Error('Not allowed by CORS'));
-//     }
-//   },
-//   credentials: true
-// }));
-// 
 
 // Logger
 app.use((req, res, next) => {

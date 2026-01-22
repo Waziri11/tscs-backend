@@ -120,30 +120,39 @@ const videoUpload = multer({
   }
 });
 
-// File filter for images - allow JPG, PNG, GIF, WebP, SVG
-const imageFileFilter = (req, file, cb) => {
-  const allowedMimes = [
-    'image/jpeg',
-    'image/jpg',
-    'image/png',
-    'image/gif',
-    'image/webp',
-    'image/svg+xml'
-  ];
-  if (allowedMimes.includes(file.mimetype)) {
-    cb(null, true);
-  } else {
-    cb(new Error('Only image files (JPG, PNG, GIF, WebP, SVG) are allowed'), false);
-  }
-};
 
-const imageUpload = multer({
-  storage: imageStorage,
-  fileFilter: imageFileFilter,
-  limits: {
-    fileSize: 10 * 1024 * 1024 // 10MB limit for images
-  }
-});
+// @route   GET /api/uploads/watch/:filename/stream
+// @desc    Stream video file
+// @access  Private
+// router.get('/watch/:filename/stream', protect, (req, res) => {
+//   const filename = decodeURIComponent(req.params.filename).split('?')[0];
+//   const filePath = path.join(videosDir, filename);
+//   if (!fs.existsSync(filePath)) return res.sendStatus(404);
+
+//   res.setHeader('Content-Type', 'video/mp4');
+//   res.setHeader('Content-Disposition', 'inline');
+//   res.sendFile(filePath);
+// });
+
+
+// @route   GET /api/uploads/watch/lesson-plan/:filename/view
+// @desc    View lesson plan PDF inline
+// @access  Private
+// router.get('/watch/lesson-plan/:filename/view', protect, (req, res) => {
+//   const filename = decodeURIComponent(req.params.filename).split('?')[0];
+
+//   // security: prevent ../
+//   if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+//     return res.status(400).json({ success: false, message: 'Invalid filename' });
+//   }
+
+//   const filePath = path.join(lessonPlanDir, filename);
+//   if (!fs.existsSync(filePath)) return res.sendStatus(404);
+
+//   res.setHeader('Content-Type', 'application/pdf');
+//   res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+//   res.sendFile(filePath);
+// });
 
 // @route   POST /api/uploads/lesson-plan
 // @desc    Upload lesson plan PDF
@@ -234,156 +243,172 @@ router.post('/video', protect, videoUpload.single('file'), async (req, res) => {
 // @route   POST /api/uploads/image
 // @desc    Upload image file
 // @access  Private
-router.post('/image', protect, imageUpload.single('file'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        message: 'No file uploaded'
-      });
-    }
+// NOTE: Image upload functionality has been removed - imageUpload is not defined
+// router.post('/image', protect, imageUpload.single('file'), async (req, res) => {
+//   try {
+//     if (!req.file) {
+//       return res.status(400).json({
+//         success: false,
+//         message: 'No file uploaded'
+//       });
+//     }
 
-    // Log file upload (non-blocking)
-    if (logger) {
-      logger.logUserActivity(
-        'User uploaded image file',
-        req.user._id,
-        req,
-        {
-          filename: req.file.filename,
-          originalName: req.file.originalname,
-          fileSize: req.file.size
-        }
-      ).catch(() => {}); // Silently fail
-    }
+//     // Log file upload (non-blocking)
+//     if (logger) {
+//       logger.logUserActivity(
+//         'User uploaded image file',
+//         req.user._id,
+//         req,
+//         {
+//           filename: req.file.filename,
+//           originalName: req.file.originalname,
+//           fileSize: req.file.size
+//         }
+//       ).catch(() => {}); // Silently fail
+//     }
 
-    res.json({
-      success: true,
-      file: {
-        filename: req.file.filename,
-        originalName: req.file.originalname,
-        url: `/api/uploads/files/${req.file.filename}`
-      }
-    });
-  } catch (error) {
-    console.error('Image upload error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Image upload failed'
-    });
-  }
-});
+//     res.json({
+//       success: true,
+//       file: {
+//         filename: req.file.filename,
+//         originalName: req.file.originalname,
+//         url: `/api/uploads/files/${req.file.filename}`
+//       }
+//     });
+//   } catch (error) {
+//     console.error('Image upload error:', error);
+//     res.status(500).json({
+//       success: false,
+//       message: error.message || 'Image upload failed'
+//     });
+//   }
+// });
 
 // @route   GET /api/uploads/files/:filename
 // @desc    Serve uploaded file (checks lesson-plan, videos, images subfolders, and root for backward compatibility)
 // @access  Private (via token in query or header)
-router.get('/files/:filename', protect, (req, res) => {
-  try {
-    // Decode URL-encoded filename
-    let filename = decodeURIComponent(req.params.filename);
+// router.get('/files/:filename', protect, (req, res) => {
+//   try {
+//     // Decode URL-encoded filename
+//     let filename = decodeURIComponent(req.params.filename);
     
-    // Remove any query parameters that might be in the filename
-    filename = filename.split('?')[0];
+//     // Remove any query parameters that might be in the filename
+//     filename = filename.split('?')[0];
     
-    // Security: Prevent directory traversal
-    if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid filename'
-      });
-    }
+//     // Security: Prevent directory traversal
+//     if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+//       return res.status(400).json({
+//         success: false,
+//         message: 'Invalid filename'
+//       });
+//     }
     
-    // Determine file type by extension to know which folder to check
-    const ext = path.extname(filename).toLowerCase();
-    const isVideo = ext === '.mp4'; // Only MP4 videos allowed
-    const isPdf = ext === '.pdf';
-    const isImage = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg'].includes(ext);
+//     // Determine file type by extension to know which folder to check
+//     const ext = path.extname(filename).toLowerCase();
+//     console.log("Requested file extension:", ext);
+//     const isVideo = ext === '.mp4'; // Only MP4 videos allowed
+//     const isPdf = ext === '.pdf';
     
-    // Try to find file in appropriate subfolder, or root for backward compatibility
-    let filePath = null;
+//     // Try to find file in appropriate subfolder, or root for backward compatibility
+//     let filePath = null;
     
-    if (isVideo) {
-      // Check videos folder first, then root for backward compatibility
-      const videoPath = path.join(videosDir, filename);
-      const rootPath = path.join(uploadsDir, filename);
-      if (fs.existsSync(videoPath)) {
-        filePath = videoPath;
-      } else if (fs.existsSync(rootPath)) {
-        filePath = rootPath;
-      }
-    } else if (isPdf) {
-      // Check lesson-plan folder first, then root for backward compatibility
-      const lessonPlanPath = path.join(lessonPlanDir, filename);
-      const rootPath = path.join(uploadsDir, filename);
-      if (fs.existsSync(lessonPlanPath)) {
-        filePath = lessonPlanPath;
-      } else if (fs.existsSync(rootPath)) {
-        filePath = rootPath;
-      }
-    } else if (isImage) {
-      // Check images folder first, then root for backward compatibility
-      const imagePath = path.join(imagesDir, filename);
-      const rootPath = path.join(uploadsDir, filename);
-      if (fs.existsSync(imagePath)) {
-        filePath = imagePath;
-      } else if (fs.existsSync(rootPath)) {
-        filePath = rootPath;
-      }
-    } else {
-      // Unknown file type - check root folder
-      filePath = path.join(uploadsDir, filename);
-    }
+//     if (isVideo) {
+//       // Check videos folder first, then root for backward compatibility
+//       const videoPath = path.join(videosDir, filename);
+//       const rootPath = path.join(uploadsDir, filename);
+//       if (fs.existsSync(videoPath)) {
+//         filePath = videoPath;
+//       } else if (fs.existsSync(rootPath)) {
+//         filePath = rootPath;
+//       }
+//     } else if (isPdf) {
+//       // Check lesson-plan folder first, then root for backward compatibility
+//       const lessonPlanPath = path.join(lessonPlanDir, filename);
+//       const rootPath = path.join(uploadsDir, filename);
+//       if (fs.existsSync(lessonPlanPath)) {
+//         filePath = lessonPlanPath;
+//       } else if (fs.existsSync(rootPath)) {
+//         filePath = rootPath;
+//       }
+//     } else {
+//       // Unknown file type - check root folder
+//       filePath = path.join(uploadsDir, filename);
+//     }
 
-    // Check if file exists
-    if (!filePath || !fs.existsSync(filePath)) {
-      return res.status(404).json({
-        success: false,
-        message: 'File not found'
-      });
-    }
+//     // Check if file exists
+//     if (!filePath || !fs.existsSync(filePath)) {
+//       return res.status(404).json({
+//         success: false,
+//         message: 'File not found'
+//       });
+//     }
 
-    // Determine content type based on file extension (ext already declared above)
-    let contentType = 'application/octet-stream';
-    let disposition = 'inline';
+//     // Determine content type based on file extension (ext already declared above)
+//     let contentType = 'application/octet-stream';
+//     let disposition = 'inline';
     
-    if (ext === '.pdf') {
-      contentType = 'application/pdf';
-    } else if (ext === '.mp4') {
-      // Only MP4 videos allowed
-      contentType = 'video/mp4';
-      disposition = 'inline'; // Allow inline playback
-    } else if (ext === '.jpg' || ext === '.jpeg') {
-      contentType = 'image/jpeg';
-    } else if (ext === '.png') {
-      contentType = 'image/png';
-    } else if (ext === '.gif') {
-      contentType = 'image/gif';
-    } else if (ext === '.webp') {
-      contentType = 'image/webp';
-    } else if (ext === '.svg') {
-      contentType = 'image/svg+xml';
-    }
+//     if (ext === '.pdf') {
+//       contentType = 'application/pdf';
+//     } else if (ext === '.mp4') {
+//       // Only MP4 videos allowed
+//       contentType = 'video/mp4';
+//       disposition = 'inline'; // Allow inline playback
+//     }
 
-    // Set appropriate headers
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Disposition', `${disposition}; filename="${filename}"`);
-    res.setHeader('Cache-Control', 'private, max-age=3600');
+//     // Set appropriate headers
+//     res.setHeader('Content-Type', contentType);
+//     res.setHeader('Content-Disposition', `${disposition}; filename="${filename}"`);
+//     res.setHeader('Cache-Control', 'private, max-age=3600');
     
-    // For video files, add range support for seeking
-    if (contentType.startsWith('video/')) {
-      res.setHeader('Accept-Ranges', 'bytes');
-    }
+//     // For video files, add range support for seeking
+//     if (contentType.startsWith('video/')) {
+//       res.setHeader('Accept-Ranges', 'bytes');
+//     }
 
-    // Send file
-    res.sendFile(filePath);
-  } catch (error) {
-    console.error('File serve error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error serving file'
-    });
+//     // Send file
+//     res.sendFile(filePath);
+//   } catch (error) {
+//     console.error('File serve error:', error);
+//     res.status(500).json({
+//       success: false,
+//       message: 'Error serving file'
+//     });
+//   }
+// });
+
+router.get('/watch/:filename/stream', protect, (req, res) => {
+  let filename = decodeURIComponent(req.params.filename).split('?')[0];
+
+  if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+    return res.status(400).json({ success: false, message: 'Invalid filename' });
   }
+
+  const ext = path.extname(filename).toLowerCase();
+  const isVideo = ext === '.mp4';
+  const isPdf = ext === '.pdf';
+
+  let filePath = null;
+
+  if (isVideo) {
+    const p1 = path.join(videosDir, filename);
+    const p2 = path.join(uploadsDir, filename); // backward compat
+    filePath = fs.existsSync(p1) ? p1 : (fs.existsSync(p2) ? p2 : null);
+    res.setHeader('Content-Type', 'video/mp4');
+  } else if (isPdf) {
+    const p1 = path.join(lessonPlanDir, filename);
+    const p2 = path.join(uploadsDir, filename);
+    filePath = fs.existsSync(p1) ? p1 : (fs.existsSync(p2) ? p2 : null);
+    res.setHeader('Content-Type', 'application/pdf');
+  } else {
+    return res.status(400).json({ success: false, message: 'Unsupported file type' });
+  }
+
+  if (!filePath) return res.sendStatus(404);
+
+  res.setHeader('Content-Disposition', 'inline');
+  res.sendFile(filePath);
 });
+
 
 module.exports = router;
 

@@ -122,9 +122,10 @@ JWT_SECRET=your-super-secret-jwt-key-change-this-in-production
 # CORS Origin (Frontend URL)
 CLIENT_URL=http://localhost:5173
 
-# Email Configuration (Gmail SMTP)
-GMAIL_USER=your-email@gmail.com
-GMAIL_APP_PASSWORD=your-gmail-app-password
+# Email Configuration (Brevo)
+BREVO_API_KEY=your-brevo-api-key
+BREVO_SENDER_EMAIL=your-verified-sender@example.com
+BREVO_SENDER_NAME=TSCS
 EMAIL_FROM_NAME=TSCS
 ```
 
@@ -137,8 +138,9 @@ EMAIL_FROM_NAME=TSCS
 | `MONGODB_URI` | Yes | MongoDB connection string |
 | `JWT_SECRET` | Yes | Secret key for JWT token signing |
 | `CLIENT_URL` | Yes | Frontend URL for CORS |
-| `GMAIL_USER` | Yes | Gmail account email |
-| `GMAIL_APP_PASSWORD` | Yes | Gmail App Password (not regular password) |
+| `BREVO_API_KEY` | Yes | Brevo Transactional Emails API key |
+| `BREVO_SENDER_EMAIL` | Yes | Verified sender email in Brevo |
+| `BREVO_SENDER_NAME` | No | Friendly sender name (defaults to `TSCS`) |
 | `EMAIL_FROM_NAME` | No | Email sender name (default: "TSCS") |
 
 ---
@@ -937,4 +939,3 @@ finalScore = average(allJudges.map(j => j.averageScore))
 
 **Last Updated:** January 2025
 **Version:** 1.2.0
-
