@@ -94,6 +94,7 @@ const originalVideosDir = path.join(videosDir, 'original');
 const compressedVideosDir = path.join(videosDir, 'compressed');
 const MAX_VIDEO_UPLOAD_GB = Number(process.env.MAX_VIDEO_UPLOAD_GB || 15);
 const VIDEO_TARGET_MB = Number(process.env.VIDEO_TARGET_MB || 100);
+const imagesDir = path.join(uploadsDir, 'images');
 
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
@@ -109,6 +110,9 @@ if (!fs.existsSync(originalVideosDir)) {
 }
 if (!fs.existsSync(compressedVideosDir)) {
   fs.mkdirSync(compressedVideosDir, { recursive: true });
+}
+if (!fs.existsSync(imagesDir)) {
+  fs.mkdirSync(imagesDir, { recursive: true });
 }
 
 // Configure multer for lesson plan storage
@@ -128,13 +132,28 @@ const lessonPlanStorage = multer.diskStorage({
 // Configure multer for video storage
 const videoStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, originalVideosDir);
+    cb(null, videosDir);
   },
   filename: (req, file, cb) => {
-    const id = nanoid();
-    req.videoId = id;
-    const ext = path.extname(file.originalname) || '.mp4';
-    cb(null, `${id}${ext}`);
+    // Generate unique filename: timestamp-teacherId-originalname
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const ext = path.extname(file.originalname);
+    const name = path.basename(file.originalname, ext);
+    cb(null, `${uniqueSuffix}-${name}${ext}`);
+  }
+});
+
+// Configure multer for image storage
+const imageStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, imagesDir);
+  },
+  filename: (req, file, cb) => {
+    // Generate unique filename: timestamp-random-originalname
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const ext = path.extname(file.originalname);
+    const name = path.basename(file.originalname, ext);
+    cb(null, `${uniqueSuffix}-${name}${ext}`);
   }
 });
 
@@ -205,7 +224,6 @@ const videoUpload = multer({
 //   res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
 //   res.sendFile(filePath);
 // });
-
 
 // @route   POST /api/uploads/lesson-plan
 // @desc    Upload lesson plan PDF
@@ -318,6 +336,50 @@ router.post('/video', protect, logUploadProgress('video upload'), videoUpload.si
   }
 });
 
+// @route   POST /api/uploads/image
+// @desc    Upload image file
+// @access  Private
+// NOTE: Image upload functionality has been removed - imageUpload is not defined
+// router.post('/image', protect, imageUpload.single('file'), async (req, res) => {
+//   try {
+//     if (!req.file) {
+//       return res.status(400).json({
+//         success: false,
+//         message: 'No file uploaded'
+//       });
+//     }
+
+//     // Log file upload (non-blocking)
+//     if (logger) {
+//       logger.logUserActivity(
+//         'User uploaded image file',
+//         req.user._id,
+//         req,
+//         {
+//           filename: req.file.filename,
+//           originalName: req.file.originalname,
+//           fileSize: req.file.size
+//         }
+//       ).catch(() => {}); // Silently fail
+//     }
+
+//     res.json({
+//       success: true,
+//       file: {
+//         filename: req.file.filename,
+//         originalName: req.file.originalname,
+//         url: `/api/uploads/files/${req.file.filename}`
+//       }
+//     });
+//   } catch (error) {
+//     console.error('Image upload error:', error);
+//     res.status(500).json({
+//       success: false,
+//       message: error.message || 'Image upload failed'
+//     });
+//   }
+// });
+
 router.get('/video-status/:videoId', protect, async (req, res) => {
   try {
     const job = await VideoProcessingJob.findOne({ videoId: req.params.videoId }).lean();
@@ -339,7 +401,7 @@ router.get('/video-status/:videoId', protect, async (req, res) => {
 });
 
 // @route   GET /api/uploads/files/:filename
-// @desc    Serve uploaded file (checks both lesson-plan and videos subfolders, and root for backward compatibility)
+// @desc    Serve uploaded file (checks lesson-plan, videos, images subfolders, and root for backward compatibility)
 // @access  Private (via token in query or header)
 // router.get('/files/:filename', protect, (req, res) => {
 //   try {
