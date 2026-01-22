@@ -139,7 +139,7 @@ userSchema.methods.toJSON = function() {
 };
 
 // Indexes for better query performance
-userSchema.index({ email: 1 }); // Already unique, but ensure index exists
+// Note: email index is automatically created by unique: true constraint
 userSchema.index({ role: 1, status: 1 });
 userSchema.index({ role: 1, assignedLevel: 1, assignedRegion: 1, assignedCouncil: 1 }); // For judge queries
 
