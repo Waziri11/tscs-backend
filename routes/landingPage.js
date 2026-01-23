@@ -89,10 +89,14 @@ router.get('/', optionalAuth, cacheMiddleware(3600), async (req, res) => {
     res.json(response);
   } catch (error) {
     console.error('Get landing page content error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
+    // Ensure we always send a valid JSON response
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        message: error.message || 'Server error',
+        error: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      });
+    }
   }
 });
 
