@@ -1,6 +1,7 @@
 const express = require('express');
 const Submission = require('../models/Submission');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
+const VideoProcessingJob = require('../models/VideoProcessingJob');
 const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
 const notificationService = require('../services/notificationService');
@@ -263,11 +264,15 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnC
       teacherId: req.user.role === 'teacher' ? req.user._id : req.body.teacherId || req.user._id
     };
 
+    // Log the attempt for debugging
+    console.log('Processing submission for teacher:', submissionData.teacherId);
+
     const { videoJobId } = req.body;
     let attachedVideoJob = null;
     const teacherIdStr = submissionData.teacherId.toString();
 
     if (videoJobId) {
+      // Ensure VideoProcessingJob is available (should be imported)
       attachedVideoJob = await VideoProcessingJob.findOne({ videoId: videoJobId });
       if (!attachedVideoJob) {
         return res.status(400).json({
@@ -352,7 +357,14 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnC
       });
     }
 
+    console.log('Creating submission with data:', {
+      ...submissionData,
+      videoFileUrl: submissionData.videoFileUrl ? 'PRESENT' : 'MISSING',
+      lessonPlanFileUrl: submissionData.lessonPlanFileUrl ? 'PRESENT' : 'MISSING'
+    });
+
     const submission = await Submission.create(submissionData);
+    console.log('Submission created successfully:', submission._id);
 
     if (attachedVideoJob) {
       await VideoProcessingJob.updateOne(
@@ -389,35 +401,40 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnC
     // Assign judge to submission (for Council and Regional levels only)
     let assignmentResult = null;
     if (submission.level === 'Council' || submission.level === 'Regional') {
-      assignmentResult = await assignJudgeToSubmission(submission);
-      
-      if (assignmentResult.success && assignmentResult.assignment) {
-        // Notify admins and superadmins about the assignment
-        const admins = await User.find({ 
-          role: { $in: ['admin', 'superadmin'] },
-          status: 'active'
-        }).select('_id');
+      try {
+        assignmentResult = await assignJudgeToSubmission(submission);
         
-        for (const admin of admins) {
-          notificationService.createNotification({
-            userId: admin._id,
-            type: 'system_announcement',
-            title: 'New Submission Assignment',
-            message: `Submission from ${submission.teacherName} (${submission.subject} - ${submission.areaOfFocus}) has been assigned to Judge ${assignmentResult.judge.name} for ${submission.level} level evaluation.`,
-            metadata: {
-              submissionId: submission._id.toString(),
-              judgeId: assignmentResult.judge._id.toString(),
-              judgeName: assignmentResult.judge.name,
-              teacherName: submission.teacherName,
-              subject: submission.subject,
-              areaOfFocus: submission.areaOfFocus,
-              level: submission.level
-            },
-            isSystem: true
-          }).catch(error => {
-            console.error('Error creating admin notification:', error);
-          });
+        if (assignmentResult.success && assignmentResult.assignment) {
+          // Notify admins and superadmins about the assignment
+          const admins = await User.find({ 
+            role: { $in: ['admin', 'superadmin'] },
+            status: 'active'
+          }).select('_id');
+          
+          for (const admin of admins) {
+            notificationService.createNotification({
+              userId: admin._id,
+              type: 'system_announcement',
+              title: 'New Submission Assignment',
+              message: `Submission from ${submission.teacherName} (${submission.subject} - ${submission.areaOfFocus}) has been assigned to Judge ${assignmentResult.judge.name} for ${submission.level} level evaluation.`,
+              metadata: {
+                submissionId: submission._id.toString(),
+                judgeId: assignmentResult.judge._id.toString(),
+                judgeName: assignmentResult.judge.name,
+                teacherName: submission.teacherName,
+                subject: submission.subject,
+                areaOfFocus: submission.areaOfFocus,
+                level: submission.level
+              },
+              isSystem: true
+            }).catch(error => {
+              console.error('Error creating admin notification:', error);
+            });
+          }
         }
+      } catch (judgeError) {
+        console.error('Judge assignment error (non-fatal):', judgeError);
+        // Continue - do not fail submission if judge assignment fails
       }
     }
 
@@ -454,9 +471,13 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnC
     res.status(201).json(responseData);
   } catch (error) {
     console.error('Create submission error:', error);
+    
+    // Return detailed error message to client
     res.status(500).json({
       success: false,
-      message: error.message || 'Server error'
+      message: error.message || 'Server error',
+      // Include stack trace if needed for debugging, or validation errors if any
+      details: error.errors ? Object.keys(error.errors).map(key => ({ field: key, message: error.errors[key].message })) : null
     });
   }
 });
