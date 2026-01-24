@@ -161,5 +161,9 @@ submissionSchema.index({ level: 1, status: 1 });
 submissionSchema.index({ roundId: 1 });
 submissionSchema.index({ roundId: 1, averageScore: -1 }); // For leaderboard queries
 submissionSchema.index({ teacherId: 1, areaOfFocus: 1, year: 1 }); // For duplicate submission check
+// Additional compound indexes for common query patterns
+submissionSchema.index({ teacherId: 1, status: 1 });
+submissionSchema.index({ year: 1, level: 1, status: 1 });
+submissionSchema.index({ region: 1, council: 1, status: 1 });
 
 module.exports = mongoose.model('Submission', submissionSchema);

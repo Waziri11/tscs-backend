@@ -7,6 +7,7 @@ const { protect } = require('../middleware/auth');
 const OTPService = require('../services/otpService');
 const emailService = require('../services/emailService');
 const notificationService = require('../services/notificationService');
+const { authLimiter } = require('../middleware/rateLimiter');
 
 // Safely import logger - if it fails, app should still work
 let logger = null;
@@ -39,7 +40,7 @@ const generateToken = (id) => {
 // @route   POST /api/auth/login
 // @desc    Login user
 // @access  Public
-router.post('/login', async (req, res) => {
+router.post('/login', authLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
 
@@ -254,7 +255,7 @@ const otpVerifyLimiter = rateLimit({
 // @route   POST /api/auth/register
 // @desc    Register new user (teacher) - sends OTP for email verification
 // @access  Public
-router.post('/register', async (req, res) => {
+router.post('/register', authLimiter, async (req, res) => {
   try {
     const {
       firstName,

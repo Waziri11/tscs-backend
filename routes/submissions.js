@@ -1,12 +1,13 @@
 const express = require('express');
 const Submission = require('../models/Submission');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
+const VideoProcessingJob = require('../models/VideoProcessingJob');
 const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
 const notificationService = require('../services/notificationService');
 const { assignJudgeToSubmission, manuallyAssignSubmission, getEligibleJudges, getAssignedJudge } = require('../utils/judgeAssignment');
 const User = require('../models/User');
-const VideoProcessingJob = require('../models/VideoProcessingJob');
+const { cacheMiddleware, invalidateCacheOnChange } = require('../middleware/cache');
 
 const router = express.Router();
 
@@ -16,7 +17,7 @@ router.use(protect);
 // @route   GET /api/submissions
 // @desc    Get all submissions (with filters)
 // @access  Private
-router.get('/', async (req, res) => {
+router.get('/', cacheMiddleware(30), async (req, res) => {
   try {
     const { 
       level, 
@@ -27,7 +28,9 @@ router.get('/', async (req, res) => {
       subject, 
       region, 
       council,
-      search 
+      search,
+      page = 1,
+      limit = 20
     } = req.query;
     
     let query = {};
@@ -113,25 +116,46 @@ router.get('/', async (req, res) => {
       ];
     }
 
-    let submissions = await Submission.find(query)
-      .populate('teacherId', 'name email username')
-      .sort({ createdAt: -1 });
-
     // For Council/Regional judges, filter to only show submissions assigned to them
+    // Move this into MongoDB query to avoid N+1 problem
     if (req.user.role === 'judge' && (req.user.assignedLevel === 'Council' || req.user.assignedLevel === 'Regional')) {
       const assignedSubmissionIds = await SubmissionAssignment.find({
         judgeId: req.user._id,
         level: req.user.assignedLevel
-      }).select('submissionId');
+      }).select('submissionId').lean();
       
       const assignedIds = assignedSubmissionIds.map(a => a.submissionId);
-      submissions = submissions.filter(sub => assignedIds.some(id => id.toString() === sub._id.toString()));
+      if (assignedIds.length > 0) {
+        query._id = { $in: assignedIds };
+      } else {
+        // If no assignments, return empty result
+        query._id = { $in: [] };
+      }
     }
 
+    // Parse pagination parameters
+    const pageNum = parseInt(page, 10) || 1;
+    const limitNum = parseInt(limit, 10) || 20;
+    const skip = (pageNum - 1) * limitNum;
+
+    // Get total count for pagination metadata
+    const total = await Submission.countDocuments(query);
+
+    // Fetch submissions with pagination, using lean() for better performance on read-only queries
+    const submissions = await Submission.find(query)
+      .populate('teacherId', 'name email username')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum)
+      .lean();
 
     const response = {
       success: true,
       count: submissions.length,
+      total,
+      page: pageNum,
+      pages: Math.ceil(total / limitNum),
+      limit: limitNum,
       submissions
     };
 
@@ -233,18 +257,22 @@ router.get('/:id', async (req, res) => {
 // @route   POST /api/submissions
 // @desc    Create new submission
 // @access  Private (Teacher, Admin, Superadmin)
-router.post('/', authorize('teacher', 'admin', 'superadmin'), async (req, res) => {
+router.post('/', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnChange('cache:/api/submissions*'), async (req, res) => {
   try {
     const submissionData = {
       ...req.body,
       teacherId: req.user.role === 'teacher' ? req.user._id : req.body.teacherId || req.user._id
     };
 
+    // Log the attempt for debugging
+    console.log('Processing submission for teacher:', submissionData.teacherId);
+
     const { videoJobId } = req.body;
     let attachedVideoJob = null;
     const teacherIdStr = submissionData.teacherId.toString();
 
     if (videoJobId) {
+      // Ensure VideoProcessingJob is available (should be imported)
       attachedVideoJob = await VideoProcessingJob.findOne({ videoId: videoJobId });
       if (!attachedVideoJob) {
         return res.status(400).json({
@@ -329,7 +357,14 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), async (req, res) =
       });
     }
 
+    console.log('Creating submission with data:', {
+      ...submissionData,
+      videoFileUrl: submissionData.videoFileUrl ? 'PRESENT' : 'MISSING',
+      lessonPlanFileUrl: submissionData.lessonPlanFileUrl ? 'PRESENT' : 'MISSING'
+    });
+
     const submission = await Submission.create(submissionData);
+    console.log('Submission created successfully:', submission._id);
 
     if (attachedVideoJob) {
       await VideoProcessingJob.updateOne(
@@ -366,6 +401,7 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), async (req, res) =
     // Assign judge to submission (for Council and Regional levels only)
     let assignmentResult = null;
     if (submission.level === 'Council' || submission.level === 'Regional') {
+      try {
       assignmentResult = await assignJudgeToSubmission(submission);
       
       if (assignmentResult.success && assignmentResult.assignment) {
@@ -395,6 +431,10 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), async (req, res) =
             console.error('Error creating admin notification:', error);
           });
         }
+        }
+      } catch (judgeError) {
+        console.error('Judge assignment error (non-fatal):', judgeError);
+        // Continue - do not fail submission if judge assignment fails
       }
     }
 
@@ -431,9 +471,13 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), async (req, res) =
     res.status(201).json(responseData);
   } catch (error) {
     console.error('Create submission error:', error);
+    
+    // Return detailed error message to client
     res.status(500).json({
       success: false,
-      message: error.message || 'Server error'
+      message: error.message || 'Server error',
+      // Include stack trace if needed for debugging, or validation errors if any
+      details: error.errors ? Object.keys(error.errors).map(key => ({ field: key, message: error.errors[key].message })) : null
     });
   }
 });
@@ -441,7 +485,7 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), async (req, res) =
 // @route   PUT /api/submissions/:id
 // @desc    Update submission
 // @access  Private (Teacher owns it, or Admin/Superadmin)
-router.put('/:id', async (req, res) => {
+router.put('/:id', invalidateCacheOnChange('cache:/api/submissions*'), async (req, res) => {
   try {
     const submission = await Submission.findById(req.params.id);
 
@@ -530,7 +574,7 @@ router.put('/:id', async (req, res) => {
 // @route   DELETE /api/submissions/:id
 // @desc    Delete submission
 // @access  Private (Admin/Superadmin only)
-router.delete('/:id', authorize('admin', 'superadmin'), async (req, res) => {
+router.delete('/:id', authorize('admin', 'superadmin'), invalidateCacheOnChange('cache:/api/submissions*'), async (req, res) => {
   try {
     const submission = await Submission.findById(req.params.id);
 

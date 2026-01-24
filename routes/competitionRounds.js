@@ -6,6 +6,7 @@ const User = require('../models/User');
 const Quota = require('../models/Quota');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
 const { protect, authorize } = require('../middleware/auth');
+const { cacheMiddleware, invalidateCacheOnChange } = require('../middleware/cache');
 
 // Safely import logger
 let logger = null;
@@ -25,7 +26,7 @@ const router = express.Router();
 router.use(protect);
 
 // Public route for judges to get active rounds
-router.get('/active', async (req, res) => {
+router.get('/active', cacheMiddleware(60), async (req, res) => {
   try {
     const user = req.user;
     
@@ -676,9 +677,27 @@ router.post('/:id/activate', async (req, res) => {
       });
     }
 
-    // Note: Submissions are not captured here. The round will track submissions dynamically
-    // based on judge assignments. Submissions are independent of rounds.
+    // Capture snapshot of pending submissions at round activation time
+    const activationTime = new Date();
+    const submissionQuery = {
+      year: round.year,
+      level: round.level,
+      status: 'pending'
+    };
 
+    // Match round's location filters
+    if (round.region) submissionQuery.region = round.region;
+    if (round.council) submissionQuery.council = round.council;
+
+    // Only capture submissions created before round activation
+    submissionQuery.createdAt = { $lt: activationTime };
+
+    const pendingSubmissions = await Submission.find(submissionQuery).select('_id');
+    const pendingSubmissionIds = pendingSubmissions.map(sub => sub._id);
+
+    // Store snapshot
+    round.pendingSubmissionsSnapshot = pendingSubmissionIds;
+    round.snapshotCreatedAt = activationTime;
     round.status = 'active';
     await round.save();
 
@@ -831,32 +850,53 @@ router.post('/:id/close', async (req, res) => {
       }
     }
 
-    // Advance submissions based on leaderboard and quota
-    const advanceResult = await advanceSubmissionsForRound(round, roundSubmissions);
+    // Update average scores for submissions in the snapshot so they appear correctly in leaderboard
+    // Use submissions from the snapshot if available, otherwise use roundSubmissions
+    const submissionsToUpdate = round.pendingSubmissionsSnapshot && round.pendingSubmissionsSnapshot.length > 0
+      ? await Submission.find({ _id: { $in: round.pendingSubmissionsSnapshot } })
+      : roundSubmissions;
 
-    if (!advanceResult.success) {
-      return res.status(400).json({
-        success: false,
-        message: advanceResult.error || 'Failed to advance submissions'
-      });
-    }
-
-    // Send notifications to teachers with leaderboard data
-    const { notifyTeachersOnPromotion, notifyTeachersOnElimination } = require('../utils/notifications');
-    const leaderboard = advanceResult.leaderboard || [];
-    
-    if (advanceResult.promotedIds && advanceResult.promotedIds.length > 0) {
-      const nextLevel = getNextLevel(round.level);
-      if (nextLevel) {
-        notifyTeachersOnPromotion(advanceResult.promotedIds, nextLevel, leaderboard).catch(err => 
-          console.error('Error sending promotion notifications:', err)
-        );
+    const { calculateAverageScore } = require('../utils/leaderboardUtils');
+    for (const submission of submissionsToUpdate) {
+      // Skip if already has a valid average score
+      if (submission.averageScore && submission.averageScore > 0) {
+        continue;
+      }
+      
+      // Calculate and update average score
+      const avgScore = await calculateAverageScore(submission._id);
+      if (avgScore > 0) {
+        await Submission.findByIdAndUpdate(submission._id, { averageScore: avgScore });
       }
     }
-    if (advanceResult.eliminatedIds && advanceResult.eliminatedIds.length > 0) {
-      notifyTeachersOnElimination(advanceResult.eliminatedIds, leaderboard).catch(err => 
-        console.error('Error sending elimination notifications:', err)
-      );
+
+    // Note: Advancement is now manual via the leaderboard endpoint
+    // Only auto-advance if explicitly enabled (for backward compatibility)
+    let advanceResult = null;
+    if (round.autoAdvance) {
+      advanceResult = await advanceSubmissionsForRound(round, roundSubmissions);
+      
+      if (!advanceResult.success) {
+        console.warn('Auto-advancement failed:', advanceResult.error);
+      } else {
+        // Send notifications to teachers with leaderboard data
+        const { notifyTeachersOnPromotion, notifyTeachersOnElimination } = require('../utils/notifications');
+        const leaderboard = advanceResult.leaderboard || [];
+        
+        if (advanceResult.promotedIds && advanceResult.promotedIds.length > 0) {
+          const nextLevel = getNextLevel(round.level);
+          if (nextLevel) {
+            notifyTeachersOnPromotion(advanceResult.promotedIds, nextLevel, leaderboard).catch(err => 
+              console.error('Error sending promotion notifications:', err)
+            );
+          }
+        }
+        if (advanceResult.eliminatedIds && advanceResult.eliminatedIds.length > 0) {
+          notifyTeachersOnElimination(advanceResult.eliminatedIds, leaderboard).catch(err => 
+            console.error('Error sending elimination notifications:', err)
+          );
+        }
+      }
     }
 
     // Update round status
@@ -912,7 +952,10 @@ router.post('/:id/close', async (req, res) => {
       round,
       advancement: advanceResult,
       statistics: finalStats,
-      leaderboard: advanceResult.leaderboard || []
+      leaderboard: advanceResult?.leaderboard || [],
+      message: round.autoAdvance 
+        ? `Round closed. ${advanceResult?.promoted || 0} submissions promoted, ${advanceResult?.eliminated || 0} eliminated.`
+        : 'Round closed. Leaderboard updated. Use the leaderboard page to manually advance submissions to the next level.'
     });
   } catch (error) {
     console.error('Close competition round error:', error);
@@ -1004,78 +1047,119 @@ router.get('/:id/leaderboard', async (req, res) => {
       });
     }
 
-    // Get submissions for this round
-    // For closed rounds, use roundId (set when round closed)
-    // For active rounds, query dynamically based on judge assignments
-    let submissions;
+    // Optimize leaderboard query using aggregation pipeline
+    let matchStage = {};
+    
     if (round.status === 'closed') {
       // Closed rounds: show submissions that were evaluated in this round
-      submissions = await Submission.find({ roundId: round._id })
-        .populate('teacherId', 'name email')
-        .sort({ averageScore: -1 });
+      matchStage = { roundId: round._id };
     } else {
-      // Active rounds: query dynamically based on judge assignments
-      const submissionQuery = {
+      // Active rounds: query dynamically based on round filters
+      matchStage = {
         year: round.year,
         level: round.level,
         status: { $nin: ['promoted', 'eliminated'] }
       };
       
-      if (round.region) submissionQuery.region = round.region;
-      if (round.council) submissionQuery.council = round.council;
+      if (round.region) matchStage.region = round.region;
+      if (round.council) matchStage.council = round.council;
 
-      const allSubmissions = await Submission.find(submissionQuery)
-        .populate('teacherId', 'name email');
+      // For active rounds, filter by judge assignments using aggregation
+      if (round.level === 'Council' || round.level === 'Regional') {
+        const judgeQuery = { role: 'judge', assignedLevel: round.level, status: 'active' };
+        if (round.level === 'Council' && round.region && round.council) {
+          judgeQuery.assignedRegion = round.region;
+          judgeQuery.assignedCouncil = round.council;
+        } else if (round.level === 'Regional' && round.region) {
+          judgeQuery.assignedRegion = round.region;
+        }
 
-      // Get judges assigned to this round
-      const judgeQuery = { role: 'judge', assignedLevel: round.level, status: 'active' };
-      if (round.level === 'Council' && round.region && round.council) {
-        judgeQuery.assignedRegion = round.region;
-        judgeQuery.assignedCouncil = round.council;
-      } else if (round.level === 'Regional' && round.region) {
-        judgeQuery.assignedRegion = round.region;
-      }
-
-      const judges = await User.find(judgeQuery);
-
-      // Filter submissions assigned to judges
-      submissions = allSubmissions.filter(submission => {
-        return judges.some(judge => {
+        const judges = await User.find(judgeQuery).select('assignedRegion assignedCouncil').lean();
+        
+        if (judges.length > 0) {
+          // Build filter for submissions assigned to judges
           if (round.level === 'Council') {
-            return submission.region === judge.assignedRegion && 
-                   submission.council === judge.assignedCouncil;
+            const regionCouncilPairs = judges.map(j => ({
+              region: j.assignedRegion,
+              council: j.assignedCouncil
+            }));
+            matchStage.$or = regionCouncilPairs.map(pair => ({
+              region: pair.region,
+              council: pair.council
+            }));
           } else if (round.level === 'Regional') {
-            return submission.region === judge.assignedRegion;
+            const regions = [...new Set(judges.map(j => j.assignedRegion))];
+            matchStage.region = { $in: regions };
           }
-          return true; // National level
-        });
-      }).sort((a, b) => (b.averageScore || 0) - (a.averageScore || 0));
+        } else {
+          // No judges assigned, return empty result
+          matchStage._id = { $in: [] };
+        }
+      }
     }
 
-    // Build leaderboard with ranking
-    const leaderboard = submissions.map((submission, index) => ({
-      rank: index + 1,
-      submissionId: submission._id.toString(),
-      teacherName: submission.teacherName || submission.teacherId?.name || 'N/A',
-      teacherEmail: submission.teacherId?.email || 'N/A',
-      subject: submission.subject,
-      class: submission.class,
-      category: submission.category,
-      region: submission.region,
-      council: submission.council,
-      school: submission.school,
-      averageScore: submission.averageScore || 0,
-      totalEvaluations: 0, // Will be populated below
-      status: submission.status
-    }));
+    // Use aggregation pipeline to join with evaluations and get counts in one query
+    const leaderboard = await Submission.aggregate([
+      { $match: matchStage },
+      {
+        $lookup: {
+          from: 'evaluations',
+          localField: '_id',
+          foreignField: 'submissionId',
+          as: 'evaluations'
+        }
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'teacherId',
+          foreignField: '_id',
+          as: 'teacher'
+        }
+      },
+      {
+        $addFields: {
+          totalEvaluations: { $size: '$evaluations' },
+          teacherName: {
+            $ifNull: [
+              { $arrayElemAt: ['$teacher.name', 0] },
+              '$teacherName'
+            ]
+          },
+          teacherEmail: {
+            $ifNull: [
+              { $arrayElemAt: ['$teacher.email', 0] },
+              'N/A'
+            ]
+          }
+        }
+      },
+      {
+        $sort: { averageScore: -1 }
+      },
+      {
+        $project: {
+          rank: { $add: [{ $indexOfArray: ['$__rank', '$_id'] }, 1] },
+          submissionId: { $toString: '$_id' },
+          teacherName: 1,
+          teacherEmail: 1,
+          subject: 1,
+          class: 1,
+          category: 1,
+          region: 1,
+          council: 1,
+          school: 1,
+          averageScore: { $ifNull: ['$averageScore', 0] },
+          totalEvaluations: 1,
+          status: 1
+        }
+      }
+    ]);
 
-    // Get evaluation counts for each submission
-    for (let i = 0; i < leaderboard.length; i++) {
-      const evaluationCount = await Evaluation.countDocuments({
-        submissionId: leaderboard[i].submissionId
-      });
-      leaderboard[i].totalEvaluations = evaluationCount;
-    }
+    // Add rank numbers (aggregation doesn't support $indexOfArray for ranking, so do it manually)
+    leaderboard.forEach((item, index) => {
+      item.rank = index + 1;
+    });
 
     res.json({
       success: true,

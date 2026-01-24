@@ -83,6 +83,16 @@ const competitionRoundSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     default: null
+  },
+  // Snapshot of pending submissions when round was activated
+  pendingSubmissionsSnapshot: {
+    type: [mongoose.Schema.Types.ObjectId],
+    ref: 'Submission',
+    default: []
+  },
+  snapshotCreatedAt: {
+    type: Date,
+    default: null
   }
 }, {
   timestamps: true
