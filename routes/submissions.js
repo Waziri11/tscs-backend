@@ -402,35 +402,35 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnC
     let assignmentResult = null;
     if (submission.level === 'Council' || submission.level === 'Regional') {
       try {
-        assignmentResult = await assignJudgeToSubmission(submission);
+      assignmentResult = await assignJudgeToSubmission(submission);
+      
+      if (assignmentResult.success && assignmentResult.assignment) {
+        // Notify admins and superadmins about the assignment
+        const admins = await User.find({ 
+          role: { $in: ['admin', 'superadmin'] },
+          status: 'active'
+        }).select('_id');
         
-        if (assignmentResult.success && assignmentResult.assignment) {
-          // Notify admins and superadmins about the assignment
-          const admins = await User.find({ 
-            role: { $in: ['admin', 'superadmin'] },
-            status: 'active'
-          }).select('_id');
-          
-          for (const admin of admins) {
-            notificationService.createNotification({
-              userId: admin._id,
-              type: 'system_announcement',
-              title: 'New Submission Assignment',
-              message: `Submission from ${submission.teacherName} (${submission.subject} - ${submission.areaOfFocus}) has been assigned to Judge ${assignmentResult.judge.name} for ${submission.level} level evaluation.`,
-              metadata: {
-                submissionId: submission._id.toString(),
-                judgeId: assignmentResult.judge._id.toString(),
-                judgeName: assignmentResult.judge.name,
-                teacherName: submission.teacherName,
-                subject: submission.subject,
-                areaOfFocus: submission.areaOfFocus,
-                level: submission.level
-              },
-              isSystem: true
-            }).catch(error => {
-              console.error('Error creating admin notification:', error);
-            });
-          }
+        for (const admin of admins) {
+          notificationService.createNotification({
+            userId: admin._id,
+            type: 'system_announcement',
+            title: 'New Submission Assignment',
+            message: `Submission from ${submission.teacherName} (${submission.subject} - ${submission.areaOfFocus}) has been assigned to Judge ${assignmentResult.judge.name} for ${submission.level} level evaluation.`,
+            metadata: {
+              submissionId: submission._id.toString(),
+              judgeId: assignmentResult.judge._id.toString(),
+              judgeName: assignmentResult.judge.name,
+              teacherName: submission.teacherName,
+              subject: submission.subject,
+              areaOfFocus: submission.areaOfFocus,
+              level: submission.level
+            },
+            isSystem: true
+          }).catch(error => {
+            console.error('Error creating admin notification:', error);
+          });
+        }
         }
       } catch (judgeError) {
         console.error('Judge assignment error (non-fatal):', judgeError);

@@ -83,7 +83,7 @@ const invalidateCache = async (pattern) => {
       });
       cursor = result.cursor;
       keys.push(...result.keys);
-    } while (cursor !== 0);
+    } while (Number(cursor) !== 0);
 
     // Delete all matching keys
     if (keys.length > 0) {
@@ -108,13 +108,13 @@ const invalidateCacheOnChange = (patterns) => {
 
     // Intercept response to invalidate cache after successful operation
     const originalJson = res.json.bind(res);
-    res.json = async function(data) {
+    res.json = function(data) {
       // Only invalidate if operation was successful
       if (res.statusCode >= 200 && res.statusCode < 300) {
         const patternsArray = Array.isArray(patterns) ? patterns : [patterns];
-        for (const pattern of patternsArray) {
-          await invalidateCache(pattern);
-        }
+        // Perform invalidation in background - do not await
+        Promise.all(patternsArray.map(pattern => invalidateCache(pattern)))
+          .catch(err => console.error('Background cache invalidation error:', err));
       }
       return originalJson(data);
     };
