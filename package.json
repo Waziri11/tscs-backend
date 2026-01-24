@@ -11,8 +11,7 @@
     "seed:landing": "node scripts/seedLandingPage.js",
     "email:test": "node scripts/sendTestEmail.js",
     "create-superadmin": "node create-superadmin.js",
-    "verify-superadmin": "node verify-superadmin.js",
-    "video-worker": "node workers/videoCompressionWorker.js"
+    "verify-superadmin": "node verify-superadmin.js"
   },
   "keywords": [
     "tscs",

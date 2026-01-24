@@ -268,10 +268,10 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), async (req, res) =
         });
       }
 
-      let processingStatus = 'PROCESSING';
-      if (attachedVideoJob.status === 'READY') processingStatus = 'READY';
-      else if (attachedVideoJob.status === 'FAILED') processingStatus = 'FAILED';
+      let processingStatus = 'READY';
+      if (attachedVideoJob.status === 'FAILED') processingStatus = 'FAILED';
       else if (attachedVideoJob.status === 'QUEUED') processingStatus = 'QUEUED';
+      else if (attachedVideoJob.status === 'PROCESSING') processingStatus = 'PROCESSING';
 
       submissionData.videoProcessingJobId = attachedVideoJob.videoId;
       submissionData.videoProcessingStatus = processingStatus;

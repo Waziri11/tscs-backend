@@ -5,7 +5,6 @@ const fs = require('fs');
 const { nanoid } = require('nanoid');
 const { protect } = require('../middleware/auth');
 const VideoProcessingJob = require('../models/VideoProcessingJob');
-const { enqueueVideoCompression } = require('../services/videoProcessingQueue');
 
 // Safely import logger - if it fails, app should still work
 let logger = null;
@@ -92,8 +91,8 @@ const lessonPlanDir = path.join(uploadsDir, 'lesson-plan');
 const videosDir = path.join(uploadsDir, 'videos');
 const originalVideosDir = path.join(videosDir, 'original');
 const compressedVideosDir = path.join(videosDir, 'compressed');
-const MAX_VIDEO_UPLOAD_GB = Number(process.env.MAX_VIDEO_UPLOAD_GB || 15);
-const VIDEO_TARGET_MB = Number(process.env.VIDEO_TARGET_MB || 100);
+const MAX_VIDEO_UPLOAD_MB = Math.min(Number(process.env.MAX_VIDEO_UPLOAD_MB || 100), 100);
+const MAX_VIDEO_UPLOAD_BYTES = MAX_VIDEO_UPLOAD_MB * 1024 * 1024;
 const imagesDir = path.join(uploadsDir, 'images');
 
 if (!fs.existsSync(uploadsDir)) {
@@ -187,7 +186,7 @@ const videoUpload = multer({
   storage: videoStorage,
   fileFilter: videoFileFilter,
   limits: {
-    fileSize: MAX_VIDEO_UPLOAD_GB * 1024 * 1024 * 1024
+    fileSize: MAX_VIDEO_UPLOAD_BYTES
   }
 });
 
@@ -283,25 +282,29 @@ router.post('/video', protect, logUploadProgress('video upload'), videoUpload.si
     }
 
     const videoId = req.videoId || nanoid();
-    const targetMb = Number(req.body?.targetMb) || VIDEO_TARGET_MB;
-    const outputFilename = `${videoId}.mp4`;
+    const finalFilename = `${videoId}.mp4`;
+    const finalPath = path.join(compressedVideosDir, finalFilename);
 
     console.log(`[video] Received upload for user=${req.user._id} name=${req.file.originalname} bytes=${req.file.size}`);
+
+    if (fs.existsSync(finalPath)) {
+      fs.unlinkSync(finalPath);
+    }
+
+    fs.renameSync(req.file.path, finalPath);
 
     const job = await VideoProcessingJob.create({
       videoId,
       teacherId: req.user._id,
       originalName: req.file.originalname,
-      originalPath: req.file.path,
-      status: 'QUEUED',
+      originalPath: finalPath,
+      status: 'READY',
       originalBytes: req.file.size,
-      targetMb,
-      videoFileName: outputFilename,
-      videoFileUrl: buildVideoFileUrl(outputFilename)
+      compressedBytes: req.file.size,
+      targetMb: MAX_VIDEO_UPLOAD_MB,
+      videoFileName: finalFilename,
+      videoFileUrl: buildVideoFileUrl(finalFilename)
     });
-
-    console.log(`[video] Job queued id=${videoId} target=${targetMb}MB path=${req.file.path}`);
-    await enqueueVideoCompression(videoId);
 
     if (logger) {
       logger.logUserActivity(
@@ -317,7 +320,7 @@ router.post('/video', protect, logUploadProgress('video upload'), videoUpload.si
       ).catch(() => {});
     }
 
-    res.status(202).json({
+    res.status(201).json({
       success: true,
       video: {
         videoId: job.videoId,

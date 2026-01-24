@@ -2,7 +2,6 @@ const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const morgan = require("morgan");
-const path = require("path");
 
 // Load environment variables
 dotenv.config();
@@ -12,8 +11,6 @@ const { connectDB, isConnected } = require("./config/database");
 
 // Import services
 const emailService = require("./services/emailService");
-const notificationService = require("./services/notificationService");
-const { startVideoCompressionWorker } = require("./workers/videoCompressionWorker");
 
 // Import routes
 const authRoutes = require("./routes/auth");
@@ -123,12 +120,6 @@ const startServer = async () => {
     // Start round scheduler only after connection is established
     const { startScheduler } = require("./utils/roundScheduler");
     startScheduler();
-
-    if (process.env.ENABLE_VIDEO_WORKER !== "false") {
-      startVideoCompressionWorker().catch((err) => {
-        console.error("Video worker failed to start", err);
-      });
-    }
 
     // Start HTTP server
     app.listen(PORT, () => {
