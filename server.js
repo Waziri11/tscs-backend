@@ -1,9 +1,8 @@
 const express = require("express");
+const compression = require('compression');
 const cors = require("cors");
 const dotenv = require("dotenv");
 const morgan = require("morgan");
-const path = require("path");
-const compression = require("compression");
 
 // Load environment variables
 dotenv.config();

@@ -5,7 +5,6 @@ const fs = require('fs');
 const { nanoid } = require('nanoid');
 const { protect } = require('../middleware/auth');
 const VideoProcessingJob = require('../models/VideoProcessingJob');
-const { enqueueVideoCompression } = require('../services/videoProcessingQueue');
 const { uploadLimiter } = require('../middleware/rateLimiter');
 
 // Safely import logger - if it fails, app should still work
