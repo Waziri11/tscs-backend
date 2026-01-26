@@ -140,13 +140,39 @@ router.post('/', protect, authorize('admin', 'superadmin'), invalidateCacheOnCha
   try {
     const { settings, sections, header, footer, theme, navigation, seo } = req.body;
 
-    // Validate input
-    if (!sections || !Array.isArray(sections)) {
+    // Validate input - allow empty array but ensure it's an array
+    if (sections === undefined || sections === null) {
       return res.status(400).json({
         success: false,
         message: 'Sections array is required'
       });
     }
+    
+    if (!Array.isArray(sections)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Sections must be an array'
+      });
+    }
+
+    // Validate and normalize sections
+    const validSections = sections.map((section, index) => {
+      if (!section.id) {
+        throw new Error(`Section at index ${index} is missing required field: id`);
+      }
+      if (!section.type) {
+        throw new Error(`Section at index ${index} is missing required field: type`);
+      }
+      return {
+        id: section.id,
+        type: section.type,
+        enabled: section.enabled !== undefined ? section.enabled : true,
+        order: section.order !== undefined ? section.order : index,
+        content: section.content || {},
+        styling: section.styling || {},
+        animation: section.animation || {}
+      };
+    });
 
     // Save/update settings
     if (settings) {
@@ -207,18 +233,11 @@ router.post('/', protect, authorize('admin', 'superadmin'), invalidateCacheOnCha
     // Delete all existing sections
     await LandingPage.deleteMany({});
 
-    // Create new sections
-    const createdSections = await LandingPage.insertMany(
-      sections.map(section => ({
-        id: section.id,
-        type: section.type,
-        enabled: section.enabled !== undefined ? section.enabled : true,
-        order: section.order,
-        content: section.content || {},
-        styling: section.styling || {},
-        animation: section.animation || {}
-      }))
-    );
+    // Create new sections (only if there are any)
+    let createdSections = [];
+    if (validSections.length > 0) {
+      createdSections = await LandingPage.insertMany(validSections);
+    }
 
     // Log action
     if (logger) {
@@ -240,7 +259,8 @@ router.post('/', protect, authorize('admin', 'superadmin'), invalidateCacheOnCha
     console.error('Save landing page content error:', error);
     res.status(500).json({
       success: false,
-      message: error.message || 'Server error'
+      message: error.message || 'Server error',
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
