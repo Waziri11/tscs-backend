@@ -89,6 +89,7 @@ function logUploadProgress(label = 'upload') {
 // Ensure uploads directory and subdirectories exist
 const uploadsDir = path.join(__dirname, '../uploads');
 const lessonPlanDir = path.join(uploadsDir, 'lesson-plan');
+const videosDir = path.join(uploadsDir, 'videos');
 const MAX_VIDEO_UPLOAD_MB = Math.min(Number(process.env.MAX_VIDEO_UPLOAD_MB || 100), 100);
 const MAX_VIDEO_UPLOAD_BYTES = MAX_VIDEO_UPLOAD_MB * 1024 * 1024;
 const imagesDir = path.join(uploadsDir, 'images');
@@ -98,6 +99,9 @@ if (!fs.existsSync(uploadsDir)) {
 }
 if (!fs.existsSync(lessonPlanDir)) {
   fs.mkdirSync(lessonPlanDir, { recursive: true });
+}
+if (!fs.existsSync(videosDir)) {
+  fs.mkdirSync(videosDir, { recursive: true });
 }
 if (!fs.existsSync(imagesDir)) {
   fs.mkdirSync(imagesDir, { recursive: true });
@@ -120,7 +124,7 @@ const lessonPlanStorage = multer.diskStorage({
 // Configure multer for video storage
 const videoStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, uploadsDir);
+    cb(null, videosDir);
   },
   filename: (req, file, cb) => {
     // Generate unique filename: timestamp-teacherId-originalname
@@ -272,7 +276,7 @@ router.post('/video', protect, uploadLimiter, logUploadProgress('video upload'),
 
     const videoId = req.videoId || nanoid();
     const finalFilename = `${videoId}.mp4`;
-    const finalPath = path.join(uploadsDir, finalFilename);
+    const finalPath = path.join(videosDir, finalFilename);
 
     console.log(`[video] Received upload for user=${req.user._id} name=${req.file.originalname} bytes=${req.file.size}`);
 
@@ -498,7 +502,7 @@ router.get('/watch/:filename/stream', protect, (req, res) => {
 
   if (isVideo) {
     const candidatePaths = [
-      path.join(uploadsDir, filename)
+      path.join(videosDir, filename)
     ];
     filePath = candidatePaths.find((p) => fs.existsSync(p)) || null;
     res.setHeader('Content-Type', 'video/mp4');
