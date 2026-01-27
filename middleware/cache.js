@@ -13,6 +13,11 @@ const cacheMiddleware = (ttl = 60) => {
       return next();
     }
 
+    // Bypass cache if _t (timestamp) query param is present (cache-busting)
+    if (req.query && req.query._t) {
+      return next();
+    }
+
     // Check if Redis is available
     const redisAvailable = await isRedisAvailable();
     if (!redisAvailable) {
@@ -23,8 +28,9 @@ const cacheMiddleware = (ttl = 60) => {
     try {
       const redisClient = getRedisClient();
       
-      // Create cache key from request URL and query params
-      const cacheKey = `cache:${req.originalUrl || req.url}`;
+      // Create cache key from request URL (excluding query params for cache-busting)
+      const urlWithoutQuery = (req.originalUrl || req.url).split('?')[0];
+      const cacheKey = `cache:${urlWithoutQuery}`;
       
       // Try to get cached response
       const cachedData = await redisClient.get(cacheKey);
@@ -128,6 +134,3 @@ module.exports = {
   invalidateCache,
   invalidateCacheOnChange
 };
-
-
-

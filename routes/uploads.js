@@ -517,5 +517,119 @@ router.get('/watch/:filename/stream', protect, (req, res) => {
   res.sendFile(filePath);
 });
 
+// Image file filter - completely separate from existing filters
+const imageFileFilter = (req, file, cb) => {
+  const allowedMimeTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml'];
+  const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg'];
+  const ext = path.extname(file.originalname).toLowerCase();
+  
+  if (allowedMimeTypes.includes(file.mimetype) && allowedExtensions.includes(ext)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only image files are allowed (JPEG, PNG, GIF, WebP, SVG)'), false);
+  }
+};
+
+// Image upload multer config - uses existing imageStorage (already defined)
+const imageUpload = multer({
+  storage: imageStorage,
+  fileFilter: imageFileFilter,
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10MB limit
+  }
+});
+
+// @route   POST /api/uploads/image
+// @desc    Upload image file
+// @access  Private
+router.post('/image', protect, uploadLimiter, imageUpload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No file uploaded'
+      });
+    }
+
+    // Log file upload (non-blocking)
+    if (logger) {
+      logger.logUserActivity(
+        'User uploaded image file',
+        req.user._id,
+        req,
+        {
+          filename: req.file.filename,
+          originalName: req.file.originalname,
+          fileSize: req.file.size
+        }
+      ).catch(() => {});
+    }
+
+    res.json({
+      success: true,
+      file: {
+        filename: req.file.filename,
+        originalName: req.file.originalname,
+        url: `/api/uploads/images/${req.file.filename}`
+      }
+    });
+  } catch (error) {
+    console.error('Image upload error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Image upload failed'
+    });
+  }
+});
+
+// @route   GET /api/uploads/images/:filename
+// @desc    Serve uploaded image file
+// @access  Private
+router.get('/images/:filename', protect, (req, res) => {
+  try {
+    let filename = decodeURIComponent(req.params.filename).split('?')[0];
+    
+    // Security: Prevent directory traversal
+    if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid filename'
+      });
+    }
+    
+    const filePath = path.join(imagesDir, filename);
+    
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({
+        success: false,
+        message: 'Image not found'
+      });
+    }
+    
+    // Determine content type
+    const ext = path.extname(filename).toLowerCase();
+    const mimeTypes = {
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp',
+      '.svg': 'image/svg+xml'
+    };
+    const contentType = mimeTypes[ext] || 'image/jpeg';
+    
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', 'inline');
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.sendFile(filePath);
+  } catch (error) {
+    console.error('Image serve error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error serving image'
+    });
+  }
+});
+
 
 module.exports = router;
