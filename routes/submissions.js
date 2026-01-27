@@ -306,13 +306,8 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnC
       submissionData.videoProcessingError = attachedVideoJob.error || null;
       submissionData.videoOriginalBytes = attachedVideoJob.originalBytes;
       submissionData.videoTargetMb = attachedVideoJob.targetMb;
-      if (attachedVideoJob.status === 'READY') {
-        submissionData.videoFileName = attachedVideoJob.videoFileName;
-        submissionData.videoFileUrl = attachedVideoJob.videoFileUrl;
-      } else {
-        delete submissionData.videoFileName;
-        delete submissionData.videoFileUrl;
-      }
+      submissionData.videoFileName = attachedVideoJob.videoFileName;
+      submissionData.videoFileUrl = attachedVideoJob.videoFileUrl;
     }
 
     // Validate required fields
