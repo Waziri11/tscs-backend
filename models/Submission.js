@@ -101,9 +101,6 @@ const submissionSchema = new mongoose.Schema({
   videoOriginalBytes: {
     type: Number
   },
-  videoCompressedBytes: {
-    type: Number
-  },
   videoTargetMb: {
     type: Number
   },

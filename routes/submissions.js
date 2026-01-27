@@ -307,12 +307,6 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnC
       submissionData.videoOriginalBytes = attachedVideoJob.originalBytes;
       submissionData.videoTargetMb = attachedVideoJob.targetMb;
       if (attachedVideoJob.status === 'READY') {
-        submissionData.videoCompressedBytes = attachedVideoJob.compressedBytes;
-      } else {
-        delete submissionData.videoCompressedBytes;
-      }
-
-      if (attachedVideoJob.status === 'READY') {
         submissionData.videoFileName = attachedVideoJob.videoFileName;
         submissionData.videoFileUrl = attachedVideoJob.videoFileUrl;
       } else {

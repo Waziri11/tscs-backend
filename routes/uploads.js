@@ -89,9 +89,6 @@ function logUploadProgress(label = 'upload') {
 // Ensure uploads directory and subdirectories exist
 const uploadsDir = path.join(__dirname, '../uploads');
 const lessonPlanDir = path.join(uploadsDir, 'lesson-plan');
-const videosDir = path.join(uploadsDir, 'videos');
-const originalVideosDir = path.join(videosDir, 'original');
-const compressedVideosDir = path.join(videosDir, 'compressed');
 const MAX_VIDEO_UPLOAD_MB = Math.min(Number(process.env.MAX_VIDEO_UPLOAD_MB || 100), 100);
 const MAX_VIDEO_UPLOAD_BYTES = MAX_VIDEO_UPLOAD_MB * 1024 * 1024;
 const imagesDir = path.join(uploadsDir, 'images');
@@ -101,15 +98,6 @@ if (!fs.existsSync(uploadsDir)) {
 }
 if (!fs.existsSync(lessonPlanDir)) {
   fs.mkdirSync(lessonPlanDir, { recursive: true });
-}
-if (!fs.existsSync(videosDir)) {
-  fs.mkdirSync(videosDir, { recursive: true });
-}
-if (!fs.existsSync(originalVideosDir)) {
-  fs.mkdirSync(originalVideosDir, { recursive: true });
-}
-if (!fs.existsSync(compressedVideosDir)) {
-  fs.mkdirSync(compressedVideosDir, { recursive: true });
 }
 if (!fs.existsSync(imagesDir)) {
   fs.mkdirSync(imagesDir, { recursive: true });
@@ -132,7 +120,7 @@ const lessonPlanStorage = multer.diskStorage({
 // Configure multer for video storage
 const videoStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, videosDir);
+    cb(null, uploadsDir);
   },
   filename: (req, file, cb) => {
     // Generate unique filename: timestamp-teacherId-originalname
@@ -284,7 +272,7 @@ router.post('/video', protect, uploadLimiter, logUploadProgress('video upload'),
 
     const videoId = req.videoId || nanoid();
     const finalFilename = `${videoId}.mp4`;
-    const finalPath = path.join(compressedVideosDir, finalFilename);
+    const finalPath = path.join(uploadsDir, finalFilename);
 
     console.log(`[video] Received upload for user=${req.user._id} name=${req.file.originalname} bytes=${req.file.size}`);
 
@@ -301,7 +289,6 @@ router.post('/video', protect, uploadLimiter, logUploadProgress('video upload'),
       originalPath: finalPath,
       status: 'READY',
       originalBytes: req.file.size,
-      compressedBytes: req.file.size,
       targetMb: MAX_VIDEO_UPLOAD_MB,
       videoFileName: finalFilename,
       videoFileUrl: buildVideoFileUrl(finalFilename)
@@ -511,9 +498,6 @@ router.get('/watch/:filename/stream', protect, (req, res) => {
 
   if (isVideo) {
     const candidatePaths = [
-      path.join(compressedVideosDir, filename),
-      path.join(videosDir, filename),
-      path.join(originalVideosDir, filename),
       path.join(uploadsDir, filename)
     ];
     filePath = candidatePaths.find((p) => fs.existsSync(p)) || null;

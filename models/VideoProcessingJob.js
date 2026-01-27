@@ -7,14 +7,12 @@ const videoProcessingJobSchema = new mongoose.Schema(
     submissionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Submission', default: null },
     originalName: String,
     originalPath: String,
-    compressedPath: String,
     status: {
       type: String,
       enum: ['UPLOADED', 'QUEUED', 'PROCESSING', 'READY', 'FAILED'],
       default: 'UPLOADED'
     },
     originalBytes: Number,
-    compressedBytes: Number,
     targetMb: { type: Number, default: 100 },
     error: String,
     videoFileName: String,
