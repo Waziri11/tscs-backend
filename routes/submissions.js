@@ -1,7 +1,6 @@
 const express = require('express');
 const Submission = require('../models/Submission');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
-const VideoProcessingJob = require('../models/VideoProcessingJob');
 const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
 const notificationService = require('../services/notificationService');
@@ -267,47 +266,17 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnC
     // Log the attempt for debugging
     console.log('Processing submission for teacher:', submissionData.teacherId);
 
-    const { videoJobId } = req.body;
-    let attachedVideoJob = null;
-    const teacherIdStr = submissionData.teacherId.toString();
+    const { videoFileName, videoFileUrl, videoOriginalBytes } = req.body;
+    const hasVideoInfo = typeof videoFileName === 'string' && videoFileName.trim() &&
+      typeof videoFileUrl === 'string' && videoFileUrl.trim();
 
-    if (videoJobId) {
-      // Ensure VideoProcessingJob is available (should be imported)
-      attachedVideoJob = await VideoProcessingJob.findOne({ videoId: videoJobId });
-      if (!attachedVideoJob) {
-        return res.status(400).json({
-          success: false,
-          message: 'Video upload not found. Please re-upload your video.'
-        });
+    if (hasVideoInfo) {
+      submissionData.videoFileName = videoFileName.trim();
+      submissionData.videoFileUrl = videoFileUrl.trim();
+      const parsedBytes = Number(videoOriginalBytes);
+      if (!Number.isNaN(parsedBytes)) {
+        submissionData.videoOriginalBytes = parsedBytes;
       }
-
-      if (attachedVideoJob.submissionId) {
-        return res.status(400).json({
-          success: false,
-          message: 'Video upload already attached to another submission.'
-        });
-      }
-
-      const teacherMatch = attachedVideoJob.teacherId?.toString() === teacherIdStr;
-      if (!teacherMatch && req.user.role === 'teacher') {
-        return res.status(403).json({
-          success: false,
-          message: 'Video upload does not belong to this teacher.'
-        });
-      }
-
-      let processingStatus = 'READY';
-      if (attachedVideoJob.status === 'FAILED') processingStatus = 'FAILED';
-      else if (attachedVideoJob.status === 'QUEUED') processingStatus = 'QUEUED';
-      else if (attachedVideoJob.status === 'PROCESSING') processingStatus = 'PROCESSING';
-
-      submissionData.videoProcessingJobId = attachedVideoJob.videoId;
-      submissionData.videoProcessingStatus = processingStatus;
-      submissionData.videoProcessingError = attachedVideoJob.error || null;
-      submissionData.videoOriginalBytes = attachedVideoJob.originalBytes;
-      submissionData.videoTargetMb = attachedVideoJob.targetMb;
-      submissionData.videoFileName = attachedVideoJob.videoFileName;
-      submissionData.videoFileUrl = attachedVideoJob.videoFileUrl;
     }
 
     // Validate required fields
@@ -354,19 +323,6 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnC
 
     const submission = await Submission.create(submissionData);
     console.log('Submission created successfully:', submission._id);
-
-    if (attachedVideoJob) {
-      await VideoProcessingJob.updateOne(
-        { videoId: attachedVideoJob.videoId },
-        {
-          submissionId: submission._id,
-          teacherId: submission.teacherId,
-          status: attachedVideoJob.status,
-          videoFileName: attachedVideoJob.videoFileName,
-          videoFileUrl: attachedVideoJob.videoFileUrl
-        }
-      );
-    }
 
     // Log submission creation
     const logAction = req.user.role === 'teacher' 

@@ -85,23 +85,7 @@ const submissionSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
-  videoProcessingJobId: {
-    type: String,
-    trim: true
-  },
-  videoProcessingStatus: {
-    type: String,
-    enum: ['IDLE', 'QUEUED', 'PROCESSING', 'READY', 'FAILED'],
-    default: 'IDLE'
-  },
-  videoProcessingError: {
-    type: String,
-    trim: true
-  },
   videoOriginalBytes: {
-    type: Number
-  },
-  videoTargetMb: {
     type: Number
   },
   score: {

@@ -2,9 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { nanoid } = require('nanoid');
 const { protect } = require('../middleware/auth');
-const VideoProcessingJob = require('../models/VideoProcessingJob');
 const { uploadLimiter } = require('../middleware/rateLimiter');
 
 // Safely import logger - if it fails, app should still work
@@ -274,29 +272,10 @@ router.post('/video', protect, uploadLimiter, logUploadProgress('video upload'),
       });
     }
 
-    const videoId = req.videoId || nanoid();
-    const finalFilename = `${videoId}.mp4`;
-    const finalPath = path.join(videosDir, finalFilename);
+    const storedFilename = req.file.filename;
+    const storedPath = req.file.path;
 
     console.log(`[video] Received upload for user=${req.user._id} name=${req.file.originalname} bytes=${req.file.size}`);
-
-    if (fs.existsSync(finalPath)) {
-      fs.unlinkSync(finalPath);
-    }
-
-    fs.renameSync(req.file.path, finalPath);
-
-    const job = await VideoProcessingJob.create({
-      videoId,
-      teacherId: req.user._id,
-      originalName: req.file.originalname,
-      originalPath: finalPath,
-      status: 'READY',
-      originalBytes: req.file.size,
-      targetMb: MAX_VIDEO_UPLOAD_MB,
-      videoFileName: finalFilename,
-      videoFileUrl: buildVideoFileUrl(finalFilename)
-    });
 
     if (logger) {
       logger.logUserActivity(
@@ -304,10 +283,9 @@ router.post('/video', protect, uploadLimiter, logUploadProgress('video upload'),
         req.user._id,
         req,
         {
-          filename: job.videoFileName,
-          originalName: job.originalName,
-          fileSize: job.originalBytes,
-          videoId: job.videoId
+          filename: storedFilename,
+          originalName: req.file.originalname,
+          fileSize: req.file.size
         }
       ).catch(() => {});
     }
@@ -315,11 +293,10 @@ router.post('/video', protect, uploadLimiter, logUploadProgress('video upload'),
     res.status(201).json({
       success: true,
       video: {
-        videoId: job.videoId,
-        status: job.status,
-        originalBytes: job.originalBytes,
-        targetMb: job.targetMb,
-        videoFileName: job.videoFileName
+        videoFileName: storedFilename,
+        videoFileUrl: buildVideoFileUrl(storedFilename),
+        originalName: req.file.originalname,
+        originalBytes: req.file.size
       }
     });
   } catch (error) {
@@ -374,26 +351,6 @@ router.post('/video', protect, uploadLimiter, logUploadProgress('video upload'),
 //     });
 //   }
 // });
-
-router.get('/video-status/:videoId', protect, async (req, res) => {
-  try {
-    const job = await VideoProcessingJob.findOne({ videoId: req.params.videoId }).lean();
-    if (!job) {
-      return res.status(404).json({ success: false, message: 'Video job not found' });
-    }
-
-    const isOwner = job.teacherId && job.teacherId.toString() === req.user._id.toString();
-    const isPrivileged = ['admin', 'superadmin'].includes(req.user.role);
-    if (!isOwner && !isPrivileged) {
-      return res.status(403).json({ success: false, message: 'Not authorized to view this job' });
-    }
-
-    res.json({ success: true, video: job });
-  } catch (error) {
-    console.error('Video status error:', error);
-    res.status(500).json({ success: false, message: error.message || 'Failed to fetch status' });
-  }
-});
 
 // @route   GET /api/uploads/files/:filename
 // @desc    Serve uploaded file (checks lesson-plan, videos, images subfolders, and root for backward compatibility)
