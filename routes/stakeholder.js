@@ -33,32 +33,33 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(300), as
       User.countDocuments({ role: 'judge', status: 'active' }).maxTimeMS(30000)
     ]);
 
-    // Region data: aggregate counts by region (no PII)
-    const regionAggregation = await Submission.aggregate([
-      { $match: { year } },
-      {
-        $group: {
-          _id: '$region',
-          submissionsCount: { $sum: 1 },
-          teacherCount: { $addToSet: '$teacherId' }
-        }
-      },
-      {
-        $project: {
-          region: '$_id',
-          submissionsCount: 1,
-          teachersCount: { $size: '$teacherCount' },
-          _id: 0
-        }
-      },
-      { $sort: { submissionsCount: -1 } }
+    // Region data: Get all teachers by region (including those with no submissions)
+    const allTeachersByRegion = await User.aggregate([
+      { $match: { role: 'teacher', status: 'active', region: { $exists: true, $ne: '' } } },
+      { $group: { _id: '$region', teachersCount: { $sum: 1 } } },
+      { $project: { region: '$_id', teachersCount: 1, _id: 0 } }
     ]).option({ maxTimeMS: 30000, allowDiskUse: true });
 
-    const regionStats = regionAggregation.map(({ region, submissionsCount, teachersCount }) => ({
-      region: region || 'Unknown',
-      submissionsCount,
-      teachersCount
-    }));
+    // Get submission counts by region for the selected year
+    const submissionsByRegion = await Submission.aggregate([
+      { $match: { year } },
+      { $group: { _id: '$region', submissionsCount: { $sum: 1 } } },
+      { $project: { region: '$_id', submissionsCount: 1, _id: 0 } }
+    ]).option({ maxTimeMS: 30000, allowDiskUse: true });
+
+    // Create a map of submissions by region for quick lookup
+    const submissionsMap = new Map(
+      submissionsByRegion.map(item => [item.region, item.submissionsCount])
+    );
+
+    // Merge: all regions with teachers, with submission count (0 if none)
+    const regionStats = allTeachersByRegion
+      .map(({ region, teachersCount }) => ({
+        region: region || 'Unknown',
+        teachersCount,
+        submissionsCount: submissionsMap.get(region) || 0
+      }))
+      .sort((a, b) => b.teachersCount - a.teachersCount);
 
     // Evaluation data: submissions evaluated count
     const submissionsWithEvaluation = await Evaluation.aggregate([
