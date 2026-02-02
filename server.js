@@ -28,6 +28,7 @@ const landingPageRoutes = require("./routes/landingPage");
 const uploadRoutes = require("./routes/uploads");
 const notificationRoutes = require("./routes/notifications");
 const leaderboardRoutes = require("./routes/leaderboard");
+const stakeholderRoutes = require("./routes/stakeholder");
 const { generalLimiter } = require("./middleware/rateLimiter");
 
 const app = express();
@@ -98,6 +99,7 @@ app.use("/api/landing-page", landingPageRoutes);
 app.use("/api/uploads", uploadRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/leaderboard", leaderboardRoutes);
+app.use("/api/stakeholder", stakeholderRoutes);
 
 // Health check endpoint
 app.get("/api/health", (req, res) => {

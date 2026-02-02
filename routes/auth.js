@@ -114,11 +114,11 @@ router.post('/login', authLimiter, async (req, res) => {
     }
 
     // Check if email is verified
-    // For admin/judge users registered by admin: send OTP if not verified
+    // For admin/judge/stakeholder users registered by admin: send OTP if not verified
     // For teacher users (self-registered): require verification before login
     if (!user.emailVerified) {
-      // If user is admin or judge (registered by admin), send OTP
-      if (user.role === 'admin' || user.role === 'judge') {
+      // If user is admin, judge, or stakeholder (registered by admin), send OTP
+      if (user.role === 'admin' || user.role === 'judge' || user.role === 'stakeholder') {
         // Generate and send OTP for email verification
         const otpResult = await OTPService.createOTP(user.email);
 
@@ -457,11 +457,11 @@ router.post('/verify-otp-and-login', otpVerifyLimiter, async (req, res) => {
       });
     }
 
-    // Only allow this for admin/judge users
-    if (user.role !== 'admin' && user.role !== 'judge') {
+    // Only allow this for admin/judge/stakeholder users
+    if (user.role !== 'admin' && user.role !== 'judge' && user.role !== 'stakeholder') {
       return res.status(403).json({
         success: false,
-        message: 'This verification method is only for admin and judge accounts'
+        message: 'This verification method is only for admin, judge, and stakeholder accounts'
       });
     }
 
