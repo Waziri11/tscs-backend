@@ -6,6 +6,7 @@ const SubmissionAssignment = require('../models/SubmissionAssignment');
 const { protect, authorize } = require('../middleware/auth');
 const { cacheMiddleware } = require('../middleware/cache');
 const { generalLimiter } = require('../middleware/rateLimiter');
+const { isValidRegion, isValidCouncil } = require('../data/locations');
 
 const router = express.Router();
 
@@ -189,6 +190,22 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), cacheMiddlew
     const region = req.query.region || null;
     const council = req.query.council || null;
 
+    // Validate region parameter if provided
+    if (region && !isValidRegion(region)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid region parameter'
+      });
+    }
+
+    // Validate council parameter if provided (must be valid within the region)
+    if (council && (!region || !isValidCouncil(region, council))) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid council parameter or council does not belong to the specified region'
+      });
+    }
+
     // Build base match query
     const matchQuery = { year };
     if (areaOfFocus) matchQuery.areaOfFocus = areaOfFocus;
@@ -285,14 +302,6 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), cacheMiddlew
       ]).option({ maxTimeMS: 30000, allowDiskUse: true }).then(result => result.map(r => r.areaOfFocus))
     ]);
 
-    // Also compute availableAreasOfFocus for competition-stats endpoint
-    const availableAreasOfFocusForCompetition = await Submission.aggregate([
-      { $match: { year } },
-      { $group: { _id: '$areaOfFocus' } },
-      { $project: { areaOfFocus: '$_id', _id: 0 } },
-      { $sort: { areaOfFocus: 1 } }
-    ]).option({ maxTimeMS: 30000, allowDiskUse: true }).then(result => result.map(r => r.areaOfFocus));
-
     // Determine competitionBreakdown based on filters
     let competitionBreakdown;
     if (council) {
@@ -355,6 +364,22 @@ router.get('/competition-stats', protect, authorize('stakeholder'), cacheMiddlew
     const areaOfFocus = req.query.areaOfFocus || null;
     const region = req.query.region || null;
     const council = req.query.council || null;
+
+    // Validate region parameter if provided
+    if (region && !isValidRegion(region)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid region parameter'
+      });
+    }
+
+    // Validate council parameter if provided (must be valid within the region)
+    if (council && (!region || !isValidCouncil(region, council))) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid council parameter or council does not belong to the specified region'
+      });
+    }
 
     // Build base match query
     const matchQuery = { year };
@@ -470,6 +495,14 @@ router.get('/competition-stats', protect, authorize('stakeholder'), cacheMiddlew
 router.get('/teachers-by-region', protect, authorize('stakeholder'), cacheMiddleware(120), async (req, res) => {
   try {
     const region = req.query.region || null;
+
+    // Validate region parameter if provided
+    if (region && !isValidRegion(region)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid region parameter'
+      });
+    }
 
     let data;
     if (region) {
