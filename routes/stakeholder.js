@@ -16,7 +16,7 @@ router.use(generalLimiter);
 // @route   GET /api/stakeholder/stats
 // @desc    Get aggregate competition stats for stakeholder dashboard (read-only, no PII)
 // @access  Private (Stakeholder only)
-router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(300), async (req, res) => {
+router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(120), async (req, res) => {
   try {
     const year = req.query.year ? parseInt(req.query.year, 10) : new Date().getFullYear();
     if (isNaN(year)) {
@@ -26,75 +26,173 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(300), as
       });
     }
 
-    // Totals: use countDocuments only (no raw lists)
+    // Parse filter parameters
+    const areaOfFocus = req.query.areaOfFocus || null;
+    const region = req.query.region || null;
+    const council = req.query.council || null;
+
+    // Validate region parameter if provided
+    if (region && !isValidRegion(region)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid region parameter'
+      });
+    }
+
+    // Validate council parameter if provided
+    if (council && (!region || !isValidCouncil(region, council))) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid council parameter or council does not belong to the specified region'
+      });
+    }
+
+    // Build base match queries
+    const submissionMatchQuery = { year };
+    if (areaOfFocus) submissionMatchQuery.areaOfFocus = areaOfFocus;
+    if (region) submissionMatchQuery.region = region;
+    if (council) submissionMatchQuery.council = council;
+
+    const teacherMatchQuery = { role: 'teacher', status: 'active' };
+    if (region) teacherMatchQuery.region = region;
+    if (council) teacherMatchQuery.council = council;
+
+    // Get available areas of focus for filter dropdown
+    const availableAreasOfFocus = await Submission.distinct('areaOfFocus', { year }).maxTimeMS(30000);
+
+    // Totals based on filters
     const [totalTeachers, totalSubmissions, totalJudges] = await Promise.all([
-      User.countDocuments({ role: 'teacher', status: 'active' }).maxTimeMS(30000),
-      Submission.countDocuments({ year }).maxTimeMS(30000),
+      User.countDocuments(teacherMatchQuery).maxTimeMS(30000),
+      Submission.countDocuments(submissionMatchQuery).maxTimeMS(30000),
       User.countDocuments({ role: 'judge', status: 'active' }).maxTimeMS(30000)
     ]);
 
-    // Region data: Get all teachers by region (including those with no submissions)
-    const allTeachersByRegion = await User.aggregate([
-      { $match: { role: 'teacher', status: 'active', region: { $exists: true, $ne: '' } } },
-      { $group: { _id: '$region', teachersCount: { $sum: 1 } } },
-      { $project: { region: '$_id', teachersCount: 1, _id: 0 } }
-    ]).option({ maxTimeMS: 30000, allowDiskUse: true });
+    // Dynamic location stats based on filter level
+    let locationStats = [];
+    let locationStatsType = 'regions'; // 'regions', 'councils', or 'areaOfFocus'
 
-    // Get submission counts by region for the selected year
-    const submissionsByRegion = await Submission.aggregate([
-      { $match: { year } },
-      { $group: { _id: '$region', submissionsCount: { $sum: 1 } } },
-      { $project: { region: '$_id', submissionsCount: 1, _id: 0 } }
-    ]).option({ maxTimeMS: 30000, allowDiskUse: true });
+    if (council) {
+      // Council selected: show breakdown by area of focus
+      locationStatsType = 'areaOfFocus';
+      const byAreaOfFocus = await Submission.aggregate([
+        { $match: submissionMatchQuery },
+        { $group: { _id: '$areaOfFocus', submissionsCount: { $sum: 1 } } },
+        { $project: { name: '$_id', submissionsCount: 1, _id: 0 } },
+        { $sort: { submissionsCount: -1 } }
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true });
+      locationStats = byAreaOfFocus;
+    } else if (region) {
+      // Region selected: show councils within that region
+      locationStatsType = 'councils';
+      
+      // Get all teachers by council in this region
+      const teachersByCouncil = await User.aggregate([
+        { $match: { ...teacherMatchQuery, council: { $exists: true, $ne: '' } } },
+        { $group: { _id: '$council', teachersCount: { $sum: 1 } } },
+        { $project: { name: '$_id', teachersCount: 1, _id: 0 } }
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true });
 
-    // Create a map of submissions by region for quick lookup
-    const submissionsMap = new Map(
-      submissionsByRegion.map(item => [item.region, item.submissionsCount])
-    );
+      // Get submissions by council
+      const submissionsByCouncil = await Submission.aggregate([
+        { $match: submissionMatchQuery },
+        { $group: { _id: '$council', submissionsCount: { $sum: 1 } } },
+        { $project: { name: '$_id', submissionsCount: 1, _id: 0 } }
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true });
 
-    // Merge: all regions with teachers, with submission count (0 if none)
-    const regionStats = allTeachersByRegion
-      .map(({ region, teachersCount }) => ({
-        region: region || 'Unknown',
-        teachersCount,
-        submissionsCount: submissionsMap.get(region) || 0
-      }))
-      .sort((a, b) => b.teachersCount - a.teachersCount);
+      const submissionsMap = new Map(submissionsByCouncil.map(item => [item.name, item.submissionsCount]));
+      
+      locationStats = teachersByCouncil
+        .map(({ name, teachersCount }) => ({
+          name: name || 'Unknown',
+          teachersCount,
+          submissionsCount: submissionsMap.get(name) || 0
+        }))
+        .sort((a, b) => b.teachersCount - a.teachersCount);
+    } else {
+      // No region filter: show all regions
+      locationStatsType = 'regions';
+      
+      // Get all teachers by region
+      const allTeachersByRegion = await User.aggregate([
+        { $match: { role: 'teacher', status: 'active', region: { $exists: true, $ne: '' } } },
+        { $group: { _id: '$region', teachersCount: { $sum: 1 } } },
+        { $project: { name: '$_id', teachersCount: 1, _id: 0 } }
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true });
 
-    // Evaluation data: submissions evaluated count
-    const submissionsWithEvaluation = await Evaluation.aggregate([
-      { $lookup: { from: 'submissions', localField: 'submissionId', foreignField: '_id', as: 'sub' } },
-      { $unwind: '$sub' },
-      { $match: { 'sub.year': year } },
-      { $group: { _id: '$submissionId' } },
-      { $count: 'evaluatedCount' }
-    ]).option({ maxTimeMS: 30000, allowDiskUse: true });
-    const evaluatedCount = submissionsWithEvaluation[0]?.evaluatedCount ?? 0;
+      // Get submissions by region (with area of focus filter if applied)
+      const submissionsByRegion = await Submission.aggregate([
+        { $match: submissionMatchQuery },
+        { $group: { _id: '$region', submissionsCount: { $sum: 1 } } },
+        { $project: { name: '$_id', submissionsCount: 1, _id: 0 } }
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true });
 
-    // Submissions by status for donut chart
+      const submissionsMap = new Map(submissionsByRegion.map(item => [item.name, item.submissionsCount]));
+      
+      locationStats = allTeachersByRegion
+        .map(({ name, teachersCount }) => ({
+          name: name || 'Unknown',
+          teachersCount,
+          submissionsCount: submissionsMap.get(name) || 0
+        }))
+        .sort((a, b) => b.teachersCount - a.teachersCount);
+    }
+
+    // Submissions by status for donut chart (filtered)
     const byStatus = await Submission.aggregate([
-      { $match: { year } },
+      { $match: submissionMatchQuery },
       { $group: { _id: '$status', count: { $sum: 1 } } },
       { $project: { status: '$_id', count: 1, _id: 0 } },
       { $sort: { count: -1 } }
     ]).option({ maxTimeMS: 30000, allowDiskUse: true });
 
-    // Teachers by region for pie chart
-    const teachersByRegion = await User.aggregate([
-      { $match: { role: 'teacher', status: 'active', region: { $exists: true, $ne: '' } } },
-      { $group: { _id: '$region', teachersCount: { $sum: 1 } } },
-      { $project: { region: '$_id', teachersCount: 1, _id: 0 } },
-      { $sort: { teachersCount: -1 } }
-    ]).option({ maxTimeMS: 30000, allowDiskUse: true });
+    // Teachers by location for pie chart (dynamic based on filter)
+    let teachersByLocation = [];
+    let teachersByLocationType = 'region';
 
-    // Judges per level (count only, no list)
+    if (council) {
+      // Show teachers by area of focus they submitted to (if any)
+      teachersByLocationType = 'areaOfFocus';
+      teachersByLocation = [{ name: council, teachersCount: totalTeachers }];
+    } else if (region) {
+      teachersByLocationType = 'council';
+      teachersByLocation = await User.aggregate([
+        { $match: { ...teacherMatchQuery, council: { $exists: true, $ne: '' } } },
+        { $group: { _id: '$council', teachersCount: { $sum: 1 } } },
+        { $project: { name: '$_id', teachersCount: 1, _id: 0 } },
+        { $sort: { teachersCount: -1 } }
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true });
+    } else {
+      teachersByLocationType = 'region';
+      teachersByLocation = await User.aggregate([
+        { $match: { role: 'teacher', status: 'active', region: { $exists: true, $ne: '' } } },
+        { $group: { _id: '$region', teachersCount: { $sum: 1 } } },
+        { $project: { name: '$_id', teachersCount: 1, _id: 0 } },
+        { $sort: { teachersCount: -1 } }
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true });
+    }
+
+    // Evaluation data (filtered)
+    const evalMatchQuery = { 'sub.year': year };
+    if (areaOfFocus) evalMatchQuery['sub.areaOfFocus'] = areaOfFocus;
+    if (region) evalMatchQuery['sub.region'] = region;
+    if (council) evalMatchQuery['sub.council'] = council;
+
+    const submissionsWithEvaluation = await Evaluation.aggregate([
+      { $lookup: { from: 'submissions', localField: 'submissionId', foreignField: '_id', as: 'sub' } },
+      { $unwind: '$sub' },
+      { $match: evalMatchQuery },
+      { $group: { _id: '$submissionId' } },
+      { $count: 'evaluatedCount' }
+    ]).option({ maxTimeMS: 30000, allowDiskUse: true });
+    const evaluatedCount = submissionsWithEvaluation[0]?.evaluatedCount ?? 0;
+
+    // Judges data (not filtered by submission filters)
     const judgesPerLevel = await User.aggregate([
       { $match: { role: 'judge', status: 'active', assignedLevel: { $in: ['Council', 'Regional', 'National'] } } },
       { $group: { _id: '$assignedLevel', count: { $sum: 1 } } },
       { $project: { level: '$_id', count: 1, _id: 0 } }
     ]).option({ maxTimeMS: 30000 });
 
-    // Judges per region (Council/Regional have assignedRegion)
     const judgesPerRegion = await User.aggregate([
       { $match: { role: 'judge', status: 'active', assignedRegion: { $exists: true, $ne: '' } } },
       { $group: { _id: '$assignedRegion', count: { $sum: 1 } } },
@@ -102,64 +200,28 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(300), as
       { $sort: { count: -1 } }
     ]).option({ maxTimeMS: 30000 });
 
-    // Allocation: submissions per judge (from SubmissionAssignment for Council/Regional; from Evaluation for National)
-    // Optimized: Use $lookup instead of loading all IDs into memory
-    const assignmentsPerJudge = await SubmissionAssignment.aggregate([
-      {
-        $lookup: {
-          from: 'submissions',
-          localField: 'submissionId',
-          foreignField: '_id',
-          as: 'submission'
-        }
-      },
-      { $unwind: '$submission' },
-      { $match: { 'submission.year': year } },
-      { $group: { _id: '$judgeId', assignedCount: { $sum: 1 } } },
-      { $group: { _id: null, min: { $min: '$assignedCount' }, max: { $max: '$assignedCount' }, avg: { $avg: '$assignedCount' }, judgeCount: { $sum: 1 } } }
-    ]).option({ maxTimeMS: 30000, allowDiskUse: true });
-
-    const evaluationsPerJudge = await Evaluation.aggregate([
-      { $lookup: { from: 'submissions', localField: 'submissionId', foreignField: '_id', as: 'sub' } },
-      { $unwind: '$sub' },
-      { $match: { 'sub.year': year } },
-      { $group: { _id: '$judgeId', evaluatedCount: { $sum: 1 } } },
-      { $group: { _id: null, min: { $min: '$evaluatedCount' }, max: { $max: '$evaluatedCount' }, avg: { $avg: '$evaluatedCount' }, judgeCount: { $sum: 1 } } }
-    ]).option({ maxTimeMS: 30000, allowDiskUse: true });
-
-    const assignmentStats = assignmentsPerJudge[0] || { min: 0, max: 0, avg: 0, judgeCount: 0 };
-    const evaluationStatsAgg = evaluationsPerJudge[0] || { min: 0, max: 0, avg: 0, judgeCount: 0 };
-
-    const allocationByLevel = {
-      councilRegional: assignmentStats.judgeCount > 0 ? {
-        min: assignmentStats.min,
-        max: assignmentStats.max,
-        avg: Math.round(assignmentStats.avg * 100) / 100,
-        judgesCount: assignmentStats.judgeCount
-      } : null,
-      national: evaluationStatsAgg.judgeCount > 0 ? {
-        min: evaluationStatsAgg.min,
-        max: evaluationStatsAgg.max,
-        avg: Math.round(evaluationStatsAgg.avg * 100) / 100,
-        judgesCount: evaluationStatsAgg.judgeCount
-      } : null
-    };
-
     res.json({
       success: true,
       year,
+      filters: { areaOfFocus, region, council },
+      availableAreasOfFocus,
       totalTeachers,
       totalSubmissions,
       totalJudges,
-      regionStats,
+      locationStats: {
+        type: locationStatsType,
+        data: locationStats
+      },
       byStatus,
-      teachersByRegion,
+      teachersByLocation: {
+        type: teachersByLocationType,
+        data: teachersByLocation
+      },
       evaluation: {
         totalSubmissions,
         evaluatedCount,
         judgesPerLevel,
-        judgesPerRegion,
-        allocationByLevel
+        judgesPerRegion
       }
     });
   } catch (error) {
