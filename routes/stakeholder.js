@@ -5,8 +5,12 @@ const Evaluation = require('../models/Evaluation');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
 const { protect, authorize } = require('../middleware/auth');
 const { cacheMiddleware } = require('../middleware/cache');
+const { generalLimiter } = require('../middleware/rateLimiter');
 
 const router = express.Router();
+
+// Apply rate limiting to all stakeholder routes
+router.use(generalLimiter);
 
 // @route   GET /api/stakeholder/stats
 // @desc    Get aggregate competition stats for stakeholder dashboard (read-only, no PII)
@@ -23,9 +27,9 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(300), as
 
     // Totals: use countDocuments only (no raw lists)
     const [totalTeachers, totalSubmissions, totalJudges] = await Promise.all([
-      User.countDocuments({ role: 'teacher', status: 'active' }),
-      Submission.countDocuments({ year }),
-      User.countDocuments({ role: 'judge', status: 'active' })
+      User.countDocuments({ role: 'teacher', status: 'active' }).maxTimeMS(30000),
+      Submission.countDocuments({ year }).maxTimeMS(30000),
+      User.countDocuments({ role: 'judge', status: 'active' }).maxTimeMS(30000)
     ]);
 
     // Region data: aggregate counts by region (no PII)
@@ -47,7 +51,7 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(300), as
         }
       },
       { $sort: { submissionsCount: -1 } }
-    ]);
+    ]).option({ maxTimeMS: 30000, allowDiskUse: true });
 
     const regionStats = regionAggregation.map(({ region, submissionsCount, teachersCount }) => ({
       region: region || 'Unknown',
@@ -62,7 +66,7 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(300), as
       { $match: { 'sub.year': year } },
       { $group: { _id: '$submissionId' } },
       { $count: 'evaluatedCount' }
-    ]);
+    ]).option({ maxTimeMS: 30000, allowDiskUse: true });
     const evaluatedCount = submissionsWithEvaluation[0]?.evaluatedCount ?? 0;
 
     // Submissions by status for donut chart
@@ -71,14 +75,22 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(300), as
       { $group: { _id: '$status', count: { $sum: 1 } } },
       { $project: { status: '$_id', count: 1, _id: 0 } },
       { $sort: { count: -1 } }
-    ]);
+    ]).option({ maxTimeMS: 30000, allowDiskUse: true });
+
+    // Teachers by region for pie chart
+    const teachersByRegion = await User.aggregate([
+      { $match: { role: 'teacher', status: 'active', region: { $exists: true, $ne: '' } } },
+      { $group: { _id: '$region', teachersCount: { $sum: 1 } } },
+      { $project: { region: '$_id', teachersCount: 1, _id: 0 } },
+      { $sort: { teachersCount: -1 } }
+    ]).option({ maxTimeMS: 30000, allowDiskUse: true });
 
     // Judges per level (count only, no list)
     const judgesPerLevel = await User.aggregate([
       { $match: { role: 'judge', status: 'active', assignedLevel: { $in: ['Council', 'Regional', 'National'] } } },
       { $group: { _id: '$assignedLevel', count: { $sum: 1 } } },
       { $project: { level: '$_id', count: 1, _id: 0 } }
-    ]);
+    ]).option({ maxTimeMS: 30000 });
 
     // Judges per region (Council/Regional have assignedRegion)
     const judgesPerRegion = await User.aggregate([
@@ -86,7 +98,7 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(300), as
       { $group: { _id: '$assignedRegion', count: { $sum: 1 } } },
       { $project: { region: '$_id', count: 1, _id: 0 } },
       { $sort: { count: -1 } }
-    ]);
+    ]).option({ maxTimeMS: 30000 });
 
     // Allocation: submissions per judge (from SubmissionAssignment for Council/Regional; from Evaluation for National)
     // Optimized: Use $lookup instead of loading all IDs into memory
@@ -103,7 +115,7 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(300), as
       { $match: { 'submission.year': year } },
       { $group: { _id: '$judgeId', assignedCount: { $sum: 1 } } },
       { $group: { _id: null, min: { $min: '$assignedCount' }, max: { $max: '$assignedCount' }, avg: { $avg: '$assignedCount' }, judgeCount: { $sum: 1 } } }
-    ]);
+    ]).option({ maxTimeMS: 30000, allowDiskUse: true });
 
     const evaluationsPerJudge = await Evaluation.aggregate([
       { $lookup: { from: 'submissions', localField: 'submissionId', foreignField: '_id', as: 'sub' } },
@@ -111,7 +123,7 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(300), as
       { $match: { 'sub.year': year } },
       { $group: { _id: '$judgeId', evaluatedCount: { $sum: 1 } } },
       { $group: { _id: null, min: { $min: '$evaluatedCount' }, max: { $max: '$evaluatedCount' }, avg: { $avg: '$evaluatedCount' }, judgeCount: { $sum: 1 } } }
-    ]);
+    ]).option({ maxTimeMS: 30000, allowDiskUse: true });
 
     const assignmentStats = assignmentsPerJudge[0] || { min: 0, max: 0, avg: 0, judgeCount: 0 };
     const evaluationStatsAgg = evaluationsPerJudge[0] || { min: 0, max: 0, avg: 0, judgeCount: 0 };
@@ -139,6 +151,7 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(300), as
       totalJudges,
       regionStats,
       byStatus,
+      teachersByRegion,
       evaluation: {
         totalSubmissions,
         evaluatedCount,
@@ -149,9 +162,12 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(300), as
     });
   } catch (error) {
     console.error('Stakeholder stats error:', error);
+    const isProduction = process.env.NODE_ENV === 'production';
     res.status(500).json({
       success: false,
-      message: error.message || 'Server error'
+      message: isProduction 
+        ? 'An error occurred while processing your request. Please try again later.'
+        : (error.message || 'Server error')
     });
   }
 });
@@ -193,14 +209,14 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), cacheMiddlew
       availableAreasOfFocus
     ] = await Promise.all([
       // Total submissions
-      Submission.countDocuments(matchQuery),
+      Submission.countDocuments(matchQuery).maxTimeMS(30000),
       
       // Total distinct teachers
       Submission.aggregate([
         { $match: matchQuery },
         { $group: { _id: '$teacherId' } },
         { $count: 'total' }
-      ]).then(result => result[0]?.total ?? 0),
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true }).then(result => result[0]?.total ?? 0),
 
       // By status
       Submission.aggregate([
@@ -208,7 +224,7 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), cacheMiddlew
         { $group: { _id: '$status', count: { $sum: 1 } } },
         { $project: { status: '$_id', count: 1, _id: 0 } },
         { $sort: { count: -1 } }
-      ]),
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true }),
 
       // By level
       Submission.aggregate([
@@ -216,7 +232,7 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), cacheMiddlew
         { $group: { _id: '$level', count: { $sum: 1 } } },
         { $project: { level: '$_id', count: 1, _id: 0 } },
         { $sort: { count: -1 } }
-      ]),
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true }),
 
       // By area of focus (only if no areaOfFocus filter)
       !areaOfFocus ? Submission.aggregate([
@@ -224,7 +240,7 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), cacheMiddlew
         { $group: { _id: '$areaOfFocus', count: { $sum: 1 } } },
         { $project: { areaOfFocus: '$_id', count: 1, _id: 0 } },
         { $sort: { count: -1 } }
-      ]) : Promise.resolve([]),
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true }) : Promise.resolve([]),
 
       // Score metrics
       Submission.aggregate([
@@ -239,10 +255,10 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), cacheMiddlew
           }
         },
         { $project: { _id: 0, averageScore: { $round: ['$avg', 2] }, minScore: { $round: ['$min', 2] }, maxScore: { $round: ['$max', 2] }, submissionsWithScores: '$count' } }
-      ]).then(result => result[0] || { averageScore: 0, minScore: 0, maxScore: 0, submissionsWithScores: 0 }),
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true }).then(result => result[0] || { averageScore: 0, minScore: 0, maxScore: 0, submissionsWithScores: 0 }),
 
       // Disqualified count
-      Submission.countDocuments({ ...matchQuery, disqualified: true }),
+      Submission.countDocuments({ ...matchQuery, disqualified: true }).maxTimeMS(30000),
 
       // By region (only if no region filter)
       !region ? Submission.aggregate([
@@ -250,7 +266,7 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), cacheMiddlew
         { $group: { _id: '$region', count: { $sum: 1 } } },
         { $project: { region: '$_id', count: 1, _id: 0 } },
         { $sort: { count: -1 } }
-      ]) : Promise.resolve([]),
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true }) : Promise.resolve([]),
 
       // By council (only if no council filter and region is selected)
       !council && region ? Submission.aggregate([
@@ -258,7 +274,7 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), cacheMiddlew
         { $group: { _id: '$council', count: { $sum: 1 } } },
         { $project: { council: '$_id', count: 1, _id: 0 } },
         { $sort: { count: -1 } }
-      ]) : Promise.resolve([]),
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true }) : Promise.resolve([]),
 
       // Available areas of focus for the year
       Submission.aggregate([
@@ -266,7 +282,7 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), cacheMiddlew
         { $group: { _id: '$areaOfFocus' } },
         { $project: { areaOfFocus: '$_id', _id: 0 } },
         { $sort: { areaOfFocus: 1 } }
-      ]).then(result => result.map(r => r.areaOfFocus))
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true }).then(result => result.map(r => r.areaOfFocus))
     ]);
 
     // Also compute availableAreasOfFocus for competition-stats endpoint
@@ -275,7 +291,7 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), cacheMiddlew
       { $group: { _id: '$areaOfFocus' } },
       { $project: { areaOfFocus: '$_id', _id: 0 } },
       { $sort: { areaOfFocus: 1 } }
-    ]).then(result => result.map(r => r.areaOfFocus));
+    ]).option({ maxTimeMS: 30000, allowDiskUse: true }).then(result => result.map(r => r.areaOfFocus));
 
     // Determine competitionBreakdown based on filters
     let competitionBreakdown;
@@ -286,7 +302,7 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), cacheMiddlew
         { $group: { _id: '$areaOfFocus', count: { $sum: 1 } } },
         { $project: { areaOfFocus: '$_id', count: 1, _id: 0 } },
         { $sort: { count: -1 } }
-      ]);
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true });
       competitionBreakdown = { type: 'competitions', data: competitionsForCouncil };
     } else if (region) {
       // Region selected: show councils (already computed in byCouncil)
@@ -313,9 +329,12 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), cacheMiddlew
     });
   } catch (error) {
     console.error('Stakeholder submissions stats error:', error);
+    const isProduction = process.env.NODE_ENV === 'production';
     res.status(500).json({
       success: false,
-      message: error.message || 'Server error'
+      message: isProduction 
+        ? 'An error occurred while processing your request. Please try again later.'
+        : (error.message || 'Server error')
     });
   }
 });
@@ -354,13 +373,13 @@ router.get('/competition-stats', protect, authorize('stakeholder'), cacheMiddlew
       availableAreasOfFocus
     ] = await Promise.all([
       // Total submissions
-      Submission.countDocuments(matchQuery),
+      Submission.countDocuments(matchQuery).maxTimeMS(30000),
 
       // Eliminated count
-      Submission.countDocuments({ ...matchQuery, status: 'eliminated' }),
+      Submission.countDocuments({ ...matchQuery, status: 'eliminated' }).maxTimeMS(30000),
 
       // Promoted count (this is "passed")
-      Submission.countDocuments({ ...matchQuery, status: 'promoted' }),
+      Submission.countDocuments({ ...matchQuery, status: 'promoted' }).maxTimeMS(30000),
 
       // Breakdown by level
       Submission.aggregate([
@@ -375,7 +394,7 @@ router.get('/competition-stats', protect, authorize('stakeholder'), cacheMiddlew
         },
         { $project: { level: '$_id', total: 1, eliminated: 1, promoted: 1, _id: 0 } },
         { $sort: { level: 1 } }
-      ]),
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true }),
 
       // Breakdown by area of focus (only if no areaOfFocus filter)
       !areaOfFocus ? Submission.aggregate([
@@ -390,7 +409,7 @@ router.get('/competition-stats', protect, authorize('stakeholder'), cacheMiddlew
         },
         { $project: { areaOfFocus: '$_id', total: 1, eliminated: 1, promoted: 1, _id: 0 } },
         { $sort: { total: -1 } }
-      ]) : Promise.resolve([]),
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true }) : Promise.resolve([]),
 
       // Breakdown by region (only if no region filter)
       !region ? Submission.aggregate([
@@ -405,7 +424,7 @@ router.get('/competition-stats', protect, authorize('stakeholder'), cacheMiddlew
         },
         { $project: { region: '$_id', total: 1, eliminated: 1, promoted: 1, _id: 0 } },
         { $sort: { total: -1 } }
-      ]) : Promise.resolve([]),
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true }) : Promise.resolve([]),
 
       // Available areas of focus for the year
       Submission.aggregate([
@@ -413,7 +432,7 @@ router.get('/competition-stats', protect, authorize('stakeholder'), cacheMiddlew
         { $group: { _id: '$areaOfFocus' } },
         { $project: { areaOfFocus: '$_id', _id: 0 } },
         { $sort: { areaOfFocus: 1 } }
-      ]).then(result => result.map(r => r.areaOfFocus))
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true }).then(result => result.map(r => r.areaOfFocus))
     ]);
 
     const passRate = totalSubmissions > 0 ? Math.round((promotedCount / totalSubmissions) * 100 * 100) / 100 : 0;
@@ -435,9 +454,55 @@ router.get('/competition-stats', protect, authorize('stakeholder'), cacheMiddlew
     });
   } catch (error) {
     console.error('Stakeholder competition stats error:', error);
+    const isProduction = process.env.NODE_ENV === 'production';
     res.status(500).json({
       success: false,
-      message: error.message || 'Server error'
+      message: isProduction 
+        ? 'An error occurred while processing your request. Please try again later.'
+        : (error.message || 'Server error')
+    });
+  }
+});
+
+// @route   GET /api/stakeholder/teachers-by-region
+// @desc    Get teachers count by region or council (read-only, no PII)
+// @access  Private (Stakeholder only)
+router.get('/teachers-by-region', protect, authorize('stakeholder'), cacheMiddleware(120), async (req, res) => {
+  try {
+    const region = req.query.region || null;
+
+    let data;
+    if (region) {
+      // Region filter applied: return councils within that region
+      data = await User.aggregate([
+        { $match: { role: 'teacher', status: 'active', region, council: { $exists: true, $ne: '' } } },
+        { $group: { _id: '$council', teachersCount: { $sum: 1 } } },
+        { $project: { council: '$_id', teachersCount: 1, _id: 0 } },
+        { $sort: { teachersCount: -1 } }
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true });
+    } else {
+      // No region filter: return all regions
+      data = await User.aggregate([
+        { $match: { role: 'teacher', status: 'active', region: { $exists: true, $ne: '' } } },
+        { $group: { _id: '$region', teachersCount: { $sum: 1 } } },
+        { $project: { region: '$_id', teachersCount: 1, _id: 0 } },
+        { $sort: { teachersCount: -1 } }
+      ]).option({ maxTimeMS: 30000, allowDiskUse: true });
+    }
+
+    res.json({
+      success: true,
+      region: region || null,
+      data
+    });
+  } catch (error) {
+    console.error('Stakeholder teachers by region error:', error);
+    const isProduction = process.env.NODE_ENV === 'production';
+    res.status(500).json({
+      success: false,
+      message: isProduction 
+        ? 'An error occurred while processing your request. Please try again later.'
+        : (error.message || 'Server error')
     });
   }
 });
