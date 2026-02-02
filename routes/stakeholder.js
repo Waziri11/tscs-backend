@@ -22,9 +22,10 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(300), as
     }
 
     // Totals: use countDocuments only (no raw lists)
-    const [totalTeachers, totalSubmissions] = await Promise.all([
+    const [totalTeachers, totalSubmissions, totalJudges] = await Promise.all([
       User.countDocuments({ role: 'teacher', status: 'active' }),
-      Submission.countDocuments({ year })
+      Submission.countDocuments({ year }),
+      User.countDocuments({ role: 'judge', status: 'active' })
     ]);
 
     // Region data: aggregate counts by region (no PII)
@@ -63,6 +64,14 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(300), as
       { $count: 'evaluatedCount' }
     ]);
     const evaluatedCount = submissionsWithEvaluation[0]?.evaluatedCount ?? 0;
+
+    // Submissions by status for donut chart
+    const byStatus = await Submission.aggregate([
+      { $match: { year } },
+      { $group: { _id: '$status', count: { $sum: 1 } } },
+      { $project: { status: '$_id', count: 1, _id: 0 } },
+      { $sort: { count: -1 } }
+    ]);
 
     // Judges per level (count only, no list)
     const judgesPerLevel = await User.aggregate([
@@ -127,7 +136,9 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(300), as
       year,
       totalTeachers,
       totalSubmissions,
+      totalJudges,
       regionStats,
+      byStatus,
       evaluation: {
         totalSubmissions,
         evaluatedCount,
