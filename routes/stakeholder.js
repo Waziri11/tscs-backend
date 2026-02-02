@@ -268,6 +268,25 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), async (req, 
       ]).then(result => result.map(r => r.areaOfFocus))
     ]);
 
+    // Determine competitionBreakdown based on filters
+    let competitionBreakdown;
+    if (council) {
+      // Council selected: show competitions (areas of focus) for this council
+      const competitionsForCouncil = await Submission.aggregate([
+        { $match: { ...matchQuery, council } },
+        { $group: { _id: '$areaOfFocus', count: { $sum: 1 } } },
+        { $project: { areaOfFocus: '$_id', count: 1, _id: 0 } },
+        { $sort: { count: -1 } }
+      ]);
+      competitionBreakdown = { type: 'competitions', data: competitionsForCouncil };
+    } else if (region) {
+      // Region selected: show councils (already computed in byCouncil)
+      competitionBreakdown = { type: 'councils', data: byCouncil };
+    } else {
+      // No region: show regions (already computed in byRegion)
+      competitionBreakdown = { type: 'regions', data: byRegion };
+    }
+
     res.json({
       success: true,
       year,
@@ -278,13 +297,9 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), async (req, 
       },
       byStatus,
       byLevel,
-      bySubject,
-      byCategory,
-      byAreaOfFocus: !areaOfFocus ? byAreaOfFocus : [],
       scoreMetrics,
       disqualifiedCount,
-      byRegion: !region ? byRegion : [],
-      byCouncil: !council && region ? byCouncil : [],
+      competitionBreakdown,
       availableAreasOfFocus
     });
   } catch (error) {
