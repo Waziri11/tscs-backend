@@ -57,19 +57,23 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(120), as
     if (region) teacherMatchQuery.region = region;
     if (council) teacherMatchQuery.council = council;
 
-    // Get available areas of focus for filter dropdown
-    const availableAreasOfFocus = await Submission.distinct('areaOfFocus', { year }).maxTimeMS(30000);
+    // Pagination parameters for location stats bar chart
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 5;
+    const skip = (page - 1) * limit;
 
-    // Totals based on filters
-    const [totalTeachers, totalSubmissions, totalJudges] = await Promise.all([
+    // Run initial queries in parallel for better performance
+    const [totalTeachers, totalSubmissions, totalJudges, availableAreasOfFocus] = await Promise.all([
       User.countDocuments(teacherMatchQuery).maxTimeMS(30000),
       Submission.countDocuments(submissionMatchQuery).maxTimeMS(30000),
-      User.countDocuments({ role: 'judge', status: 'active' }).maxTimeMS(30000)
+      User.countDocuments({ role: 'judge', status: 'active' }).maxTimeMS(30000),
+      Submission.distinct('areaOfFocus', { year }).maxTimeMS(30000)
     ]);
 
-    // Dynamic location stats based on filter level
+    // Dynamic location stats based on filter level (with pagination)
     let locationStats = [];
     let locationStatsType = 'regions'; // 'regions', 'councils', or 'areaOfFocus'
+    let locationStatsTotalCount = 0;
 
     if (council) {
       // Council selected: show breakdown by area of focus
@@ -80,61 +84,69 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(120), as
         { $project: { name: '$_id', submissionsCount: 1, _id: 0 } },
         { $sort: { submissionsCount: -1 } }
       ]).option({ maxTimeMS: 30000, allowDiskUse: true });
-      locationStats = byAreaOfFocus;
+      
+      locationStatsTotalCount = byAreaOfFocus.length;
+      locationStats = byAreaOfFocus.slice(skip, skip + limit);
     } else if (region) {
       // Region selected: show councils within that region
       locationStatsType = 'councils';
       
-      // Get all teachers by council in this region
-      const teachersByCouncil = await User.aggregate([
-        { $match: { ...teacherMatchQuery, council: { $exists: true, $ne: '' } } },
-        { $group: { _id: '$council', teachersCount: { $sum: 1 } } },
-        { $project: { name: '$_id', teachersCount: 1, _id: 0 } }
-      ]).option({ maxTimeMS: 30000, allowDiskUse: true });
-
-      // Get submissions by council
-      const submissionsByCouncil = await Submission.aggregate([
-        { $match: submissionMatchQuery },
-        { $group: { _id: '$council', submissionsCount: { $sum: 1 } } },
-        { $project: { name: '$_id', submissionsCount: 1, _id: 0 } }
-      ]).option({ maxTimeMS: 30000, allowDiskUse: true });
+      // Run queries in parallel
+      const [teachersByCouncil, submissionsByCouncil] = await Promise.all([
+        User.aggregate([
+          { $match: { ...teacherMatchQuery, council: { $exists: true, $ne: '' } } },
+          { $group: { _id: '$council', teachersCount: { $sum: 1 } } },
+          { $project: { name: '$_id', teachersCount: 1, _id: 0 } }
+        ]).option({ maxTimeMS: 30000, allowDiskUse: true }),
+        Submission.aggregate([
+          { $match: submissionMatchQuery },
+          { $group: { _id: '$council', submissionsCount: { $sum: 1 } } },
+          { $project: { name: '$_id', submissionsCount: 1, _id: 0 } }
+        ]).option({ maxTimeMS: 30000, allowDiskUse: true })
+      ]);
 
       const submissionsMap = new Map(submissionsByCouncil.map(item => [item.name, item.submissionsCount]));
       
-      locationStats = teachersByCouncil
+      const allCouncilStats = teachersByCouncil
         .map(({ name, teachersCount }) => ({
           name: name || 'Unknown',
           teachersCount,
           submissionsCount: submissionsMap.get(name) || 0
         }))
         .sort((a, b) => b.teachersCount - a.teachersCount);
+      
+      locationStatsTotalCount = allCouncilStats.length;
+      locationStats = allCouncilStats.slice(skip, skip + limit);
     } else {
       // No region filter: show all regions
       locationStatsType = 'regions';
       
-      // Get all teachers by region
-      const allTeachersByRegion = await User.aggregate([
-        { $match: { role: 'teacher', status: 'active', region: { $exists: true, $ne: '' } } },
-        { $group: { _id: '$region', teachersCount: { $sum: 1 } } },
-        { $project: { name: '$_id', teachersCount: 1, _id: 0 } }
-      ]).option({ maxTimeMS: 30000, allowDiskUse: true });
-
-      // Get submissions by region (with area of focus filter if applied)
-      const submissionsByRegion = await Submission.aggregate([
-        { $match: submissionMatchQuery },
-        { $group: { _id: '$region', submissionsCount: { $sum: 1 } } },
-        { $project: { name: '$_id', submissionsCount: 1, _id: 0 } }
-      ]).option({ maxTimeMS: 30000, allowDiskUse: true });
+      // Run queries in parallel
+      const [allTeachersByRegion, submissionsByRegion] = await Promise.all([
+        User.aggregate([
+          { $match: { role: 'teacher', status: 'active', region: { $exists: true, $ne: '' } } },
+          { $group: { _id: '$region', teachersCount: { $sum: 1 } } },
+          { $project: { name: '$_id', teachersCount: 1, _id: 0 } }
+        ]).option({ maxTimeMS: 30000, allowDiskUse: true }),
+        Submission.aggregate([
+          { $match: submissionMatchQuery },
+          { $group: { _id: '$region', submissionsCount: { $sum: 1 } } },
+          { $project: { name: '$_id', submissionsCount: 1, _id: 0 } }
+        ]).option({ maxTimeMS: 30000, allowDiskUse: true })
+      ]);
 
       const submissionsMap = new Map(submissionsByRegion.map(item => [item.name, item.submissionsCount]));
       
-      locationStats = allTeachersByRegion
+      const allRegionStats = allTeachersByRegion
         .map(({ name, teachersCount }) => ({
           name: name || 'Unknown',
           teachersCount,
           submissionsCount: submissionsMap.get(name) || 0
         }))
         .sort((a, b) => b.teachersCount - a.teachersCount);
+      
+      locationStatsTotalCount = allRegionStats.length;
+      locationStats = allRegionStats.slice(skip, skip + limit);
     }
 
     // Submissions by status for donut chart (filtered)
@@ -210,7 +222,15 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(120), as
       totalJudges,
       locationStats: {
         type: locationStatsType,
-        data: locationStats
+        data: locationStats,
+        pagination: {
+          page,
+          limit,
+          totalCount: locationStatsTotalCount,
+          totalPages: Math.ceil(locationStatsTotalCount / limit),
+          hasNext: page * limit < locationStatsTotalCount,
+          hasPrev: page > 1
+        }
       },
       byStatus,
       teachersByLocation: {
