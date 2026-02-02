@@ -137,4 +137,275 @@ router.get('/stats', protect, authorize('stakeholder'), async (req, res) => {
   }
 });
 
+// @route   GET /api/stakeholder/submissions-stats
+// @desc    Get comprehensive submission statistics with filters (read-only, no PII)
+// @access  Private (Stakeholder only)
+router.get('/submissions-stats', protect, authorize('stakeholder'), async (req, res) => {
+  try {
+    const year = req.query.year ? parseInt(req.query.year, 10) : new Date().getFullYear();
+    if (isNaN(year)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid year parameter'
+      });
+    }
+
+    const areaOfFocus = req.query.areaOfFocus || null;
+    const region = req.query.region || null;
+    const council = req.query.council || null;
+
+    // Build base match query
+    const matchQuery = { year };
+    if (areaOfFocus) matchQuery.areaOfFocus = areaOfFocus;
+    if (region) matchQuery.region = region;
+    if (council) matchQuery.council = council;
+
+    // Run all aggregations in parallel
+    const [
+      totalSubmissions,
+      totalTeachers,
+      byStatus,
+      byLevel,
+      bySubject,
+      byCategory,
+      byAreaOfFocus,
+      scoreMetrics,
+      disqualifiedCount,
+      byRegion,
+      byCouncil,
+      availableAreasOfFocus
+    ] = await Promise.all([
+      // Total submissions
+      Submission.countDocuments(matchQuery),
+      
+      // Total distinct teachers
+      Submission.aggregate([
+        { $match: matchQuery },
+        { $group: { _id: '$teacherId' } },
+        { $count: 'total' }
+      ]).then(result => result[0]?.total ?? 0),
+
+      // By status
+      Submission.aggregate([
+        { $match: matchQuery },
+        { $group: { _id: '$status', count: { $sum: 1 } } },
+        { $project: { status: '$_id', count: 1, _id: 0 } },
+        { $sort: { count: -1 } }
+      ]),
+
+      // By level
+      Submission.aggregate([
+        { $match: matchQuery },
+        { $group: { _id: '$level', count: { $sum: 1 } } },
+        { $project: { level: '$_id', count: 1, _id: 0 } },
+        { $sort: { count: -1 } }
+      ]),
+
+      // By subject
+      Submission.aggregate([
+        { $match: matchQuery },
+        { $group: { _id: '$subject', count: { $sum: 1 } } },
+        { $project: { subject: '$_id', count: 1, _id: 0 } },
+        { $sort: { count: -1 } }
+      ]),
+
+      // By category
+      Submission.aggregate([
+        { $match: matchQuery },
+        { $group: { _id: '$category', count: { $sum: 1 } } },
+        { $project: { category: '$_id', count: 1, _id: 0 } },
+        { $sort: { count: -1 } }
+      ]),
+
+      // By area of focus (only if no areaOfFocus filter)
+      !areaOfFocus ? Submission.aggregate([
+        { $match: matchQuery },
+        { $group: { _id: '$areaOfFocus', count: { $sum: 1 } } },
+        { $project: { areaOfFocus: '$_id', count: 1, _id: 0 } },
+        { $sort: { count: -1 } }
+      ]) : Promise.resolve([]),
+
+      // Score metrics
+      Submission.aggregate([
+        { $match: { ...matchQuery, averageScore: { $gt: 0 } } },
+        {
+          $group: {
+            _id: null,
+            avg: { $avg: '$averageScore' },
+            min: { $min: '$averageScore' },
+            max: { $max: '$averageScore' },
+            count: { $sum: 1 }
+          }
+        },
+        { $project: { _id: 0, averageScore: { $round: ['$avg', 2] }, minScore: { $round: ['$min', 2] }, maxScore: { $round: ['$max', 2] }, submissionsWithScores: '$count' } }
+      ]).then(result => result[0] || { averageScore: 0, minScore: 0, maxScore: 0, submissionsWithScores: 0 }),
+
+      // Disqualified count
+      Submission.countDocuments({ ...matchQuery, disqualified: true }),
+
+      // By region (only if no region filter)
+      !region ? Submission.aggregate([
+        { $match: matchQuery },
+        { $group: { _id: '$region', count: { $sum: 1 } } },
+        { $project: { region: '$_id', count: 1, _id: 0 } },
+        { $sort: { count: -1 } }
+      ]) : Promise.resolve([]),
+
+      // By council (only if no council filter and region is selected)
+      !council && region ? Submission.aggregate([
+        { $match: matchQuery },
+        { $group: { _id: '$council', count: { $sum: 1 } } },
+        { $project: { council: '$_id', count: 1, _id: 0 } },
+        { $sort: { count: -1 } }
+      ]) : Promise.resolve([]),
+
+      // Available areas of focus for the year
+      Submission.aggregate([
+        { $match: { year } },
+        { $group: { _id: '$areaOfFocus' } },
+        { $project: { areaOfFocus: '$_id', _id: 0 } },
+        { $sort: { areaOfFocus: 1 } }
+      ]).then(result => result.map(r => r.areaOfFocus))
+    ]);
+
+    res.json({
+      success: true,
+      year,
+      filters: { areaOfFocus, region, council },
+      totals: {
+        totalSubmissions,
+        totalTeachers
+      },
+      byStatus,
+      byLevel,
+      bySubject,
+      byCategory,
+      byAreaOfFocus: !areaOfFocus ? byAreaOfFocus : [],
+      scoreMetrics,
+      disqualifiedCount,
+      byRegion: !region ? byRegion : [],
+      byCouncil: !council && region ? byCouncil : [],
+      availableAreasOfFocus
+    });
+  } catch (error) {
+    console.error('Stakeholder submissions stats error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   GET /api/stakeholder/competition-stats
+// @desc    Get competition statistics (eliminated, promoted) with filters (read-only, no PII)
+// @access  Private (Stakeholder only)
+router.get('/competition-stats', protect, authorize('stakeholder'), async (req, res) => {
+  try {
+    const year = req.query.year ? parseInt(req.query.year, 10) : new Date().getFullYear();
+    if (isNaN(year)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid year parameter'
+      });
+    }
+
+    const areaOfFocus = req.query.areaOfFocus || null;
+    const region = req.query.region || null;
+    const council = req.query.council || null;
+
+    // Build base match query
+    const matchQuery = { year };
+    if (areaOfFocus) matchQuery.areaOfFocus = areaOfFocus;
+    if (region) matchQuery.region = region;
+    if (council) matchQuery.council = council;
+
+    // Run all aggregations in parallel
+    const [
+      totalSubmissions,
+      eliminatedCount,
+      promotedCount,
+      byLevel,
+      byAreaOfFocus,
+      byRegion
+    ] = await Promise.all([
+      // Total submissions
+      Submission.countDocuments(matchQuery),
+
+      // Eliminated count
+      Submission.countDocuments({ ...matchQuery, status: 'eliminated' }),
+
+      // Promoted count (this is "passed")
+      Submission.countDocuments({ ...matchQuery, status: 'promoted' }),
+
+      // Breakdown by level
+      Submission.aggregate([
+        { $match: matchQuery },
+        {
+          $group: {
+            _id: '$level',
+            total: { $sum: 1 },
+            eliminated: { $sum: { $cond: [{ $eq: ['$status', 'eliminated'] }, 1, 0] } },
+            promoted: { $sum: { $cond: [{ $eq: ['$status', 'promoted'] }, 1, 0] } }
+          }
+        },
+        { $project: { level: '$_id', total: 1, eliminated: 1, promoted: 1, _id: 0 } },
+        { $sort: { level: 1 } }
+      ]),
+
+      // Breakdown by area of focus (only if no areaOfFocus filter)
+      !areaOfFocus ? Submission.aggregate([
+        { $match: matchQuery },
+        {
+          $group: {
+            _id: '$areaOfFocus',
+            total: { $sum: 1 },
+            eliminated: { $sum: { $cond: [{ $eq: ['$status', 'eliminated'] }, 1, 0] } },
+            promoted: { $sum: { $cond: [{ $eq: ['$status', 'promoted'] }, 1, 0] } }
+          }
+        },
+        { $project: { areaOfFocus: '$_id', total: 1, eliminated: 1, promoted: 1, _id: 0 } },
+        { $sort: { total: -1 } }
+      ]) : Promise.resolve([]),
+
+      // Breakdown by region (only if no region filter)
+      !region ? Submission.aggregate([
+        { $match: matchQuery },
+        {
+          $group: {
+            _id: '$region',
+            total: { $sum: 1 },
+            eliminated: { $sum: { $cond: [{ $eq: ['$status', 'eliminated'] }, 1, 0] } },
+            promoted: { $sum: { $cond: [{ $eq: ['$status', 'promoted'] }, 1, 0] } }
+          }
+        },
+        { $project: { region: '$_id', total: 1, eliminated: 1, promoted: 1, _id: 0 } },
+        { $sort: { total: -1 } }
+      ]) : Promise.resolve([])
+    ]);
+
+    const passRate = totalSubmissions > 0 ? Math.round((promotedCount / totalSubmissions) * 100 * 100) / 100 : 0;
+
+    res.json({
+      success: true,
+      year,
+      filters: { areaOfFocus, region, council },
+      totals: {
+        totalSubmissions,
+        eliminatedCount,
+        promotedCount,
+        passRate
+      },
+      byLevel,
+      byAreaOfFocus: !areaOfFocus ? byAreaOfFocus : [],
+      byRegion: !region ? byRegion : []
+    });
+  } catch (error) {
+    console.error('Stakeholder competition stats error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
 module.exports = router;
