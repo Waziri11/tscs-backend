@@ -28,9 +28,14 @@ const cacheMiddleware = (ttl = 60) => {
     try {
       const redisClient = getRedisClient();
       
-      // Create cache key from request URL (excluding query params for cache-busting)
-      const urlWithoutQuery = (req.originalUrl || req.url).split('?')[0];
-      const cacheKey = `cache:${urlWithoutQuery}`;
+      // Create cache key from request URL (including query params, excluding cache-busting _t param)
+      const urlBase = (req.originalUrl || req.url).split('?')[0];
+      const queryParams = new URLSearchParams(req.query);
+      queryParams.delete('_t'); // Remove cache-busting param
+      const queryString = queryParams.toString();
+      const cacheKey = queryString 
+        ? `cache:${urlBase}?${queryString}`
+        : `cache:${urlBase}`;
       
       // Try to get cached response
       const cachedData = await redisClient.get(cacheKey);

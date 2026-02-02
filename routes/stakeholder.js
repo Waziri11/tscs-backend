@@ -4,13 +4,14 @@ const Submission = require('../models/Submission');
 const Evaluation = require('../models/Evaluation');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
 const { protect, authorize } = require('../middleware/auth');
+const { cacheMiddleware } = require('../middleware/cache');
 
 const router = express.Router();
 
 // @route   GET /api/stakeholder/stats
 // @desc    Get aggregate competition stats for stakeholder dashboard (read-only, no PII)
 // @access  Private (Stakeholder only)
-router.get('/stats', protect, authorize('stakeholder'), async (req, res) => {
+router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(300), async (req, res) => {
   try {
     const year = req.query.year ? parseInt(req.query.year, 10) : new Date().getFullYear();
     if (isNaN(year)) {
@@ -79,11 +80,18 @@ router.get('/stats', protect, authorize('stakeholder'), async (req, res) => {
     ]);
 
     // Allocation: submissions per judge (from SubmissionAssignment for Council/Regional; from Evaluation for National)
-    // Count assignments per judge for the year (submissions filtered by year)
-    const submissionIdsForYear = await Submission.find({ year }).select('_id').lean();
-
+    // Optimized: Use $lookup instead of loading all IDs into memory
     const assignmentsPerJudge = await SubmissionAssignment.aggregate([
-      { $match: { submissionId: { $in: submissionIdsForYear.map(s => s._id) } } },
+      {
+        $lookup: {
+          from: 'submissions',
+          localField: 'submissionId',
+          foreignField: '_id',
+          as: 'submission'
+        }
+      },
+      { $unwind: '$submission' },
+      { $match: { 'submission.year': year } },
       { $group: { _id: '$judgeId', assignedCount: { $sum: 1 } } },
       { $group: { _id: null, min: { $min: '$assignedCount' }, max: { $max: '$assignedCount' }, avg: { $avg: '$assignedCount' }, judgeCount: { $sum: 1 } } }
     ]);
@@ -140,7 +148,7 @@ router.get('/stats', protect, authorize('stakeholder'), async (req, res) => {
 // @route   GET /api/stakeholder/submissions-stats
 // @desc    Get comprehensive submission statistics with filters (read-only, no PII)
 // @access  Private (Stakeholder only)
-router.get('/submissions-stats', protect, authorize('stakeholder'), async (req, res) => {
+router.get('/submissions-stats', protect, authorize('stakeholder'), cacheMiddleware(120), async (req, res) => {
   try {
     const year = req.query.year ? parseInt(req.query.year, 10) : new Date().getFullYear();
     if (isNaN(year)) {
@@ -166,8 +174,6 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), async (req, 
       totalTeachers,
       byStatus,
       byLevel,
-      bySubject,
-      byCategory,
       byAreaOfFocus,
       scoreMetrics,
       disqualifiedCount,
@@ -198,22 +204,6 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), async (req, 
         { $match: matchQuery },
         { $group: { _id: '$level', count: { $sum: 1 } } },
         { $project: { level: '$_id', count: 1, _id: 0 } },
-        { $sort: { count: -1 } }
-      ]),
-
-      // By subject
-      Submission.aggregate([
-        { $match: matchQuery },
-        { $group: { _id: '$subject', count: { $sum: 1 } } },
-        { $project: { subject: '$_id', count: 1, _id: 0 } },
-        { $sort: { count: -1 } }
-      ]),
-
-      // By category
-      Submission.aggregate([
-        { $match: matchQuery },
-        { $group: { _id: '$category', count: { $sum: 1 } } },
-        { $project: { category: '$_id', count: 1, _id: 0 } },
         { $sort: { count: -1 } }
       ]),
 
@@ -268,6 +258,14 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), async (req, 
       ]).then(result => result.map(r => r.areaOfFocus))
     ]);
 
+    // Also compute availableAreasOfFocus for competition-stats endpoint
+    const availableAreasOfFocusForCompetition = await Submission.aggregate([
+      { $match: { year } },
+      { $group: { _id: '$areaOfFocus' } },
+      { $project: { areaOfFocus: '$_id', _id: 0 } },
+      { $sort: { areaOfFocus: 1 } }
+    ]).then(result => result.map(r => r.areaOfFocus));
+
     // Determine competitionBreakdown based on filters
     let competitionBreakdown;
     if (council) {
@@ -314,7 +312,7 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), async (req, 
 // @route   GET /api/stakeholder/competition-stats
 // @desc    Get competition statistics (eliminated, promoted) with filters (read-only, no PII)
 // @access  Private (Stakeholder only)
-router.get('/competition-stats', protect, authorize('stakeholder'), async (req, res) => {
+router.get('/competition-stats', protect, authorize('stakeholder'), cacheMiddleware(120), async (req, res) => {
   try {
     const year = req.query.year ? parseInt(req.query.year, 10) : new Date().getFullYear();
     if (isNaN(year)) {
@@ -341,7 +339,8 @@ router.get('/competition-stats', protect, authorize('stakeholder'), async (req, 
       promotedCount,
       byLevel,
       byAreaOfFocus,
-      byRegion
+      byRegion,
+      availableAreasOfFocus
     ] = await Promise.all([
       // Total submissions
       Submission.countDocuments(matchQuery),
@@ -395,7 +394,15 @@ router.get('/competition-stats', protect, authorize('stakeholder'), async (req, 
         },
         { $project: { region: '$_id', total: 1, eliminated: 1, promoted: 1, _id: 0 } },
         { $sort: { total: -1 } }
-      ]) : Promise.resolve([])
+      ]) : Promise.resolve([]),
+
+      // Available areas of focus for the year
+      Submission.aggregate([
+        { $match: { year } },
+        { $group: { _id: '$areaOfFocus' } },
+        { $project: { areaOfFocus: '$_id', _id: 0 } },
+        { $sort: { areaOfFocus: 1 } }
+      ]).then(result => result.map(r => r.areaOfFocus))
     ]);
 
     const passRate = totalSubmissions > 0 ? Math.round((promotedCount / totalSubmissions) * 100 * 100) / 100 : 0;
@@ -412,7 +419,8 @@ router.get('/competition-stats', protect, authorize('stakeholder'), async (req, 
       },
       byLevel,
       byAreaOfFocus: !areaOfFocus ? byAreaOfFocus : [],
-      byRegion: !region ? byRegion : []
+      byRegion: !region ? byRegion : [],
+      availableAreasOfFocus
     });
   } catch (error) {
     console.error('Stakeholder competition stats error:', error);

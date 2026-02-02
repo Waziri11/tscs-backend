@@ -146,5 +146,12 @@ submissionSchema.index({ teacherId: 1, areaOfFocus: 1, year: 1 }); // For duplic
 submissionSchema.index({ teacherId: 1, status: 1 });
 submissionSchema.index({ year: 1, level: 1, status: 1 });
 submissionSchema.index({ region: 1, council: 1, status: 1 });
+// Stakeholder query optimization indexes
+submissionSchema.index({ year: 1, areaOfFocus: 1 });
+submissionSchema.index({ year: 1, region: 1, council: 1 });
+submissionSchema.index({ year: 1, areaOfFocus: 1, region: 1, council: 1 });
+submissionSchema.index({ year: 1, status: 1 });
+submissionSchema.index({ year: 1, areaOfFocus: 1, status: 1 });
+submissionSchema.index({ year: 1, region: 1, council: 1, status: 1 });
 
 module.exports = mongoose.model('Submission', submissionSchema);
