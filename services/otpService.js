@@ -135,6 +135,95 @@ class OTPService {
   }
 
   /**
+   * Create and store a new OTP for email change verification
+   * This is sent to the NEW email address the user wants to change to
+   * @param {string} newEmail - New email address to verify
+   * @returns {Promise<{success: boolean, otp?: string, error?: string}>}
+   */
+  static async createEmailChangeOTP(newEmail) {
+    try {
+      const normalizedEmail = newEmail.toLowerCase();
+
+      // Check if this email is already taken by another user
+      const existingUser = await User.findOne({ email: normalizedEmail });
+      if (existingUser) {
+        return { success: false, error: 'This email is already registered to another account' };
+      }
+
+      // Invalidate any existing OTPs for this email
+      await EmailOTP.invalidateOTPs(normalizedEmail);
+
+      // Generate new OTP
+      const otp = this.generateOTP();
+      const otpHash = await this.hashOTP(otp);
+
+      // Create new OTP record (expires in 10 minutes)
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+      await EmailOTP.create({
+        email: normalizedEmail,
+        otpHash,
+        expiresAt,
+        attempts: 0,
+        resendCount: 0
+      });
+
+      return { success: true, otp };
+    } catch (error) {
+      console.error('Create email change OTP error:', error);
+      return { success: false, error: 'Failed to create verification code' };
+    }
+  }
+
+  /**
+   * Verify OTP for email change (does not update user, just validates OTP)
+   * @param {string} email - Email address the OTP was sent to
+   * @param {string} otp - OTP to verify
+   * @returns {Promise<{success: boolean, error?: string}>}
+   */
+  static async verifyEmailChangeOTP(email, otp) {
+    try {
+      const normalizedEmail = email.toLowerCase();
+
+      // Find active OTP
+      const otpRecord = await EmailOTP.findActiveOTP(normalizedEmail);
+
+      if (!otpRecord) {
+        return { success: false, error: 'Invalid or expired verification code' };
+      }
+
+      // Check attempt limit
+      if (otpRecord.attempts >= 5) {
+        await EmailOTP.invalidateOTPs(normalizedEmail);
+        return { success: false, error: 'Too many verification attempts. Please request a new code.' };
+      }
+
+      // Increment attempts
+      otpRecord.attempts += 1;
+      await otpRecord.save();
+
+      // Verify OTP
+      const isValid = await this.verifyOTP(otp, otpRecord.otpHash);
+
+      if (!isValid) {
+        if (otpRecord.attempts >= 5) {
+          await EmailOTP.invalidateOTPs(normalizedEmail);
+          return { success: false, error: 'Too many verification attempts. Please request a new code.' };
+        }
+        return { success: false, error: 'Invalid verification code' };
+      }
+
+      // OTP is valid - clean up
+      await EmailOTP.invalidateOTPs(normalizedEmail);
+
+      return { success: true };
+    } catch (error) {
+      console.error('Verify email change OTP error:', error);
+      return { success: false, error: 'Verification failed' };
+    }
+  }
+
+  /**
    * Verify OTP and update user verification status
    * @param {string} email - User email
    * @param {string} otp - OTP to verify
