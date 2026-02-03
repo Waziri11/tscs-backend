@@ -59,14 +59,11 @@ importers:
       multer:
         specifier: ^2.0.2
         version: 2.0.2
-      nanoid:
-        specifier: ^5.0.7
-        version: 5.1.6
       nodemailer:
         specifier: ^7.0.12
         version: 7.0.12
       redis:
-        specifier: ^4.6.12
+        specifier: ^4.7.1
         version: 4.7.1
       resend:
         specifier: ^6.6.0
@@ -922,11 +919,6 @@ packages:
   multer@2.0.2:
     resolution: {integrity: sha512-u7f2xaZ/UG8oLXHvtF/oWTRvT44p9ecwBBqTwgJVq0+4BW1g8OW01TyMEGWBHbyMOYVHXslaut7qEQ1meATXgw==}
     engines: {node: '>= 10.16.0'}
-
-  nanoid@5.1.6:
-    resolution: {integrity: sha512-c7+7RQ+dMB5dPwwCp4ee1/iV/q2P6aK1mTZcfr1BTuVlyW9hJYiMPybJCcnBlQtuSmTIWNeazm/zqNoZSSElBg==}
-    engines: {node: ^18 || >=20}
-    hasBin: true
 
   natural-compare@1.4.0:
     resolution: {integrity: sha512-OWND8ei3VtNC9h7V60qff3SVobHr996CTwgxubgyQYEpg290h9J0buyECNNJexkFm5sOajh5G116RYA1c8ZMSw==}
@@ -2206,8 +2198,6 @@ snapshots:
       object-assign: 4.1.1
       type-is: 1.6.18
       xtend: 4.0.2
-
-  nanoid@5.1.6: {}
 
   natural-compare@1.4.0: {}
 

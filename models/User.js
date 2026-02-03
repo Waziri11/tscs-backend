@@ -42,7 +42,7 @@ const userSchema = new mongoose.Schema({
   role: {
     type: String,
     required: true,
-    enum: ['teacher', 'judge', 'admin', 'superadmin'],
+    enum: ['teacher', 'judge', 'admin', 'superadmin', 'stakeholder'],
     default: 'teacher'
   },
   status: {
@@ -142,6 +142,9 @@ userSchema.methods.toJSON = function() {
 // Note: email index is automatically created by unique: true constraint
 userSchema.index({ role: 1, status: 1 });
 userSchema.index({ role: 1, assignedLevel: 1, assignedRegion: 1, assignedCouncil: 1 }); // For judge queries
+// Indexes for stakeholder teacher region queries
+userSchema.index({ role: 1, status: 1, region: 1 });
+userSchema.index({ role: 1, status: 1, region: 1, council: 1 });
 
 module.exports = mongoose.model('User', userSchema);
 

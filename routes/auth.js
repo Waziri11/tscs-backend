@@ -114,11 +114,11 @@ router.post('/login', authLimiter, async (req, res) => {
     }
 
     // Check if email is verified
-    // For admin/judge users registered by admin: send OTP if not verified
+    // For admin/judge/stakeholder users registered by admin: send OTP if not verified
     // For teacher users (self-registered): require verification before login
     if (!user.emailVerified) {
-      // If user is admin or judge (registered by admin), send OTP
-      if (user.role === 'admin' || user.role === 'judge') {
+      // If user is admin, judge, or stakeholder (registered by admin), send OTP
+      if (user.role === 'admin' || user.role === 'judge' || user.role === 'stakeholder') {
         // Generate and send OTP for email verification
         const otpResult = await OTPService.createOTP(user.email);
 
@@ -457,11 +457,11 @@ router.post('/verify-otp-and-login', otpVerifyLimiter, async (req, res) => {
       });
     }
 
-    // Only allow this for admin/judge users
-    if (user.role !== 'admin' && user.role !== 'judge') {
+    // Only allow this for admin/judge/stakeholder users
+    if (user.role !== 'admin' && user.role !== 'judge' && user.role !== 'stakeholder') {
       return res.status(403).json({
         success: false,
-        message: 'This verification method is only for admin and judge accounts'
+        message: 'This verification method is only for admin, judge, and stakeholder accounts'
       });
     }
 
@@ -1007,6 +1007,173 @@ router.put('/change-password', protect, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Server error during password change'
+    });
+  }
+});
+
+// @route   POST /api/auth/request-email-change
+// @desc    Send OTP to new email for verification before changing
+// @access  Private
+router.post('/request-email-change', protect, async (req, res) => {
+  try {
+    const { newEmail } = req.body;
+
+    // Validate input
+    if (!newEmail) {
+      return res.status(400).json({
+        success: false,
+        message: 'New email is required'
+      });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(newEmail)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid email format'
+      });
+    }
+
+    const normalizedEmail = newEmail.toLowerCase();
+
+    // Check if new email is same as current
+    if (normalizedEmail === req.user.email.toLowerCase()) {
+      return res.status(400).json({
+        success: false,
+        message: 'New email must be different from your current email'
+      });
+    }
+
+    // Create OTP for the new email
+    const otpResult = await OTPService.createEmailChangeOTP(normalizedEmail);
+
+    if (!otpResult.success) {
+      return res.status(400).json({
+        success: false,
+        message: otpResult.error
+      });
+    }
+
+    // Send OTP to the new email
+    try {
+      await emailService.sendOTPEmail(normalizedEmail, otpResult.otp);
+    } catch (emailError) {
+      console.error('Failed to send email change OTP:', emailError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to send verification email. Please try again.'
+      });
+    }
+
+    // Log email change request (non-blocking)
+    if (logger) {
+      logger.logUserActivity(
+        'Email change verification requested',
+        req.user._id,
+        req,
+        { newEmail: normalizedEmail }
+      ).catch(() => {});
+    }
+
+    res.json({
+      success: true,
+      message: 'Verification code sent to your new email address'
+    });
+  } catch (error) {
+    console.error('Request email change error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during email change request'
+    });
+  }
+});
+
+// @route   POST /api/auth/verify-email-change
+// @desc    Verify OTP and update user email
+// @access  Private
+router.post('/verify-email-change', protect, async (req, res) => {
+  try {
+    const { newEmail, otp } = req.body;
+
+    // Validate input
+    if (!newEmail || !otp) {
+      return res.status(400).json({
+        success: false,
+        message: 'New email and verification code are required'
+      });
+    }
+
+    const normalizedEmail = newEmail.toLowerCase();
+
+    // Verify the OTP
+    const verifyResult = await OTPService.verifyEmailChangeOTP(normalizedEmail, otp);
+
+    if (!verifyResult.success) {
+      return res.status(400).json({
+        success: false,
+        message: verifyResult.error
+      });
+    }
+
+    // OTP is valid - update the user's email
+    const oldEmail = req.user.email;
+
+    try {
+      const updatedUser = await User.findByIdAndUpdate(
+        req.user._id,
+        { 
+          email: normalizedEmail,
+          emailVerified: true // Mark as verified since we just verified via OTP
+        },
+        { new: true, runValidators: true }
+      ).select('-password');
+
+      if (!updatedUser) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found'
+        });
+      }
+
+      // Log successful email change (non-blocking)
+      if (logger) {
+        logger.logSecurity(
+          'Email changed successfully',
+          req.user._id,
+          req,
+          { oldEmail, newEmail: normalizedEmail },
+          'info'
+        ).catch(() => {});
+      }
+
+      res.json({
+        success: true,
+        message: 'Email updated successfully',
+        user: {
+          id: updatedUser._id,
+          name: updatedUser.name,
+          email: updatedUser.email,
+          emailVerified: updatedUser.emailVerified,
+          role: updatedUser.role,
+          phone: updatedUser.phone
+        }
+      });
+    } catch (updateError) {
+      // Handle duplicate email error
+      if (updateError.code === 11000) {
+        return res.status(400).json({
+          success: false,
+          message: 'This email is already registered to another account'
+        });
+      }
+      throw updateError;
+    }
+  } catch (error) {
+    console.error('Verify email change error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during email verification'
     });
   }
 });

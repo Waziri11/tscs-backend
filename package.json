@@ -11,8 +11,7 @@
     "seed:landing": "node scripts/seedLandingPage.js",
     "email:test": "node scripts/sendTestEmail.js",
     "create-superadmin": "node create-superadmin.js",
-    "verify-superadmin": "node verify-superadmin.js",
-    "video-worker": "node workers/videoCompressionWorker.js"
+    "verify-superadmin": "node verify-superadmin.js"
   },
   "keywords": [
     "tscs",
@@ -26,6 +25,7 @@
     "@getbrevo/brevo": "^3.0.1",
     "bcryptjs": "^2.4.3",
     "bullmq": "^5.7.4",
+    "compression": "^1.7.4",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
@@ -35,15 +35,13 @@
     "ioredis": "^5.4.1",
     "joi": "^18.0.2",
     "jsonwebtoken": "^9.0.2",
-    "nanoid": "^5.0.7",
     "mongoose": "^8.0.3",
     "mongoose-paginate-v2": "^1.9.1",
     "morgan": "^1.10.1",
     "multer": "^2.0.2",
     "nodemailer": "^7.0.12",
-    "redis": "^4.6.12",
-    "resend": "^6.6.0",
-    "compression": "^1.7.4"
+    "redis": "^4.7.1",
+    "resend": "^6.6.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"

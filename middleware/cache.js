@@ -13,6 +13,11 @@ const cacheMiddleware = (ttl = 60) => {
       return next();
     }
 
+    // Bypass cache if _t (timestamp) query param is present (cache-busting)
+    if (req.query && req.query._t) {
+      return next();
+    }
+
     // Check if Redis is available
     const redisAvailable = await isRedisAvailable();
     if (!redisAvailable) {
@@ -23,8 +28,14 @@ const cacheMiddleware = (ttl = 60) => {
     try {
       const redisClient = getRedisClient();
       
-      // Create cache key from request URL and query params
-      const cacheKey = `cache:${req.originalUrl || req.url}`;
+      // Create cache key from request URL (including query params, excluding cache-busting _t param)
+      const urlBase = (req.originalUrl || req.url).split('?')[0];
+      const queryParams = new URLSearchParams(req.query);
+      queryParams.delete('_t'); // Remove cache-busting param
+      const queryString = queryParams.toString();
+      const cacheKey = queryString 
+        ? `cache:${urlBase}?${queryString}`
+        : `cache:${urlBase}`;
       
       // Try to get cached response
       const cachedData = await redisClient.get(cacheKey);
@@ -83,7 +94,7 @@ const invalidateCache = async (pattern) => {
       });
       cursor = result.cursor;
       keys.push(...result.keys);
-    } while (cursor !== 0);
+    } while (Number(cursor) !== 0);
 
     // Delete all matching keys
     if (keys.length > 0) {
@@ -108,13 +119,13 @@ const invalidateCacheOnChange = (patterns) => {
 
     // Intercept response to invalidate cache after successful operation
     const originalJson = res.json.bind(res);
-    res.json = async function(data) {
+    res.json = function(data) {
       // Only invalidate if operation was successful
       if (res.statusCode >= 200 && res.statusCode < 300) {
         const patternsArray = Array.isArray(patterns) ? patterns : [patterns];
-        for (const pattern of patternsArray) {
-          await invalidateCache(pattern);
-        }
+        // Perform invalidation in background - do not await
+        Promise.all(patternsArray.map(pattern => invalidateCache(pattern)))
+          .catch(err => console.error('Background cache invalidation error:', err));
       }
       return originalJson(data);
     };
@@ -128,5 +139,3 @@ module.exports = {
   invalidateCache,
   invalidateCacheOnChange
 };
-
-
