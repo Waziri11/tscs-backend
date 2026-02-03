@@ -127,8 +127,8 @@ router.get('/active', cacheMiddleware(60), async (req, res) => {
   }
 });
 
-// All other routes require superadmin role
-router.use(authorize('superadmin'));
+// All other routes require superadmin or admin role (admins can manage rounds)
+router.use(authorize('superadmin', 'admin'));
 
 // Helper: Get next level
 const getNextLevel = (currentLevel) => {
