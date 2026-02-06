@@ -142,6 +142,7 @@ process.on('SIGINT', async () => {
  * @param {Object} options.userId - User ID (can be null for system actions)
  * @param {Object} options.metadata - Additional metadata object
  * @param {Object} options.req - Express request object (for IP and user agent)
+ * @param {String} options.actionCategory - create | update | delete | read | other (for DB-altering filter/grouping)
  */
 const createLog = async ({
   type,
@@ -150,7 +151,8 @@ const createLog = async ({
   message = null,
   userId = null,
   metadata = {},
-  req = null
+  req = null,
+  actionCategory = 'other'
 }) => {
   // Always return immediately - never block
   try {
@@ -163,6 +165,7 @@ const createLog = async ({
       type,
       severity,
       action,
+      actionCategory: ['create', 'update', 'delete', 'read', 'other'].includes(actionCategory) ? actionCategory : 'other',
       message: message || action,
       userId,
       metadata,
@@ -195,75 +198,81 @@ const createLog = async ({
  * Helper functions for common log types
  */
 const logger = {
-  // User activity logs
-  logUserActivity: (action, userId, req, metadata = {}) => {
+  // User activity logs (optional actionCategory: 'create' | 'update' | 'delete' | 'read' | 'other')
+  logUserActivity: (action, userId, req, metadata = {}, actionCategory = 'other') => {
     return createLog({
       type: LOG_TYPES.USER_ACTIVITY,
       severity: LOG_SEVERITY.INFO,
       action,
       userId,
       metadata,
-      req
+      req,
+      actionCategory
     });
   },
 
   // Admin action logs
-  logAdminAction: (action, userId, req, metadata = {}, severity = LOG_SEVERITY.INFO) => {
+  logAdminAction: (action, userId, req, metadata = {}, severity = LOG_SEVERITY.INFO, actionCategory = 'other') => {
     return createLog({
       type: LOG_TYPES.ADMIN_ACTION,
       severity,
       action,
       userId,
       metadata,
-      req
+      req,
+      actionCategory
     });
   },
 
   // System event logs
-  logSystemEvent: (action, req, metadata = {}, severity = LOG_SEVERITY.INFO) => {
+  logSystemEvent: (action, req, metadata = {}, severity = LOG_SEVERITY.INFO, actionCategory = 'other') => {
     return createLog({
       type: LOG_TYPES.SYSTEM_EVENT,
       severity,
       action,
       userId: null,
       metadata,
-      req
+      req,
+      actionCategory
     });
   },
 
   // Security logs
-  logSecurity: (action, userId, req, metadata = {}, severity = LOG_SEVERITY.WARNING) => {
+  logSecurity: (action, userId, req, metadata = {}, severity = LOG_SEVERITY.WARNING, actionCategory = 'other') => {
     return createLog({
       type: LOG_TYPES.SECURITY,
       severity,
       action,
       userId,
       metadata,
-      req
+      req,
+      actionCategory
     });
   },
 
   // API request logs
-  logApiRequest: (action, userId, req, metadata = {}) => {
+  logApiRequest: (action, userId, req, metadata = {}, actionCategory = 'other') => {
     return createLog({
       type: LOG_TYPES.API_REQUEST,
       severity: LOG_SEVERITY.INFO,
       action,
       userId,
       metadata,
-      req
+      req,
+      actionCategory
     });
   },
 
   // Error logs
-  logError: (action, userId, req, metadata = {}, severity = LOG_SEVERITY.ERROR) => {
+  logError: (action, userId, req, metadata = {}, severity = LOG_SEVERITY.ERROR, actionCategory = 'other') => {
     return createLog({
       type: LOG_TYPES.ERROR,
       severity,
       action,
       userId,
       metadata,
-      req
+      req,
+      actionCategory
     });
   },
 

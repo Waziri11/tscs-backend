@@ -135,7 +135,8 @@ router.put('/:id/read', async (req, res) => {
         'User marked notification as read',
         req.user._id,
         req,
-        { notificationId: req.params.id }
+        { notificationId: req.params.id },
+        'update'
       ).catch(() => {});
     }
 
@@ -168,7 +169,8 @@ router.put('/read-all', async (req, res) => {
         'User marked all notifications as read',
         req.user._id,
         req,
-        { count: result.modifiedCount }
+        { count: result.modifiedCount },
+        'update'
       ).catch(() => {});
     }
 
@@ -218,7 +220,8 @@ router.delete('/:id', async (req, res) => {
         'User deleted notification',
         req.user._id,
         req,
-        { notificationId: req.params.id }
+        { notificationId: req.params.id },
+        'delete'
       ).catch(() => {});
     }
 
@@ -289,7 +292,8 @@ router.post('/send', authorize('admin', 'superadmin'), async (req, res) => {
           title,
           userIds
         },
-        'success'
+        'success',
+        'create'
       ).catch(() => {});
     }
 

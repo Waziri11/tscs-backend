@@ -48,7 +48,9 @@ router.get('/', validateQuery(quotaValidations.query), asyncHandler(async (req, 
       {
         filters: { year, level },
         pagination: { page: result.page, limit: result.limit, total: result.totalDocs }
-      }
+      },
+      undefined,
+      'read'
     );
   }
 
@@ -90,7 +92,9 @@ router.get('/:year/:level', validateParams(quotaValidations.params), asyncHandle
       `${REQUIRED_ROLE} viewed single quota`,
       req.user._id,
       req,
-      { year, level }
+      { year, level },
+      undefined,
+      'read'
     );
   }
 
@@ -128,7 +132,8 @@ router.post('/', validate(quotaValidations.create), asyncHandler(async (req, res
     req.user._id,
     req,
     { year, level, quota },
-    'success'
+    'success',
+    isUpdate ? 'update' : 'create'
   );
 
   res.status(isUpdate ? 200 : 201).json({
@@ -167,7 +172,8 @@ router.put('/:year/:level', validateParams(quotaValidations.params), validate(qu
     req.user._id,
     req,
     { year, level, newQuota: quota },
-    'info'
+    'info',
+    'update'
   );
 
   res.json({

@@ -1,23 +1,34 @@
 const SystemLog = require('../models/SystemLog');
 
-// Middleware to log requests
+// Only log requests that alter the database (skip GET/read)
+const MUTATION_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'];
+const METHOD_TO_CATEGORY = {
+  POST: 'create',
+  PUT: 'update',
+  PATCH: 'update',
+  DELETE: 'delete'
+};
+
 const requestLogger = async (req, res, next) => {
-  // Skip logging for health checks and static assets
   if (req.path === '/api/health') {
     return next();
   }
 
-  // Log after response is sent
+  if (!MUTATION_METHODS.includes(req.method)) {
+    return next();
+  }
+
   const originalSend = res.send;
   res.send = function(data) {
     res.send = originalSend;
-    
-    // Log asynchronously (don't block response)
+
     (async () => {
       try {
         await SystemLog.create({
-          type: 'system',
+          type: 'api_request',
           severity: res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warning' : 'info',
+          action: `${req.method} ${req.path}`,
+          actionCategory: METHOD_TO_CATEGORY[req.method] || 'other',
           message: `${req.method} ${req.path} - ${res.statusCode}`,
           userId: req.user?._id,
           metadata: {
@@ -25,9 +36,9 @@ const requestLogger = async (req, res, next) => {
             path: req.path,
             statusCode: res.statusCode,
             query: req.query,
-            body: req.method !== 'GET' ? req.body : undefined
+            body: req.body
           },
-          ipAddress: req.ip || req.connection.remoteAddress,
+          ipAddress: req.ip || req.connection?.remoteAddress,
           userAgent: req.get('user-agent')
         });
       } catch (error) {

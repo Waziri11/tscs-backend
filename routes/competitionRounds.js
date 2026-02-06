@@ -7,6 +7,7 @@ const Quota = require('../models/Quota');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
 const { protect, authorize } = require('../middleware/auth');
 const { cacheMiddleware, invalidateCacheOnChange } = require('../middleware/cache');
+const { emitRoundStateChange, emitLeaderboardModeChange } = require('../utils/socketManager');
 
 // Safely import logger
 let logger = null;
@@ -541,7 +542,8 @@ router.post('/', async (req, res) => {
           timingType: round.timingType,
           endTime: round.endTime
         },
-        'success'
+        'success',
+        'create'
       ).catch(() => {});
     }
 
@@ -604,7 +606,9 @@ router.put('/:id', async (req, res) => {
         {
           roundId: req.params.id,
           updatedFields: Object.keys(updateData)
-        }
+        },
+        undefined,
+        'update'
       ).catch(() => {});
     }
 
@@ -640,6 +644,17 @@ router.post('/:id/activate', async (req, res) => {
         success: false,
         message: 'Round must be in pending status to activate'
       });
+    }
+
+    // Pre-check: if autoAdvance is enabled, verify quota exists
+    if (round.autoAdvance) {
+      const quotaDoc = await Quota.findOne({ year: round.year, level: round.level });
+      if (!quotaDoc) {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot activate round with auto-advance: no quota is set for ${round.level} level in year ${round.year}. Please set a quota first.`
+        });
+      }
     }
 
     // Set start time when round is activated (for tracking when round actually started)
@@ -715,9 +730,20 @@ router.post('/:id/activate', async (req, res) => {
           council: round.council,
           judgesCount: judges.length
         },
-        'success'
+        'success',
+        'update'
       ).catch(() => {});
     }
+
+    // Emit round state change via Socket.IO
+    emitRoundStateChange(round.year, round.level, {
+      roundId: round._id.toString(),
+      status: 'active',
+      action: 'activated',
+      level: round.level,
+      region: round.region,
+      council: round.council,
+    });
 
     res.json({
       success: true,
@@ -943,9 +969,20 @@ router.post('/:id/close', async (req, res) => {
           promotedIds: advanceResult.promotedIds,
           eliminatedIds: advanceResult.eliminatedIds
         },
-        'success'
+        'success',
+        'update'
       ).catch(() => {});
     }
+
+    // Emit round state change via Socket.IO
+    emitRoundStateChange(round.year, round.level, {
+      roundId: round._id.toString(),
+      status: 'closed',
+      action: 'closed',
+      level: round.level,
+      promoted: advanceResult?.promoted || 0,
+      eliminated: advanceResult?.eliminated || 0,
+    });
 
     res.json({
       success: true,
@@ -1016,7 +1053,9 @@ router.post('/:id/extend', async (req, res) => {
           roundId: req.params.id,
           additionalTime: parseInt(additionalTime),
           newEndTime: newEndTime
-        }
+        },
+        undefined,
+        'update'
       ).catch(() => {});
     }
 
@@ -1026,6 +1065,61 @@ router.post('/:id/extend', async (req, res) => {
     });
   } catch (error) {
     console.error('Extend competition round error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   PATCH /api/competition-rounds/:id/leaderboard-visibility
+// @desc    Toggle leaderboard visibility between live and frozen
+// @access  Private (Superadmin)
+router.patch('/:id/leaderboard-visibility', authorize('admin', 'superadmin'), async (req, res) => {
+  try {
+    const { visibility } = req.body;
+    if (!['live', 'frozen'].includes(visibility)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid visibility value. Must be "live" or "frozen".'
+      });
+    }
+
+    const round = await CompetitionRound.findById(req.params.id);
+    if (!round) {
+      return res.status(404).json({
+        success: false,
+        message: 'Competition round not found'
+      });
+    }
+
+    round.leaderboardVisibility = visibility;
+
+    if (visibility === 'frozen') {
+      const { calculateLeaderboard } = require('../utils/leaderboardUtils');
+      const snapshot = await calculateLeaderboard(round.year, round.level);
+      round.frozenLeaderboardSnapshot = snapshot;
+    } else {
+      round.frozenLeaderboardSnapshot = null;
+    }
+
+    await round.save();
+
+    emitLeaderboardModeChange(round.year, round.level, {
+      roundId: round._id.toString(),
+      visibility,
+      level: round.level,
+      region: round.region,
+      council: round.council,
+    });
+
+    res.json({
+      success: true,
+      round,
+      message: `Leaderboard visibility set to ${visibility}.`
+    });
+  } catch (error) {
+    console.error('Update leaderboard visibility error:', error);
     res.status(500).json({
       success: false,
       message: error.message || 'Server error'
@@ -1480,7 +1574,8 @@ router.get('/:id/judge-progress/export', async (req, res) => {
           roundId: req.params.id,
           judgesCount: judgeProgress.length
         },
-        'success'
+        'success',
+        'read'
       ).catch(() => {});
     }
 

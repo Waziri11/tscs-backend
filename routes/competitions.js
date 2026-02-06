@@ -20,7 +20,9 @@ router.get('/', async (req, res) => {
       await logger.logUserActivity(
         'User viewed competitions list',
         req.user._id,
-        req
+        req,
+        {},
+        'read'
       );
     }
 
@@ -78,7 +80,8 @@ router.post('/', authorize('superadmin'), async (req, res) => {
       req.user._id,
       req,
       { year: competition.year },
-      'success'
+      'success',
+      'create'
     );
 
     res.status(201).json({
@@ -118,7 +121,8 @@ router.put('/:year', authorize('superadmin'), async (req, res) => {
       req.user._id,
       req,
       { year: parseInt(req.params.year), updatedFields: Object.keys(req.body) },
-      'info'
+      'info',
+      'update'
     );
 
     res.json({
@@ -255,7 +259,8 @@ router.put('/:year/evaluation-criteria/:category/:class/:subject/:area', authori
       req.user._id,
       req,
       { year, category, class: classLevel, subject, area },
-      'info'
+      'info',
+      'update'
     );
 
     res.json({

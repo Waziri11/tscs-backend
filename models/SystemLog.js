@@ -16,6 +16,11 @@ const systemLogSchema = new mongoose.Schema({
     required: true,
     trim: true
   },
+  actionCategory: {
+    type: String,
+    enum: ['create', 'update', 'delete', 'read', 'other'],
+    default: 'other'
+  },
   message: {
     type: String,
     trim: true
@@ -47,6 +52,7 @@ systemLogSchema.index({ type: 1, severity: 1 });
 systemLogSchema.index({ userId: 1 });
 systemLogSchema.index({ 'metadata.submissionId': 1 });
 systemLogSchema.index({ 'metadata.evaluationId': 1 });
+systemLogSchema.index({ actionCategory: 1 });
 
 module.exports = mongoose.model('SystemLog', systemLogSchema);
 

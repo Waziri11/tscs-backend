@@ -1,5 +1,7 @@
 const express = require('express');
 const { protect, authorize } = require('../middleware/auth');
+const { cacheMiddleware, invalidateCacheOnChange } = require('../middleware/cache');
+const CompetitionRound = require('../models/CompetitionRound');
 const { calculateLeaderboard, getLeaderboardByLocation, getAvailableLocations } = require('../utils/leaderboardUtils');
 const { advanceSubmissionsForLocation, advanceSubmissionsGlobal } = require('../utils/advancementService');
 
@@ -23,7 +25,7 @@ router.use(protect);
 // @route   GET /api/leaderboard/:year/:level
 // @desc    Get leaderboard for year and level (grouped by location)
 // @access  Private (Admin, Superadmin)
-router.get('/:year/:level', authorize('admin', 'superadmin'), async (req, res) => {
+router.get('/:year/:level', authorize('admin', 'superadmin'), cacheMiddleware(30), async (req, res) => {
   try {
     const { year, level } = req.params;
     const { region, council } = req.query;
@@ -50,8 +52,20 @@ router.get('/:year/:level', authorize('admin', 'superadmin'), async (req, res) =
     if (region) filters.region = region;
     if (council) filters.council = council;
 
-    // Calculate leaderboard
-    const leaderboard = await calculateLeaderboard(yearNum, level, filters);
+    // If there's an active round in frozen mode, return its snapshot
+    const frozenRound = await CompetitionRound.findOne({
+      year: yearNum,
+      level,
+      status: 'active',
+      leaderboardVisibility: 'frozen'
+    }).select('frozenLeaderboardSnapshot');
+
+    let leaderboard;
+    if (frozenRound && frozenRound.frozenLeaderboardSnapshot) {
+      leaderboard = frozenRound.frozenLeaderboardSnapshot;
+    } else {
+      leaderboard = await calculateLeaderboard(yearNum, level, filters);
+    }
 
     // Get available locations
     const locations = await getAvailableLocations(yearNum, level);
@@ -67,7 +81,8 @@ router.get('/:year/:level', authorize('admin', 'superadmin'), async (req, res) =
           level,
           filters,
           locationCount: Object.keys(leaderboard).length
-        }
+        },
+        'read'
       ).catch(() => {});
     }
 
@@ -91,7 +106,7 @@ router.get('/:year/:level', authorize('admin', 'superadmin'), async (req, res) =
 // @route   GET /api/leaderboard/:year/:level/:location
 // @desc    Get leaderboard for specific location
 // @access  Private (Admin, Superadmin)
-router.get('/:year/:level/:location', authorize('admin', 'superadmin'), async (req, res) => {
+router.get('/:year/:level/:location', authorize('admin', 'superadmin'), cacheMiddleware(30), async (req, res) => {
   try {
     const { year, level, location } = req.params;
 
@@ -115,8 +130,20 @@ router.get('/:year/:level/:location', authorize('admin', 'superadmin'), async (r
     // Decode location (URL encoded)
     const decodedLocation = decodeURIComponent(location);
 
-    // Get leaderboard for specific location
-    const leaderboardEntries = await getLeaderboardByLocation(yearNum, level, decodedLocation);
+    // If there's an active frozen round, use its snapshot
+    const frozenRound = await CompetitionRound.findOne({
+      year: yearNum,
+      level,
+      status: 'active',
+      leaderboardVisibility: 'frozen'
+    }).select('frozenLeaderboardSnapshot');
+
+    let leaderboardEntries;
+    if (frozenRound && frozenRound.frozenLeaderboardSnapshot) {
+      leaderboardEntries = frozenRound.frozenLeaderboardSnapshot[decodedLocation] || [];
+    } else {
+      leaderboardEntries = await getLeaderboardByLocation(yearNum, level, decodedLocation);
+    }
 
     // Log leaderboard view
     if (logger) {
@@ -129,7 +156,8 @@ router.get('/:year/:level/:location', authorize('admin', 'superadmin'), async (r
           level,
           location: decodedLocation,
           entryCount: leaderboardEntries.length
-        }
+        },
+        'read'
       ).catch(() => {});
     }
 
@@ -153,7 +181,7 @@ router.get('/:year/:level/:location', authorize('admin', 'superadmin'), async (r
 // @route   POST /api/leaderboard/:year/:level/advance
 // @desc    Advance submissions to next level (per location or global)
 // @access  Private (Admin, Superadmin)
-router.post('/:year/:level/advance', authorize('admin', 'superadmin'), async (req, res) => {
+router.post('/:year/:level/advance', authorize('admin', 'superadmin'), invalidateCacheOnChange('cache:/api/leaderboard*'), async (req, res) => {
   try {
     const { year, level } = req.params;
     const { location, global } = req.body;
@@ -221,7 +249,8 @@ router.post('/:year/:level/advance', authorize('admin', 'superadmin'), async (re
           promoted: result.promoted || result.totalPromoted || 0,
           eliminated: result.eliminated || result.totalEliminated || 0
         },
-        'success'
+        'success',
+        'update'
       ).catch(() => {});
     }
 

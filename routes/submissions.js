@@ -180,7 +180,8 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
         role: req.user.role,
         filters: { level, status, year, category, subject, region, council },
         count: submissions.length
-      }
+      },
+      'read'
     ).catch(err => {
       // Log error but don't fail the request
       console.error('Error logging user activity:', err);
@@ -237,7 +238,8 @@ router.get('/:id', async (req, res) => {
         submissionId: submission._id.toString(),
         submissionLevel: submission.level,
         teacherId: submission.teacherId._id.toString()
-      }
+      },
+      'read'
     );
 
     res.json({
@@ -340,7 +342,7 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnC
         subject: submission.subject,
         areaOfFocus: submission.areaOfFocus
       },
-      'success'
+      'create'
     );
 
     // Assign judge to submission (for Council and Regional levels only)
@@ -489,7 +491,8 @@ router.put('/:id', invalidateCacheOnChange('cache:/api/submissions*'), async (re
           newStatus: req.body.status || submission.status,
           updatedFields: Object.keys(req.body)
         },
-        logSeverity
+        logSeverity,
+        'update'
       );
     } else {
       await logger.logUserActivity(
@@ -499,7 +502,8 @@ router.put('/:id', invalidateCacheOnChange('cache:/api/submissions*'), async (re
         {
           submissionId: req.params.id,
           updatedFields: Object.keys(req.body)
-        }
+        },
+        'update'
       );
     }
 
@@ -543,7 +547,8 @@ router.delete('/:id', authorize('admin', 'superadmin'), invalidateCacheOnChange(
         category: submission.category,
         subject: submission.subject
       },
-      'error'
+      'error',
+      'delete'
     );
 
     await submission.deleteOne();
@@ -879,7 +884,8 @@ router.post('/:id/assign-judge', authorize('admin', 'superadmin'), async (req, r
         judgeId: judgeId,
         assignmentId: result.assignment._id.toString()
       },
-      'success'
+      'success',
+      'update'
     );
 
     res.json({

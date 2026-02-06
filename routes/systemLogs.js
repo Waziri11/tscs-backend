@@ -11,16 +11,23 @@ router.use(authorize('superadmin'));
 // @route   GET /api/system-logs
 // @desc    Get all system logs (with filters)
 // @access  Private (Superadmin)
+const MAX_LIMIT = 50000;
+
 router.get('/', async (req, res) => {
   try {
-    const { type, severity, userId, startDate, endDate, limit = 1000, search } = req.query;
-    
+    const { type, severity, userId, startDate, endDate, limit, search, dbOnly } = req.query;
+
     let query = {};
-    
+
+    // Only logs that directly alter the database (create, update, delete)
+    if (dbOnly === 'true' || dbOnly === true) {
+      query.actionCategory = { $in: ['create', 'update', 'delete'] };
+    }
+
     if (type && type !== 'all') query.type = type;
     if (severity && severity !== 'all') query.severity = severity;
     if (userId) query.userId = userId;
-    
+
     if (startDate || endDate) {
       query.createdAt = {};
       if (startDate) query.createdAt.$gte = new Date(startDate);
@@ -35,10 +42,12 @@ router.get('/', async (req, res) => {
       ];
     }
 
+    const limitNum = limit != null ? Math.min(parseInt(limit, 10) || MAX_LIMIT, MAX_LIMIT) : MAX_LIMIT;
+
     const logs = await SystemLog.find(query)
       .populate('userId', 'name username email role')
       .sort({ createdAt: -1 })
-      .limit(parseInt(limit));
+      .limit(limitNum);
 
     // Format logs to match frontend expectations
     const formattedLogs = logs.map(log => ({
@@ -46,6 +55,7 @@ router.get('/', async (req, res) => {
       type: log.type,
       severity: log.severity,
       action: log.action,
+      actionCategory: log.actionCategory || 'other',
       message: log.message || log.action,
       timestamp: log.createdAt.toISOString(),
       user: log.userId ? log.userId.name : 'System',

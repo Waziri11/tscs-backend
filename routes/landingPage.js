@@ -246,7 +246,8 @@ router.post('/', protect, authorize('admin', 'superadmin'), invalidateCacheOnCha
         req.user._id,
         req,
         { sectionsCount: createdSections.length },
-        'success'
+        'success',
+        'update'
       ).catch(() => {});
     }
 
@@ -285,7 +286,8 @@ router.post('/section', protect, authorize('admin', 'superadmin'), async (req, r
         req.user._id,
         req,
         { sectionId: section.id, sectionType: section.type },
-        'success'
+        'success',
+        'create'
       ).catch(() => {});
     }
 
@@ -348,7 +350,8 @@ router.put('/section/:id', protect, authorize('admin', 'superadmin'), async (req
         req.user._id,
         req,
         { sectionId: req.params.id, updatedFields: Object.keys(req.body) },
-        'info'
+        'info',
+        'update'
       ).catch(() => {});
     }
 
@@ -410,7 +413,8 @@ router.post('/header', protect, authorize('admin', 'superadmin'), async (req, re
         req.user._id,
         req,
         {},
-        'success'
+        'success',
+        'update'
       ).catch(() => {});
     }
 
@@ -464,7 +468,8 @@ router.post('/footer', protect, authorize('admin', 'superadmin'), async (req, re
         req.user._id,
         req,
         {},
-        'success'
+        'success',
+        'update'
       ).catch(() => {});
     }
 
@@ -518,7 +523,8 @@ router.post('/theme', protect, authorize('admin', 'superadmin'), async (req, res
         req.user._id,
         req,
         {},
-        'success'
+        'success',
+        'update'
       ).catch(() => {});
     }
 
@@ -572,7 +578,8 @@ router.post('/navigation', protect, authorize('admin', 'superadmin'), async (req
         req.user._id,
         req,
         {},
-        'success'
+        'success',
+        'update'
       ).catch(() => {});
     }
 
@@ -626,7 +633,8 @@ router.post('/seo', protect, authorize('admin', 'superadmin'), async (req, res) 
         req.user._id,
         req,
         {},
-        'success'
+        'success',
+        'update'
       ).catch(() => {});
     }
 
@@ -667,7 +675,8 @@ router.put('/section/:id/styling', protect, authorize('admin', 'superadmin'), as
         req.user._id,
         req,
         { sectionId: req.params.id },
-        'info'
+        'info',
+        'update'
       ).catch(() => {});
     }
 
@@ -705,7 +714,8 @@ router.delete('/section/:id', protect, authorize('admin', 'superadmin'), async (
         req.user._id,
         req,
         { sectionId: req.params.id, sectionType: section.type },
-        'warning'
+        'warning',
+        'delete'
       ).catch(() => {});
     }
 

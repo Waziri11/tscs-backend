@@ -37,7 +37,8 @@ router.get('/', async (req, res) => {
       'User viewed tie-breaking rounds',
       req.user._id,
       req,
-      { filters: { year, level, status }, count: tieBreaks.length }
+      { filters: { year, level, status }, count: tieBreaks.length },
+      'read'
     );
 
     res.json({
@@ -153,7 +154,7 @@ router.post('/:id/vote', authorize('judge'), async (req, res) => {
         submissionId: submissionId,
         level: tieBreak.level
       },
-      'success'
+      'update'
     );
 
     res.json({
@@ -162,6 +163,100 @@ router.post('/:id/vote', authorize('judge'), async (req, res) => {
     });
   } catch (error) {
     console.error('Submit vote error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/tie-breaking/:id/resolve
+// @desc    Resolve a tie-breaking round by counting votes (admin/superadmin only)
+// @access  Private (Admin/Superadmin)
+router.post('/:id/resolve', authorize('admin', 'superadmin'), async (req, res) => {
+  try {
+    const tieBreak = await TieBreaking.findById(req.params.id)
+      .populate('submissionIds', 'averageScore');
+
+    if (!tieBreak) {
+      return res.status(404).json({
+        success: false,
+        message: 'Tie-breaking round not found'
+      });
+    }
+
+    if (tieBreak.status === 'resolved') {
+      return res.status(400).json({
+        success: false,
+        message: 'This tie-breaking round has already been resolved'
+      });
+    }
+
+    if (tieBreak.votes.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No votes have been cast yet. Cannot resolve.'
+      });
+    }
+
+    // Count votes per submission
+    const voteCounts = {};
+    tieBreak.votes.forEach(vote => {
+      const subId = vote.submissionId.toString();
+      voteCounts[subId] = (voteCounts[subId] || 0) + 1;
+    });
+
+    // Sort submissions by vote count DESC, then by averageScore DESC as tiebreaker
+    const submissionsWithVotes = tieBreak.submissionIds.map(sub => ({
+      _id: sub._id.toString(),
+      votes: voteCounts[sub._id.toString()] || 0,
+      averageScore: sub.averageScore || 0,
+    }));
+
+    submissionsWithVotes.sort((a, b) => {
+      if (b.votes !== a.votes) return b.votes - a.votes;
+      return b.averageScore - a.averageScore;
+    });
+
+    // Determine how many to promote: use optional quota from body, default to 1
+    const quota = req.body.quota || 1;
+    const winners = submissionsWithVotes.slice(0, quota).map(s => s._id);
+
+    // Update the tie-break record
+    tieBreak.winners = winners;
+    tieBreak.status = 'resolved';
+    tieBreak.resolvedAt = new Date();
+    await tieBreak.save();
+
+    // Log resolution
+    await logger.logAdminAction(
+      'Admin resolved tie-breaking round',
+      req.user._id,
+      req,
+      {
+        tieBreakId: req.params.id,
+        winnerCount: winners.length,
+        totalVotes: tieBreak.votes.length,
+        voteCounts,
+      },
+      'success',
+      'update'
+    );
+
+    // Populate for response
+    const resolved = await TieBreaking.findById(req.params.id)
+      .populate('submissionIds', 'teacherName category subject level averageScore')
+      .populate('winners', 'teacherName category subject')
+      .populate('votes.judgeId', 'name username');
+
+    res.json({
+      success: true,
+      message: `Tie-breaking resolved. ${winners.length} winner(s) selected.`,
+      tieBreak: resolved,
+      voteCounts,
+    });
+  } catch (error) {
+    console.error('Resolve tie-breaking error:', error);
     res.status(500).json({
       success: false,
       message: error.message || 'Server error'
@@ -187,7 +282,8 @@ router.post('/', authorize('admin', 'superadmin'), async (req, res) => {
         submissionCount: tieBreak.submissionIds.length,
         quota: tieBreak.quota
       },
-      'info'
+      'info',
+      'create'
     );
 
     res.status(201).json({

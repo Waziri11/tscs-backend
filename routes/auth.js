@@ -808,7 +808,9 @@ router.get('/me', protect, async (req, res) => {
       logger.logUserActivity(
         'User viewed profile',
         user._id,
-        req
+        req,
+        {},
+        'read'
       ).catch(() => {}); // Silently fail
     }
 
@@ -872,7 +874,8 @@ router.put('/profile', protect, async (req, res) => {
         'User updated profile',
         user._id,
         req,
-        { updatedFields: Object.keys(updateData) }
+        { updatedFields: Object.keys(updateData) },
+        'update'
       ).catch(() => {}); // Silently fail
     }
 

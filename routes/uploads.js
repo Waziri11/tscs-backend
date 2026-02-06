@@ -237,7 +237,8 @@ router.post('/lesson-plan', protect, uploadLimiter, upload.single('file'), async
           filename: req.file.filename,
           originalName: req.file.originalname,
           fileSize: req.file.size
-        }
+        },
+        'create'
       ).catch(() => {}); // Silently fail
     }
 
@@ -286,7 +287,8 @@ router.post('/video', protect, uploadLimiter, logUploadProgress('video upload'),
           filename: storedFilename,
           originalName: req.file.originalname,
           fileSize: req.file.size
-        }
+        },
+        'create'
       ).catch(() => {});
     }
 
@@ -522,7 +524,8 @@ router.post('/image', protect, uploadLimiter, imageUpload.single('file'), async 
           filename: req.file.filename,
           originalName: req.file.originalname,
           fileSize: req.file.size
-        }
+        },
+        'create'
       ).catch(() => {});
     }
 

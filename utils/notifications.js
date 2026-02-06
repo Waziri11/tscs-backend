@@ -47,7 +47,9 @@ const createNotification = async ({ userId, type, title, message, metadata = {},
           userId: userId.toString(),
           type,
           title
-        }
+        },
+        undefined,
+        'create'
       ).catch(() => {});
     }
 

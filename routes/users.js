@@ -45,7 +45,9 @@ router.get('/', async (req, res) => {
       { 
         filters: { role, status, search },
         count: users.length
-      }
+      },
+      undefined,
+      'read'
     );
 
     res.json({
@@ -85,7 +87,9 @@ router.get('/:id', async (req, res) => {
         targetUserId: req.params.id,
         targetUserRole: user.role,
         targetUserEmail: user.email
-      }
+      },
+      undefined,
+      'read'
     );
 
     res.json({
@@ -161,7 +165,8 @@ router.post('/', async (req, res) => {
         targetUserName: user.name,
         ...(assignmentResult && { autoAssignedSubmissions: assignmentResult.assignedCount })
       },
-      'success'
+      'success',
+      'create'
     );
 
     const response = {
@@ -222,7 +227,9 @@ router.put('/:id', async (req, res) => {
         updatedFields: updatedFields,
         statusChanged: req.body.status && req.body.status !== originalUser.status,
         roleChanged: req.body.role && req.body.role !== originalUser.role
-      }
+      },
+      undefined,
+      'update'
     );
 
     res.json({
@@ -263,7 +270,8 @@ router.delete('/:id', authorize('superadmin'), async (req, res) => {
         targetUserEmail: user.email,
         targetUserName: user.name
       },
-      'error'
+      'error',
+      'delete'
     );
 
     await user.deleteOne();

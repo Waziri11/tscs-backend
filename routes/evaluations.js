@@ -7,6 +7,7 @@ const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
 const { isJudgeAssigned } = require('../utils/judgeAssignment');
 const { cacheMiddleware, invalidateCacheOnChange } = require('../middleware/cache');
+const { emitScoreUpdate } = require('../utils/socketManager');
 
 const router = express.Router();
 
@@ -47,7 +48,8 @@ router.get('/', cacheMiddleware(15), async (req, res) => {
         role: req.user.role,
         filters: { submissionId, judgeId },
         count: evaluations.length
-      }
+      },
+      'read'
     );
 
     res.json({
@@ -106,7 +108,8 @@ router.get('/:id', async (req, res) => {
         evaluationId: evaluation._id.toString(),
         submissionId: evaluation.submissionId._id.toString(),
         judgeId: evaluation.judgeId._id.toString()
-      }
+      },
+      'read'
     );
 
     res.json({
@@ -125,7 +128,7 @@ router.get('/:id', async (req, res) => {
 // @route   POST /api/evaluations
 // @desc    Create/update evaluation (judges only)
 // @access  Private (Judge)
-router.post('/', authorize('judge'), async (req, res) => {
+router.post('/', authorize('judge'), invalidateCacheOnChange('cache:/api/leaderboard*'), async (req, res) => {
   try {
     const { submissionId, scores, comments } = req.body;
 
@@ -164,9 +167,12 @@ router.post('/', authorize('judge'), async (req, res) => {
         });
       }
       
-      // Check if round has ended (past endTime)
+      // Check if round has ended (use actual end time for countdown rounds)
       const now = new Date();
-      if (now >= round.endTime) {
+      const actualEndTime = typeof round.getActualEndTime === 'function'
+        ? round.getActualEndTime()
+        : round.endTime;
+      if (now >= actualEndTime) {
         return res.status(403).json({
           success: false,
           message: 'Cannot evaluate submission. Round has ended.'
@@ -305,6 +311,23 @@ router.post('/', authorize('judge'), async (req, res) => {
     // Update submission average score (recalculate from all evaluations)
     await updateSubmissionAverageScore(submissionId);
 
+    // Emit real-time score update via Socket.IO
+    try {
+      const updatedSub = await Submission.findById(submissionId).populate('teacherId', 'name');
+      if (updatedSub) {
+        emitScoreUpdate(updatedSub.year, updatedSub.level, {
+          submissionId: submissionId.toString(),
+          averageScore: updatedSub.averageScore,
+          location: `${updatedSub.region || ''}::${updatedSub.council || ''}`,
+          teacherName: updatedSub.teacherId?.name || updatedSub.teacherName,
+          status: updatedSub.status,
+        });
+      }
+    } catch (socketErr) {
+      // Non-blocking: don't fail the evaluation if socket emit fails
+      console.error('Socket emit error (non-blocking):', socketErr.message);
+    }
+
     // Log evaluation creation/update
     const isUpdate = evaluation.createdAt && evaluation.updatedAt && 
                      evaluation.createdAt.getTime() !== evaluation.updatedAt.getTime();
@@ -320,7 +343,7 @@ router.post('/', authorize('judge'), async (req, res) => {
         totalScore: totalScore,
         criteriaCount: Object.keys(scores).length
       },
-      'success'
+      isUpdate ? 'update' : 'create'
     );
 
     res.status(201).json({
@@ -389,7 +412,8 @@ router.get('/submission/:submissionId', async (req, res) => {
       { 
         submissionId: req.params.submissionId,
         count: evaluations.length
-      }
+      },
+      'read'
     );
 
     res.json({
@@ -456,7 +480,7 @@ router.post('/:submissionId/disqualify', authorize('judge'), async (req, res) =>
         reason: reason || 'No reason provided',
         level: submission.level
       },
-      'warning'
+      'update'
     );
 
     res.json({
