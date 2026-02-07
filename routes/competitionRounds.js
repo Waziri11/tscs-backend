@@ -766,7 +766,7 @@ router.post('/:id/activate', async (req, res) => {
 // @route   POST /api/competition-rounds/:id/close
 // @desc    Close a competition round and advance submissions
 // @access  Private (Superadmin)
-router.post('/:id/close', async (req, res) => {
+router.post('/:id/close', invalidateCacheOnChange('cache:/api/leaderboard*'), async (req, res) => {
   try {
     const round = await CompetitionRound.findById(req.params.id);
 
