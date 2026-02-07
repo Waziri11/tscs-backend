@@ -365,23 +365,29 @@ const advanceSubmissions = async (level, year, region = null, council = null) =>
       }
     });
 
-    // Update submissions
-    const promotedIds = [];
-    const eliminatedIds = [];
+    // Update submissions using bulkWrite for atomicity
+    const promotedIds = toPromote.map(sub => sub._id.toString());
+    const eliminatedIds = toEliminate.map(sub => sub._id.toString());
 
-    for (const sub of toPromote) {
-      await Submission.findByIdAndUpdate(sub._id, {
-        level: nextLevel,
-        status: 'promoted'
-      });
-      promotedIds.push(sub._id.toString());
+    if (promotedIds.length > 0) {
+      await Submission.bulkWrite(
+        promotedIds.map(id => ({
+          updateOne: {
+            filter: { _id: id },
+            update: { $set: { level: nextLevel, status: 'promoted' } }
+          }
+        }))
+      );
     }
-
-    for (const sub of toEliminate) {
-      await Submission.findByIdAndUpdate(sub._id, {
-        status: 'eliminated'
-      });
-      eliminatedIds.push(sub._id.toString());
+    if (eliminatedIds.length > 0) {
+      await Submission.bulkWrite(
+        eliminatedIds.map(id => ({
+          updateOne: {
+            filter: { _id: id },
+            update: { $set: { status: 'eliminated' } }
+          }
+        }))
+      );
     }
 
     return {
