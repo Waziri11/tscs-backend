@@ -252,25 +252,29 @@ const advanceSubmissionsForRound = async (round, submissions) => {
       }
     });
 
-    // Update submissions
-    const promotedIds = [];
-    const eliminatedIds = [];
+    // Update submissions using bulkWrite
+    const promotedIds = toPromote.map(sub => sub._id.toString());
+    const eliminatedIds = toEliminate.map(sub => sub._id.toString());
 
-    for (const sub of toPromote) {
-      await Submission.findByIdAndUpdate(sub._id, {
-        level: nextLevel,
-        status: 'promoted',
-        roundId: round._id // Set roundId for historical tracking
-      });
-      promotedIds.push(sub._id.toString());
+    if (promotedIds.length > 0) {
+      await Submission.bulkWrite(
+        promotedIds.map(id => ({
+          updateOne: {
+            filter: { _id: id },
+            update: { $set: { level: nextLevel, status: 'promoted', roundId: round._id, promotedFromRoundId: round._id } }
+          }
+        }))
+      );
     }
-
-    for (const sub of toEliminate) {
-      await Submission.findByIdAndUpdate(sub._id, {
-        status: 'eliminated',
-        roundId: round._id // Set roundId for historical tracking
-      });
-      eliminatedIds.push(sub._id.toString());
+    if (eliminatedIds.length > 0) {
+      await Submission.bulkWrite(
+        eliminatedIds.map(id => ({
+          updateOne: {
+            filter: { _id: id },
+            update: { $set: { status: 'eliminated', roundId: round._id } }
+          }
+        }))
+      );
     }
 
     return {
@@ -324,14 +328,14 @@ const advanceSubmissions = async (level, year, region = null, council = null) =>
     const quotaDoc = await Quota.findOne({ year: parseInt(year), level });
     const quota = quotaDoc ? quotaDoc.quota : 0;
 
-    // Group by location if Council or Regional level
+    // Group by location if Council or Regional level (Council groups by region::council::areaOfFocus)
     const groups = {};
     submissions.forEach(sub => {
       let locationKey;
       if (level === 'Council') {
-        locationKey = `${sub.region}::${sub.council}`;
+        locationKey = `${sub.region || 'unknown'}::${sub.council || 'unknown'}::${sub.areaOfFocus || 'unknown'}`;
       } else if (level === 'Regional') {
-        locationKey = sub.region;
+        locationKey = sub.region || 'unknown';
       } else {
         locationKey = 'national';
       }
@@ -368,7 +372,7 @@ const advanceSubmissions = async (level, year, region = null, council = null) =>
     for (const sub of toPromote) {
       await Submission.findByIdAndUpdate(sub._id, {
         level: nextLevel,
-        status: 'approved'
+        status: 'promoted'
       });
       promotedIds.push(sub._id.toString());
     }
@@ -1042,6 +1046,14 @@ router.post('/:id/extend', async (req, res) => {
     }
 
     await round.save();
+
+    emitRoundStateChange(round.year, round.level, {
+      roundId: round._id.toString(),
+      status: round.status,
+      action: 'extended',
+      level: round.level,
+      endTime: newEndTime,
+    });
 
     // Log extension
     if (logger) {

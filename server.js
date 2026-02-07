@@ -1,4 +1,5 @@
 const express = require("express");
+const http = require("http");
 const compression = require('compression');
 const cors = require("cors");
 const dotenv = require("dotenv");
@@ -33,6 +34,7 @@ const { generalLimiter } = require("./middleware/rateLimiter");
 const requestTimeout = require("./middleware/timeout");
 
 const app = express();
+const server = http.createServer(app);
 
 // Trust proxy - needed for Render and other reverse proxies
 // Set to 1 to trust only the first proxy (hosting provider) - prevents IP spoofing
@@ -140,17 +142,31 @@ const startServer = async () => {
     // Connect to MongoDB first
     await connectDB();
 
+    // Initialize Socket.IO
+    const { initSocket } = require("./utils/socketManager");
+    const corsOrigins = [];
+    if (process.env.CLIENT_URL) corsOrigins.push(process.env.CLIENT_URL);
+    if (process.env.NODE_ENV === "development") {
+      corsOrigins.push(/^http:\/\/localhost:\d+$/);
+      corsOrigins.push(/^http:\/\/127\.0\.0\.1:\d+$/);
+    }
+    initSocket(server, {
+      origin: corsOrigins.length > 0 ? corsOrigins : "*",
+      methods: ["GET", "POST"],
+      credentials: true,
+    });
+
     // Start round scheduler only after connection is established
     const { startScheduler } = require("./utils/roundScheduler");
     startScheduler();
 
-    // Start HTTP server
-    app.listen(PORT, () => {
+    // Start HTTP server (uses server instead of app for Socket.IO)
+    server.listen(PORT, () => {
       if (process.env.NODE_ENV === "development") {
         console.log(
           `Server running on port ${PORT} (${
             process.env.NODE_ENV || "development"
-          })`
+          }) with Socket.IO`
         );
       }
     });

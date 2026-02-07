@@ -258,15 +258,11 @@ router.post('/', authorize('judge'), invalidateCacheOnChange('cache:/api/leaderb
         });
       }
       
-      // Check if round has ended (use actual end time based on timing type)
+      // Check if round has ended (use actual end time - closes 60s window before scheduler marks ended)
       const now = new Date();
-      let actualEndTime = bestRound.endTime;
-      
-      // Calculate actual end time for countdown rounds
-      if (bestRound.timingType === 'countdown' && bestRound.countdownDuration) {
-        const start = bestRound.startTime || bestRound.createdAt;
-        actualEndTime = new Date(start.getTime() + bestRound.countdownDuration);
-      }
+      const actualEndTime = typeof bestRound.getActualEndTime === 'function'
+        ? bestRound.getActualEndTime()
+        : bestRound.endTime;
       
       if (now >= actualEndTime) {
         return res.status(403).json({

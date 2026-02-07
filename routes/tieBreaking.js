@@ -27,7 +27,7 @@ router.get('/', async (req, res) => {
     }
 
     const tieBreaks = await TieBreaking.find(query)
-      .populate('submissionIds', 'teacherName category subject level')
+      .populate('submissionIds', 'teacherName category subject level region council school')
       .populate('votes.judgeId', 'name username')
       .populate('winners', 'teacherName category subject')
       .sort({ createdAt: -1 });

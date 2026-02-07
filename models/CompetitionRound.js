@@ -84,6 +84,17 @@ const competitionRoundSchema = new mongoose.Schema({
     ref: 'User',
     default: null
   },
+  // Leaderboard visibility mode: 'live' shows real-time scores, 'frozen' shows a snapshot
+  leaderboardVisibility: {
+    type: String,
+    enum: ['live', 'frozen'],
+    default: 'live'
+  },
+  // Frozen leaderboard data (captured when toggling to frozen mode)
+  frozenLeaderboardSnapshot: {
+    type: mongoose.Schema.Types.Mixed,
+    default: null
+  },
   // Snapshot of pending submissions when round was activated
   pendingSubmissionsSnapshot: {
     type: [mongoose.Schema.Types.ObjectId],

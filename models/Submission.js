@@ -112,6 +112,11 @@ const submissionSchema = new mongoose.Schema({
     ref: 'CompetitionRound',
     default: null
   },
+  promotedFromRoundId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'CompetitionRound',
+    default: null
+  },
   disqualified: {
     type: Boolean,
     default: false

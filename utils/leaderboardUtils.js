@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Submission = require('../models/Submission');
 const CompetitionRound = require('../models/CompetitionRound');
 const Evaluation = require('../models/Evaluation');
@@ -86,17 +87,21 @@ const calculateAverageScore = async (submissionId) => {
  * Group submissions by location based on level
  * @param {Array} submissions - Array of submission objects
  * @param {String} level - Competition level
+ * @param {Boolean} includeAreaOfFocus - If true, also groups by areaOfFocus at Council level
  * @returns {Object} Object with location keys and submission arrays
  */
-const groupByLocation = (submissions, level) => {
+const groupByLocation = (submissions, level, includeAreaOfFocus = false) => {
   const groups = {};
 
   submissions.forEach(sub => {
     let locationKey;
     
     if (level === 'Council') {
-      // Group by region::council
+      // Group by region::council, optionally also by areaOfFocus for advancement
       locationKey = `${sub.region || 'unknown'}::${sub.council || 'unknown'}`;
+      if (includeAreaOfFocus && sub.areaOfFocus) {
+        locationKey += `::${sub.areaOfFocus}`;
+      }
     } else if (level === 'Regional') {
       // Group by region
       locationKey = sub.region || 'unknown';
@@ -140,6 +145,7 @@ const calculateLeaderboard = async (year, level, filters = {}) => {
     // Apply location filters if provided
     if (filters.region) query.region = filters.region;
     if (filters.council) query.council = filters.council;
+    if (filters.areaOfFocus) query.areaOfFocus = filters.areaOfFocus;
 
     // Get submissions with populated teacher info
     const submissions = await Submission.find(query)
@@ -172,8 +178,8 @@ const calculateLeaderboard = async (year, level, filters = {}) => {
       sub => sub.averageScore > 0 || sub.status === 'evaluated' || sub.status === 'promoted' || sub.status === 'eliminated'
     );
 
-    // Group by location
-    const locationGroups = groupByLocation(evaluatedSubmissions, level);
+    // Group by location (Council level includes areaOfFocus for per-area advancement)
+    const locationGroups = groupByLocation(evaluatedSubmissions, level, level === 'Council');
 
     // Rank submissions within each location group
     const leaderboard = {};
@@ -217,9 +223,10 @@ const getLeaderboardByLocation = async (year, level, location) => {
     const filters = {};
     
     if (level === 'Council' && location !== 'national') {
-      const [region, council] = location.split('::');
-      filters.region = region;
-      filters.council = council;
+      const parts = location.split('::');
+      filters.region = parts[0];
+      filters.council = parts[1];
+      if (parts[2]) filters.areaOfFocus = parts[2];
     } else if (level === 'Regional' && location !== 'national') {
       filters.region = location;
     }
@@ -240,8 +247,39 @@ const getLeaderboardByLocation = async (year, level, location) => {
  */
 const getAvailableLocations = async (year, level) => {
   try {
-    const leaderboard = await calculateLeaderboard(year, level);
-    return Object.keys(leaderboard);
+    const trackedIds = await getTrackedSubmissionIds(year, level);
+    if (trackedIds.length === 0) return [];
+
+    const matchIds = trackedIds.map(id => new mongoose.Types.ObjectId(id));
+    const matchStage = {
+      _id: { $in: matchIds },
+      year: parseInt(year),
+      level
+    };
+
+    const groupId = level === 'Council'
+      ? { region: '$region', council: '$council', areaOfFocus: '$areaOfFocus' }
+      : level === 'Regional'
+        ? { region: '$region' }
+        : { national: 'national' };
+
+    const locations = await Submission.aggregate([
+      { $match: matchStage },
+      { $group: { _id: groupId } }
+    ]);
+
+    return locations.map(loc => {
+      if (level === 'Council') {
+        const r = loc._id.region || 'unknown';
+        const c = loc._id.council || 'unknown';
+        const a = loc._id.areaOfFocus || 'unknown';
+        return `${r}::${c}::${a}`;
+      }
+      if (level === 'Regional') {
+        return loc._id.region || 'unknown';
+      }
+      return 'national';
+    });
   } catch (error) {
     console.error('Error getting available locations:', error);
     return [];
