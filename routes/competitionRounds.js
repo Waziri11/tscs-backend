@@ -1313,7 +1313,19 @@ router.get('/:id/judge-progress', async (req, res) => {
     // For countdown rounds, startTime is set when activated
     // For fixed_time rounds, use createdAt (rounds are typically activated soon after creation)
     // This ensures we only count evaluations that happened during this round
-    const roundStartTime = round.startTime || round.createdAt;
+    const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const normalize = (value) => (value ? value.toString().trim() : '');
+    const toExactRegex = (value) => {
+      const normalized = normalize(value);
+      return normalized ? new RegExp(`^${escapeRegExp(normalized)}$`, 'i') : null;
+    };
+
+    const startTimeRaw = round.startTime || round.createdAt;
+    let roundStartTime = new Date(startTimeRaw);
+    const now = new Date();
+    if (Number.isNaN(roundStartTime.getTime()) || roundStartTime > now) {
+      roundStartTime = new Date(round.createdAt);
+    }
     
     // Get all submissions dynamically based on round's level/location
     // Submissions are not dependent on rounds - we query them based on judge assignments
@@ -1323,18 +1335,20 @@ router.get('/:id/judge-progress', async (req, res) => {
       status: { $nin: ['promoted', 'eliminated'] } // Exclude already processed submissions
     };
     
-    if (round.region) submissionQuery.region = round.region;
-    if (round.council) submissionQuery.council = round.council;
+    const regionRegex = toExactRegex(round.region);
+    const councilRegex = toExactRegex(round.council);
+    if (regionRegex) submissionQuery.region = regionRegex;
+    if (councilRegex) submissionQuery.council = councilRegex;
 
     const allSubmissions = await Submission.find(submissionQuery);
 
     // Get all judges assigned to this round's level and location
     const judgeQuery = { role: 'judge', assignedLevel: round.level, status: 'active' };
-    if (round.level === 'Council' && round.region && round.council) {
-      judgeQuery.assignedRegion = round.region;
-      judgeQuery.assignedCouncil = round.council;
-    } else if (round.level === 'Regional' && round.region) {
-      judgeQuery.assignedRegion = round.region;
+    if (round.level === 'Council' && regionRegex && councilRegex) {
+      judgeQuery.assignedRegion = regionRegex;
+      judgeQuery.assignedCouncil = councilRegex;
+    } else if (round.level === 'Regional' && regionRegex) {
+      judgeQuery.assignedRegion = regionRegex;
     }
 
     // Get full judge details (including name, email, username) for both progress calculation and export
@@ -1346,11 +1360,11 @@ router.get('/:id/judge-progress', async (req, res) => {
       // For Council/Regional: Get submissions that have assignments
       const assignments = await SubmissionAssignment.find({
         level: round.level,
-        ...(round.level === 'Council' && round.region && round.council ? {
-          region: round.region,
-          council: round.council
-        } : round.level === 'Regional' && round.region ? {
-          region: round.region
+        ...(round.level === 'Council' && regionRegex && councilRegex ? {
+          region: regionRegex,
+          council: councilRegex
+        } : round.level === 'Regional' && regionRegex ? {
+          region: regionRegex
         } : {})
       }).select('submissionId');
       
@@ -1364,12 +1378,17 @@ router.get('/:id/judge-progress', async (req, res) => {
     }
 
     // Calculate progress for each judge
+    const submissionIds = submissions.map(sub => sub._id);
     const judgeProgress = await Promise.all(judges.map(async (judge) => {
       // Only get evaluations created AFTER the round started
-      const evaluations = await Evaluation.find({ 
+      const evaluationQuery = { 
         judgeId: judge._id,
         createdAt: { $gte: roundStartTime }
-      });
+      };
+      if (submissionIds.length > 0) {
+        evaluationQuery.submissionId = { $in: submissionIds };
+      }
+      const evaluations = await Evaluation.find(evaluationQuery);
       const evaluatedSubmissionIds = evaluations.map(e => e.submissionId.toString());
       
       let assignedSubmissions;
@@ -1377,7 +1396,13 @@ router.get('/:id/judge-progress', async (req, res) => {
         // For Council/Regional: Get only submissions assigned to this judge
         const assignments = await SubmissionAssignment.find({
           judgeId: judge._id,
-          level: round.level
+          level: round.level,
+          ...(round.level === 'Council' && regionRegex && councilRegex ? {
+            region: regionRegex,
+            council: councilRegex
+          } : round.level === 'Regional' && regionRegex ? {
+            region: regionRegex
+          } : {})
         }).select('submissionId');
         
         const assignedIds = assignments.map(a => a.submissionId.toString());
