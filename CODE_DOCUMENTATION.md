@@ -142,6 +142,18 @@ EMAIL_FROM_NAME=TSCS
 | `BREVO_SENDER_EMAIL` | Yes | Verified sender email in Brevo |
 | `BREVO_SENDER_NAME` | No | Friendly sender name (defaults to `TSCS`) |
 | `EMAIL_FROM_NAME` | No | Email sender name (default: "TSCS") |
+| `BREVO_SMS_API_KEY` | Yes | Brevo Transactional SMS API key |
+| `BREVO_SMS_SENDER` | No | SMS sender name (defaults to `TSCS`) |
+
+### Sending a Test SMS
+
+Once `BREVO_SMS_API_KEY` (and optionally `BREVO_SMS_SENDER`) are set, run the helper script to push a test message. By default it targets `+255676907776` and sends a short informational text:
+
+```bash
+node scripts/sendTestSms.js
+```
+
+You can override the recipient and message by passing CLI arguments in order (`recipient`, `message`).
 
 ---
 
