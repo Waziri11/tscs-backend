@@ -130,7 +130,7 @@ router.post('/login', authLimiter, async (req, res) => {
         }
 
         // Send OTP email (non-blocking)
-        emailService.sendOTPVerification(user.email, otpResult.otp, user.name)
+        emailService.sendOTPVerification(user.email, otpResult.otp, user.name, user.phone)
           .catch(error => {
             console.error('Failed to send OTP email:', error.message);
           });
@@ -326,7 +326,7 @@ router.post('/register', authLimiter, async (req, res) => {
     }
 
     // Send OTP email (non-blocking)
-    emailService.sendOTPVerification(user.email, otpResult.otp, user.name)
+    emailService.sendOTPVerification(user.email, otpResult.otp, user.name, user.phone)
       .catch(error => {
         console.error('Failed to send OTP email:', error.message);
       });
@@ -555,7 +555,7 @@ router.post('/resend-otp', otpLimiter, async (req, res) => {
     // Send OTP email (non-blocking)
     const user = await User.findOne({ email: email.toLowerCase() });
     if (user) {
-      emailService.sendOTPVerification(user.email, resendResult.otp, user.name)
+      emailService.sendOTPVerification(user.email, resendResult.otp, user.name, user.phone)
         .catch(error => {
             console.error('Failed to resend OTP email:', error.message);
         });
@@ -632,7 +632,7 @@ router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
     }
 
     // Send password reset OTP email (non-blocking)
-    emailService.sendPasswordResetOTP(user.email, otpResult.otp, user.name)
+    emailService.sendPasswordResetOTP(user.email, otpResult.otp, user.name, user.phone)
       .catch(error => {
         console.error('Failed to send password reset OTP email:', error.message);
       });
@@ -1060,7 +1060,7 @@ router.post('/request-email-change', protect, async (req, res) => {
 
     // Send OTP to the new email
     try {
-      await emailService.sendOTPEmail(normalizedEmail, otpResult.otp);
+      await emailService.sendOTPVerification(normalizedEmail, otpResult.otp, req.user.name, req.user.phone);
     } catch (emailError) {
       console.error('Failed to send email change OTP:', emailError);
       return res.status(500).json({
@@ -1182,4 +1182,3 @@ router.post('/verify-email-change', protect, async (req, res) => {
 });
 
 module.exports = router;
-

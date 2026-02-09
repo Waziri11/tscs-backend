@@ -116,14 +116,15 @@ class NotificationService {
     // Send email if requested
     if (sendEmail && userId) {
       try {
-        const user = await User.findById(userId).select('email name');
+        const user = await User.findById(userId).select('email name phone');
         if (user && user.email) {
           const emailSent = await emailService.sendSystemNotification(
             user.email,
             title,
             message,
             user.name,
-            metadata
+            metadata,
+            user.phone
           );
 
           // Update notification with email status
@@ -601,7 +602,7 @@ class NotificationService {
    */
   async sendEmailNotification(userId, notification) {
     try {
-      const user = await User.findById(userId).select('email name');
+      const user = await User.findById(userId).select('email name phone');
       if (!user || !user.email) return;
 
       // Determine email type and send appropriate email
@@ -610,7 +611,8 @@ class NotificationService {
           await emailService.sendSubmissionSuccessfulEmail(
             user.email,
             user.name,
-            notification.metadata
+            notification.metadata,
+            user.phone
           );
           break;
 
@@ -619,7 +621,8 @@ class NotificationService {
             user.email,
             user.name,
             'promoted',
-            notification.metadata
+            notification.metadata,
+            user.phone
           );
           break;
 
@@ -628,7 +631,8 @@ class NotificationService {
             user.email,
             user.name,
             'eliminated',
-            notification.metadata
+            notification.metadata,
+            user.phone
           );
           break;
 
@@ -636,7 +640,8 @@ class NotificationService {
           await emailService.sendEvaluationReminderEmail(
             user.email,
             user.name,
-            notification.metadata
+            notification.metadata,
+            user.phone
           );
           break;
 
@@ -644,7 +649,8 @@ class NotificationService {
           await emailService.sendEvaluationPendingEmail(
             user.email,
             user.name,
-            notification.metadata
+            notification.metadata,
+            user.phone
           );
           break;
 
@@ -652,7 +658,8 @@ class NotificationService {
           await emailService.sendJudgeAssignmentEmail(
             user.email,
             user.name,
-            notification.metadata
+            notification.metadata,
+            user.phone
           );
           break;
 
@@ -662,7 +669,8 @@ class NotificationService {
             user.name,
             notification.title,
             notification.message,
-            notification.metadata
+            notification.metadata,
+            user.phone
           );
           break;
 
@@ -672,7 +680,8 @@ class NotificationService {
             user.name,
             notification.title,
             notification.message,
-            notification.metadata
+            notification.metadata,
+            user.phone
           );
           break;
       }

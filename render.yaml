@@ -25,3 +25,9 @@ services:
         sync: false
       - key: EMAIL_FROM_NAME
         sync: false
+      - key: SMS_API_URL
+        sync: false
+      - key: SMS_SERVICE_ID
+        sync: false
+      - key: SMS_SYSTEM_ID
+        sync: false

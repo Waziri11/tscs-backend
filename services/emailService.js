@@ -1,5 +1,6 @@
 const https = require('https');
 const EmailLog = require('../models/EmailLog');
+const smsService = require('./smsService');
 
 /**
  * Email Service
@@ -63,57 +64,65 @@ class EmailService {
       this.initialize();
     }
 
-    if (!this.apiKey) {
-      console.error('Brevo API key not configured');
-      return false;
+    const canSendEmail = Boolean(this.apiKey && this.senderEmail);
+    if (!canSendEmail) {
+      console.error('Brevo email configuration incomplete: BREVO_API_KEY or BREVO_SENDER_EMAIL not set');
     }
 
-    if (!this.senderEmail) {
-      console.error('Brevo sender email not configured');
-      return false;
-    }
+    let logEntry = null;
+    let emailSent = false;
 
-    // Create log entry first
-    const logEntry = await EmailLog.logEmail({
-      email: options.to,
-      type: options.type || 'system_notification',
-      subject: options.subject,
-      status: 'pending',
-      metadata: options.metadata || {}
-    });
-
-    try {
-      const payload = {
-        sender: { name: this.senderName, email: this.senderEmail },
-        to: [{ email: options.to }],
+    if (canSendEmail) {
+      // Create log entry first
+      logEntry = await EmailLog.logEmail({
+        email: options.to,
+        type: options.type || 'system_notification',
         subject: options.subject,
-        htmlContent: options.html,
-        textContent: options.text || undefined
-      };
+        status: 'pending',
+        metadata: options.metadata || {}
+      });
 
-      const info = await this.sendBrevoRequest('/v3/smtp/email', 'POST', payload);
+      try {
+        const payload = {
+          sender: { name: this.senderName, email: this.senderEmail },
+          to: [{ email: options.to }],
+          subject: options.subject,
+          htmlContent: options.html,
+          textContent: options.text || undefined
+        };
 
-      // Update log on success
-      if (logEntry) {
-        await EmailLog.updateStatus(logEntry._id, 'sent', null, info.messageId || 'Brevo accepted');
+        const info = await this.sendBrevoRequest('/v3/smtp/email', 'POST', payload);
+
+        // Update log on success
+        if (logEntry) {
+          await EmailLog.updateStatus(logEntry._id, 'sent', null, info.messageId || 'Brevo accepted');
+        }
+
+        if (process.env.NODE_ENV === 'development') {
+          console.log(`Email sent to ${options.to}`);
+        }
+        emailSent = true;
+      } catch (error) {
+        const errorMessage = this.extractBrevoError(error) || error.message;
+
+        if (logEntry) {
+          await EmailLog.updateStatus(logEntry._id, 'failed', errorMessage);
+        }
+
+        console.error(`Email sending failed to ${options.to}:`, errorMessage);
       }
-
-      if (process.env.NODE_ENV === 'development') {
-        console.log(`Email sent to ${options.to}`);
-      }
-      return true;
-
-    } catch (error) {
-      const errorMessage = this.extractBrevoError(error) || error.message;
-
-      if (logEntry) {
-        await EmailLog.updateStatus(logEntry._id, 'failed', errorMessage);
-      }
-
-      console.error(`Email sending failed to ${options.to}:`, errorMessage);
-      
-      return false;
     }
+
+    if (options.phone && options.smsText) {
+      const smsResult = await smsService.sendSMS(options.phone, options.smsText);
+      if (!smsResult.success) {
+        console.error(`SMS sending failed to ${options.phone}:`, smsResult.message);
+      } else if (process.env.NODE_ENV === 'development') {
+        console.log(`SMS sent to ${options.phone}`);
+      }
+    }
+
+    return emailSent;
   }
 
   /**
@@ -123,7 +132,7 @@ class EmailService {
    * @param {string} userName - User name
    * @returns {Promise<boolean>} Success status
    */
-  async sendOTPVerification(email, otp, userName) {
+  async sendOTPVerification(email, otp, userName, phone = null) {
     const subject = 'Verify Your TSCS Account';
     const html = this.generateOTPHTML(otp, userName);
     const text = this.generateOTPText(otp, userName);
@@ -133,7 +142,9 @@ class EmailService {
       subject,
       html,
       text,
-      type: 'email_verification_otp'
+      type: 'email_verification_otp',
+      phone,
+      smsText: `TSCS verification code: ${otp}. Expires in 10 minutes.`
     });
   }
 
@@ -144,7 +155,7 @@ class EmailService {
    * @param {string} userName - User name
    * @returns {Promise<boolean>} Success status
    */
-  async sendPasswordResetOTP(email, otp, userName) {
+  async sendPasswordResetOTP(email, otp, userName, phone = null) {
     const subject = 'Password Reset - TSCS';
     const html = this.generatePasswordResetOTPHTML(otp, userName);
     const text = this.generatePasswordResetOTPText(otp, userName);
@@ -154,7 +165,9 @@ class EmailService {
       subject,
       html,
       text,
-      type: 'password_reset_otp'
+      type: 'password_reset_otp',
+      phone,
+      smsText: `TSCS password reset code: ${otp}. Expires in 10 minutes.`
     });
   }
 
@@ -167,7 +180,7 @@ class EmailService {
    * @param {Object} metadata - Additional metadata
    * @returns {Promise<boolean>} Success status
    */
-  async sendSystemNotification(email, subject, message, userName, metadata = {}) {
+  async sendSystemNotification(email, subject, message, userName, metadata = {}, phone = null) {
     const html = this.generateSystemNotificationHTML(message, userName, metadata);
     const text = this.generateSystemNotificationText(message, userName, metadata);
 
@@ -177,7 +190,9 @@ class EmailService {
       html,
       text,
       type: 'system_notification',
-      metadata
+      metadata,
+      phone,
+      smsText: `TSCS: ${subject}. ${message}`
     });
   }
 
@@ -188,7 +203,7 @@ class EmailService {
    * @param {Object} metadata - Submission metadata
    * @returns {Promise<boolean>} Success status
    */
-  async sendSubmissionSuccessfulEmail(email, userName, metadata) {
+  async sendSubmissionSuccessfulEmail(email, userName, metadata, phone = null) {
     const { roundName, subject, submissionId } = metadata;
     const subjectLine = `Submission Received - ${roundName}`;
     const html = this.generateSubmissionSuccessfulHTML(userName, metadata);
@@ -200,7 +215,9 @@ class EmailService {
       html,
       text,
       type: 'submission_successful',
-      metadata: { submissionId, roundName, subject }
+      metadata: { submissionId, roundName, subject },
+      phone,
+      smsText: `TSCS: Submission received for ${roundName}. Subject: ${subject}.`
     });
   }
 
@@ -212,7 +229,7 @@ class EmailService {
    * @param {Object} metadata - Submission metadata
    * @returns {Promise<boolean>} Success status
    */
-  async sendSubmissionResultEmail(email, userName, result, metadata) {
+  async sendSubmissionResultEmail(email, userName, result, metadata, phone = null) {
     const { roundName, nextRound, rank, averageScore, totalSubmissions } = metadata;
     const subjectLine = result === 'promoted'
       ? `Congratulations! Submission Promoted - ${roundName}`
@@ -227,7 +244,11 @@ class EmailService {
       html,
       text,
       type: `submission_${result}`,
-      metadata: { roundName, result, nextRound, rank, averageScore, totalSubmissions }
+      metadata: { roundName, result, nextRound, rank, averageScore, totalSubmissions },
+      phone,
+      smsText: result === 'promoted'
+        ? `TSCS: Congratulations. Your submission was promoted from ${roundName}.`
+        : `TSCS: Your submission result for ${roundName} is available.`
     });
   }
 
@@ -238,7 +259,7 @@ class EmailService {
    * @param {Object} metadata - Evaluation metadata
    * @returns {Promise<boolean>} Success status
    */
-  async sendEvaluationReminderEmail(email, userName, metadata) {
+  async sendEvaluationReminderEmail(email, userName, metadata, phone = null) {
     const { roundName, deadline, hoursLeft } = metadata;
     const subjectLine = `Evaluation Reminder - ${hoursLeft} Hours Remaining`;
     const html = this.generateEvaluationReminderHTML(userName, metadata);
@@ -250,7 +271,9 @@ class EmailService {
       html,
       text,
       type: 'evaluation_reminder',
-      metadata: { roundName, deadline, hoursLeft }
+      metadata: { roundName, deadline, hoursLeft },
+      phone,
+      smsText: `TSCS reminder: ${hoursLeft} hours left to complete evaluations for ${roundName}.`
     });
   }
 
@@ -261,7 +284,7 @@ class EmailService {
    * @param {Object} metadata - Evaluation metadata
    * @returns {Promise<boolean>} Success status
    */
-  async sendEvaluationPendingEmail(email, userName, metadata) {
+  async sendEvaluationPendingEmail(email, userName, metadata, phone = null) {
     const { roundName, submissionCount, deadline } = metadata;
     const subjectLine = `New Evaluations Available - ${roundName}`;
     const html = this.generateEvaluationPendingHTML(userName, metadata);
@@ -273,7 +296,9 @@ class EmailService {
       html,
       text,
       type: 'evaluation_pending',
-      metadata: { roundName, submissionCount, deadline }
+      metadata: { roundName, submissionCount, deadline },
+      phone,
+      smsText: `TSCS: New evaluations available for ${roundName}. Submissions: ${submissionCount}.`
     });
   }
 
@@ -286,7 +311,7 @@ class EmailService {
    *   For round assignment (legacy): { roundName, level }
    * @returns {Promise<boolean>} Success status
    */
-  async sendJudgeAssignmentEmail(email, userName, metadata) {
+  async sendJudgeAssignmentEmail(email, userName, metadata, phone = null) {
     // Check if this is a submission assignment (new format) or round assignment (legacy)
     const isSubmissionAssignment = metadata.submissionId !== undefined;
     
@@ -309,7 +334,9 @@ class EmailService {
       html,
       text,
       type: 'judge_assigned',
-      metadata
+      metadata,
+      phone,
+      smsText: `TSCS: You have a new judge assignment. ${subjectLine}.`
     });
   }
 
@@ -322,7 +349,7 @@ class EmailService {
    * @param {Object} metadata - Additional metadata
    * @returns {Promise<boolean>} Success status
    */
-  async sendAdminNotificationEmail(email, userName, title, message, metadata) {
+  async sendAdminNotificationEmail(email, userName, title, message, metadata, phone = null) {
     const html = this.generateAdminNotificationHTML(userName, title, message, metadata);
     const text = this.generateAdminNotificationText(userName, title, message, metadata);
 
@@ -332,7 +359,9 @@ class EmailService {
       html,
       text,
       type: 'admin_notification',
-      metadata
+      metadata,
+      phone,
+      smsText: `TSCS admin notice: ${title}. ${message}`
     });
   }
 
@@ -345,7 +374,7 @@ class EmailService {
    * @param {Object} metadata - Additional metadata
    * @returns {Promise<boolean>} Success status
    */
-  async sendSystemCriticalEmail(email, userName, title, message, metadata) {
+  async sendSystemCriticalEmail(email, userName, title, message, metadata, phone = null) {
     const html = this.generateSystemCriticalHTML(userName, title, message, metadata);
     const text = this.generateSystemCriticalText(userName, title, message, metadata);
 
@@ -355,7 +384,9 @@ class EmailService {
       html,
       text,
       type: 'system_critical',
-      metadata
+      metadata,
+      phone,
+      smsText: `TSCS critical alert: ${title}. ${message}`
     });
   }
 

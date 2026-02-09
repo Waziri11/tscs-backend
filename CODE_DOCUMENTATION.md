@@ -127,6 +127,11 @@ BREVO_API_KEY=your-brevo-api-key
 BREVO_SENDER_EMAIL=your-verified-sender@example.com
 BREVO_SENDER_NAME=TSCS
 EMAIL_FROM_NAME=TSCS
+
+# SMS Configuration (eGA Gateway)
+SMS_API_URL=http://41.59.251.163:5012/api/sms/send
+SMS_SERVICE_ID=2243
+SMS_SYSTEM_ID=SI-B1A33EC5
 ```
 
 ### Variable Descriptions
@@ -142,12 +147,13 @@ EMAIL_FROM_NAME=TSCS
 | `BREVO_SENDER_EMAIL` | Yes | Verified sender email in Brevo |
 | `BREVO_SENDER_NAME` | No | Friendly sender name (defaults to `TSCS`) |
 | `EMAIL_FROM_NAME` | No | Email sender name (default: "TSCS") |
-| `BREVO_SMS_API_KEY` | Yes | Brevo Transactional SMS API key |
-| `BREVO_SMS_SENDER` | No | SMS sender name (defaults to `TSCS`) |
+| `SMS_API_URL` | No | SMS gateway URL (default: `http://41.59.251.163:5012/api/sms/send`) |
+| `SMS_SERVICE_ID` | No | SMS service ID (default: `2243`) |
+| `SMS_SYSTEM_ID` | No | SMS system ID (default: `SI-B1A33EC5`) |
 
 ### Sending a Test SMS
 
-Once `BREVO_SMS_API_KEY` (and optionally `BREVO_SMS_SENDER`) are set, run the helper script to push a test message. By default it targets `+255676907776` and sends a short informational text:
+Once your SMS settings are configured, run the helper script to push a test message. By default it targets `+255676907776` and sends the eGA test text:
 
 ```bash
 node scripts/sendTestSms.js
