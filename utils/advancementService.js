@@ -4,7 +4,9 @@ const Quota = require('../models/Quota');
 const Evaluation = require('../models/Evaluation');
 const User = require('../models/User');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
-const { calculateLeaderboard, getLeaderboardByLocation } = require('./leaderboardUtils');
+const Leaderboard = require('../models/Leaderboard');
+const { getLeaderboard, generateLocationKey, updateLeaderboardForSubmission } = require('./leaderboardUtils');
+const { assignJudgeToSubmission } = require('./judgeAssignment');
 const { notifyTeachersOnPromotion, notifyTeachersOnElimination } = require('./notifications');
 
 /**
@@ -22,13 +24,14 @@ const getNextLevel = (level) => {
 };
 
 /**
- * Advance submissions to next level for a specific location
+ * Advance submissions to next level for a specific areaOfFocus and location
  * @param {Number} year - Competition year
+ * @param {String} areaOfFocus - Area of focus (competition type)
  * @param {String} level - Current level
- * @param {String} location - Location key (region::council, region, or 'national')
+ * @param {String} locationKey - Location key (region::council, region, or 'national')
  * @returns {Promise<Object>} Result with promoted and eliminated counts
  */
-const advanceSubmissionsForLocation = async (year, level, location) => {
+const advanceSubmissionsForLocation = async (year, areaOfFocus, level, locationKey) => {
   try {
     const nextLevel = getNextLevel(level);
     if (!nextLevel) {
@@ -48,122 +51,66 @@ const advanceSubmissionsForLocation = async (year, level, location) => {
     }
     const quota = quotaDoc.quota;
 
-    // Get leaderboard entries for this location
-    const leaderboardEntries = await getLeaderboardByLocation(year, level, location);
+    // Get leaderboard for this areaOfFocus/year/level/location
+    const leaderboardDoc = await getLeaderboard(year, areaOfFocus, level, locationKey);
     
-    if (leaderboardEntries.length === 0) {
+    if (!leaderboardDoc || leaderboardDoc.entries.length === 0) {
       return {
         success: false,
-        error: 'No submissions found for this location'
+        error: 'No submissions found for this location and area of focus'
       };
     }
 
     // Filter out already promoted or eliminated submissions
-    const eligibleSubmissions = leaderboardEntries.filter(
+    const eligibleEntries = leaderboardDoc.entries.filter(
       entry => entry.status !== 'promoted' && entry.status !== 'eliminated'
     );
 
-    if (eligibleSubmissions.length === 0) {
+    if (eligibleEntries.length === 0) {
       return {
         success: false,
         error: 'No eligible submissions to advance (all already processed)'
       };
     }
 
-    // At Council level, group by areaOfFocus so each area gets its own quota
-    const promotedIds = [];
-    const eliminatedIds = [];
-    const leaderboard = [];
+    // Sort by rank (already sorted in leaderboard)
+    const toPromote = eligibleEntries.length <= quota ? eligibleEntries : eligibleEntries.slice(0, quota);
+    const toEliminate = eligibleEntries.length <= quota ? [] : eligibleEntries.slice(quota);
 
-    if (level === 'Council') {
-      // Group by areaOfFocus within this location
-      const areaGroups = {};
-      eligibleSubmissions.forEach(entry => {
-        const areaKey = entry.areaOfFocus || 'unknown';
-        if (!areaGroups[areaKey]) areaGroups[areaKey] = [];
-        areaGroups[areaKey].push(entry);
-      });
+    const promotedIds = toPromote.map(e => e.submissionId.toString());
+    const eliminatedIds = toEliminate.map(e => e.submissionId.toString());
 
-      // Apply quota per area
-      for (const [areaKey, areaSubs] of Object.entries(areaGroups)) {
-        areaSubs.sort((a, b) => {
-          if (b.averageScore !== a.averageScore) return (b.averageScore || 0) - (a.averageScore || 0);
-          return new Date(a.createdAt) - new Date(b.createdAt);
-        });
-
-        const toPromote = areaSubs.length <= quota ? areaSubs : areaSubs.slice(0, quota);
-        const toEliminate = areaSubs.length <= quota ? [] : areaSubs.slice(quota);
-
-        for (const entry of toPromote) {
-          promotedIds.push(entry._id.toString());
-          leaderboard.push({
-            submissionId: entry._id.toString(),
-            teacherId: entry.teacherId?._id?.toString() || entry.teacherId?.toString(),
-            rank: entry.rank,
-            averageScore: entry.averageScore || 0,
-            totalSubmissions: areaSubs.length,
-            locationKey: location,
-            areaOfFocus: areaKey,
-            status: 'promoted',
-            newLevel: nextLevel
-          });
-        }
-        for (const entry of toEliminate) {
-          eliminatedIds.push(entry._id.toString());
-          leaderboard.push({
-            submissionId: entry._id.toString(),
-            teacherId: entry.teacherId?._id?.toString() || entry.teacherId?.toString(),
-            rank: entry.rank,
-            averageScore: entry.averageScore || 0,
-            totalSubmissions: areaSubs.length,
-            locationKey: location,
-            areaOfFocus: areaKey,
-            status: 'eliminated'
-          });
-        }
-      }
-    } else {
-      // Regional/National: no area grouping, just sort and apply quota
-      eligibleSubmissions.sort((a, b) => {
-        if (b.averageScore !== a.averageScore) return (b.averageScore || 0) - (a.averageScore || 0);
-        return new Date(a.createdAt) - new Date(b.createdAt);
-      });
-
-      const toPromote = eligibleSubmissions.length <= quota ? eligibleSubmissions : eligibleSubmissions.slice(0, quota);
-      const toEliminate = eligibleSubmissions.length <= quota ? [] : eligibleSubmissions.slice(quota);
-
-      for (const entry of toPromote) {
-        promotedIds.push(entry._id.toString());
-        leaderboard.push({
-          submissionId: entry._id.toString(),
-          teacherId: entry.teacherId?._id?.toString() || entry.teacherId?.toString(),
-          rank: entry.rank,
-          averageScore: entry.averageScore || 0,
-          totalSubmissions: eligibleSubmissions.length,
-          locationKey: location,
-          status: 'promoted',
-          newLevel: nextLevel
-        });
-      }
-      for (const entry of toEliminate) {
-        eliminatedIds.push(entry._id.toString());
-        leaderboard.push({
-          submissionId: entry._id.toString(),
-          teacherId: entry.teacherId?._id?.toString() || entry.teacherId?.toString(),
-          rank: entry.rank,
-          averageScore: entry.averageScore || 0,
-          totalSubmissions: eligibleSubmissions.length,
-          locationKey: location,
-          status: 'eliminated'
-        });
-      }
-    }
+    // Build leaderboard data for notifications
+    const leaderboard = [
+      ...toPromote.map(entry => ({
+        submissionId: entry.submissionId.toString(),
+        teacherId: entry.teacherId.toString(),
+        rank: entry.rank,
+        averageScore: entry.averageScore,
+        totalSubmissions: eligibleEntries.length,
+        locationKey,
+        areaOfFocus,
+        status: 'promoted',
+        newLevel: nextLevel
+      })),
+      ...toEliminate.map(entry => ({
+        submissionId: entry.submissionId.toString(),
+        teacherId: entry.teacherId.toString(),
+        rank: entry.rank,
+        averageScore: entry.averageScore,
+        totalSubmissions: eligibleEntries.length,
+        locationKey,
+        areaOfFocus,
+        status: 'eliminated'
+      }))
+    ];
 
     // Perform DB updates atomically
     const session = await mongoose.startSession();
     try {
       await session.withTransaction(async () => {
         if (promotedIds.length > 0) {
+          // Update submissions to next level
           await Submission.bulkWrite(
             promotedIds.map(id => ({
               updateOne: {
@@ -173,6 +120,20 @@ const advanceSubmissionsForLocation = async (year, level, location) => {
             })),
             { session }
           );
+
+          // Auto-assign promoted submissions to regional judges (Council → Regional only)
+          if (level === 'Council' && nextLevel === 'Regional') {
+            const promotedSubmissions = await Submission.find({ _id: { $in: promotedIds } })
+              .session(session);
+            
+            for (const submission of promotedSubmissions) {
+              // Auto-assign to regional judge using round-robin
+              await assignJudgeToSubmission(submission).catch(err => {
+                console.error(`Error assigning judge to submission ${submission._id}:`, err);
+                // Continue with other assignments even if one fails
+              });
+            }
+          }
         }
         if (eliminatedIds.length > 0) {
           await Submission.bulkWrite(
@@ -188,6 +149,50 @@ const advanceSubmissionsForLocation = async (year, level, location) => {
       });
     } finally {
       session.endSession();
+    }
+
+    // Update leaderboard entries to reflect new statuses
+    if (promotedIds.length > 0 || eliminatedIds.length > 0) {
+      // Update leaderboard entries status using arrayFilters
+      const promotedObjectIds = promotedIds.map(id => new mongoose.Types.ObjectId(id));
+      const eliminatedObjectIds = eliminatedIds.map(id => new mongoose.Types.ObjectId(id));
+
+      if (promotedObjectIds.length > 0) {
+        await Leaderboard.updateOne(
+          { _id: leaderboardDoc._id },
+          { 
+            $set: { 
+              'entries.$[elem].status': 'promoted',
+              lastUpdated: new Date()
+            }
+          },
+          { 
+            arrayFilters: [{ 'elem.submissionId': { $in: promotedObjectIds } }] 
+          }
+        );
+      }
+      if (eliminatedObjectIds.length > 0) {
+        await Leaderboard.updateOne(
+          { _id: leaderboardDoc._id },
+          { 
+            $set: { 
+              'entries.$[elem].status': 'eliminated',
+              lastUpdated: new Date()
+            }
+          },
+          { 
+            arrayFilters: [{ 'elem.submissionId': { $in: eliminatedObjectIds } }] 
+          }
+        );
+      }
+
+      // Update leaderboards at next level for promoted submissions
+      for (const entry of toPromote) {
+        const submission = await Submission.findById(entry.submissionId);
+        if (submission) {
+          await updateLeaderboardForSubmission(submission._id);
+        }
+      }
     }
 
     // Send notifications
@@ -209,7 +214,8 @@ const advanceSubmissionsForLocation = async (year, level, location) => {
       promotedIds,
       eliminatedIds,
       leaderboard,
-      location,
+      locationKey,
+      areaOfFocus,
       quota
     };
   } catch (error) {
@@ -222,12 +228,13 @@ const advanceSubmissionsForLocation = async (year, level, location) => {
 };
 
 /**
- * Advance submissions to next level for all locations (global)
+ * Advance submissions to next level for all locations for a specific areaOfFocus (global)
  * @param {Number} year - Competition year
+ * @param {String} areaOfFocus - Area of focus
  * @param {String} level - Current level
  * @returns {Promise<Object>} Result with promoted and eliminated counts per location
  */
-const advanceSubmissionsGlobal = async (year, level) => {
+const advanceSubmissionsGlobal = async (year, areaOfFocus, level) => {
   try {
     const nextLevel = getNextLevel(level);
     if (!nextLevel) {
@@ -237,14 +244,17 @@ const advanceSubmissionsGlobal = async (year, level) => {
       };
     }
 
-    // Get all leaderboard data for this year and level
-    const leaderboard = await calculateLeaderboard(year, level);
-    const locations = Object.keys(leaderboard);
+    // Get all leaderboards for this year, areaOfFocus, and level
+    const leaderboards = await Leaderboard.find({
+      year: parseInt(year),
+      areaOfFocus,
+      level
+    });
 
-    if (locations.length === 0) {
+    if (leaderboards.length === 0) {
       return {
         success: false,
-        error: 'No submissions found for this level'
+        error: 'No leaderboards found for this area of focus and level'
       };
     }
 
@@ -258,20 +268,25 @@ const advanceSubmissionsGlobal = async (year, level) => {
       allEliminatedIds: []
     };
 
-    for (const location of locations) {
-      const locationResult = await advanceSubmissionsForLocation(year, level, location);
+    for (const leaderboard of leaderboards) {
+      const locationResult = await advanceSubmissionsForLocation(
+        year,
+        areaOfFocus,
+        level,
+        leaderboard.locationKey
+      );
       
       if (locationResult.success) {
         results.totalPromoted += locationResult.promoted;
         results.totalEliminated += locationResult.eliminated;
         results.allPromotedIds.push(...locationResult.promotedIds);
         results.allEliminatedIds.push(...locationResult.eliminatedIds);
-        results.locationResults[location] = {
+        results.locationResults[leaderboard.locationKey] = {
           promoted: locationResult.promoted,
           eliminated: locationResult.eliminated
         };
       } else {
-        results.locationResults[location] = {
+        results.locationResults[leaderboard.locationKey] = {
           error: locationResult.error
         };
       }

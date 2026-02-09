@@ -307,18 +307,30 @@ router.post('/', authorize('judge'), invalidateCacheOnChange('cache:/api/leaderb
     // Update submission average score (recalculate from all evaluations)
     await updateSubmissionAverageScore(submissionId);
 
-    // Emit real-time score update via Socket.IO
+    // Update leaderboard for this submission's areaOfFocus/level/location
+    try {
+      const { updateLeaderboardForSubmission } = require('../utils/leaderboardUtils');
+      await updateLeaderboardForSubmission(submissionId);
+    } catch (leaderboardErr) {
+      // Non-blocking: don't fail the evaluation if leaderboard update fails
+      console.error('Leaderboard update error (non-blocking):', leaderboardErr.message);
+    }
+
+    // Emit real-time score update via Socket.IO (National level only)
     try {
       const updatedSub = await Submission.findById(submissionId).populate('teacherId', 'name');
-      if (updatedSub) {
+      if (updatedSub && updatedSub.level === 'National') {
+        // Only emit for National level leaderboards
         emitScoreUpdate(updatedSub.year, updatedSub.level, {
           submissionId: submissionId.toString(),
           averageScore: updatedSub.averageScore,
           location: `${updatedSub.region || ''}::${updatedSub.council || ''}`,
           teacherName: updatedSub.teacherId?.name || updatedSub.teacherName,
           status: updatedSub.status,
+          areaOfFocus: updatedSub.areaOfFocus
         });
       }
+      // Council and Regional levels: no WebSocket emissions, updates only on page reload
     } catch (socketErr) {
       // Non-blocking: don't fail the evaluation if socket emit fails
       console.error('Socket emit error (non-blocking):', socketErr.message);

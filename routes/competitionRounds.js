@@ -892,7 +892,18 @@ router.post('/:id/close', invalidateCacheOnChange('cache:/api/leaderboard*'), as
       ? await Submission.find({ _id: { $in: round.pendingSubmissionsSnapshot } })
       : roundSubmissions;
 
-    const { calculateAverageScore } = require('../utils/leaderboardUtils');
+    const { calculateAverageScore, generateLocationKey, calculateAndUpdateLeaderboard } = require('../utils/leaderboardUtils');
+    const Leaderboard = require('../models/Leaderboard');
+    
+    // Get unique areaOfFocus values from submissions
+    const areaOfFocusSet = new Set();
+    roundSubmissions.forEach(sub => {
+      if (sub.areaOfFocus) {
+        areaOfFocusSet.add(sub.areaOfFocus);
+      }
+    });
+
+    // Update leaderboards for each areaOfFocus
     for (const submission of submissionsToUpdate) {
       // Skip if already has a valid average score
       if (submission.averageScore && submission.averageScore > 0) {
@@ -903,6 +914,49 @@ router.post('/:id/close', invalidateCacheOnChange('cache:/api/leaderboard*'), as
       const avgScore = await calculateAverageScore(submission._id);
       if (avgScore > 0) {
         await Submission.findByIdAndUpdate(submission._id, { averageScore: avgScore });
+      }
+    }
+
+    // Finalize all affected leaderboards
+    for (const areaOfFocus of areaOfFocusSet) {
+      // Get unique location keys for this areaOfFocus
+      const locationKeySet = new Set();
+      roundSubmissions
+        .filter(sub => sub.areaOfFocus === areaOfFocus)
+        .forEach(sub => {
+          const locationKey = generateLocationKey(round.level, sub.region, sub.council);
+          locationKeySet.add(locationKey);
+        });
+
+      // Update and finalize each leaderboard
+      for (const locationKey of locationKeySet) {
+        // Recalculate leaderboard to ensure it's up to date
+        await calculateAndUpdateLeaderboard(
+          round.year,
+          areaOfFocus,
+          round.level,
+          locationKey,
+          {
+            region: round.region,
+            council: round.council
+          }
+        );
+
+        // Finalize the leaderboard
+        await Leaderboard.updateOne(
+          {
+            year: round.year,
+            areaOfFocus,
+            level: round.level,
+            locationKey
+          },
+          {
+            $set: {
+              isFinalized: true,
+              lastUpdated: new Date()
+            }
+          }
+        );
       }
     }
 

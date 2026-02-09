@@ -3,7 +3,9 @@ const Submission = require('../models/Submission');
 const Evaluation = require('../models/Evaluation');
 const User = require('../models/User');
 const Quota = require('../models/Quota');
+const Leaderboard = require('../models/Leaderboard');
 const { getNextLevel, advanceSubmissionsForRound, checkAllJudgesCompleted } = require('./advancementService');
+const { generateLocationKey, calculateAndUpdateLeaderboard } = require('./leaderboardUtils');
 
 // Safely import logger
 let logger = null;
@@ -106,6 +108,71 @@ const checkAndProcessRounds = async () => {
           } else {
             console.error(`[Round Scheduler] Failed to advance round ${round._id}:`, advanceResult.error);
           }
+        }
+
+        // Finalize leaderboards for this round
+        try {
+          // Get submissions for this round to determine affected leaderboards
+          const submissionQuery = {
+            year: round.year,
+            level: round.level,
+            status: { $in: ['submitted', 'evaluated', 'promoted', 'eliminated'] }
+          };
+          if (round.region) submissionQuery.region = round.region;
+          if (round.council) submissionQuery.council = round.council;
+
+          const roundSubmissions = await Submission.find(submissionQuery);
+          
+          // Get unique areaOfFocus values
+          const areaOfFocusSet = new Set();
+          roundSubmissions.forEach(sub => {
+            if (sub.areaOfFocus) {
+              areaOfFocusSet.add(sub.areaOfFocus);
+            }
+          });
+
+          // Finalize leaderboards for each areaOfFocus
+          for (const areaOfFocus of areaOfFocusSet) {
+            const locationKeySet = new Set();
+            roundSubmissions
+              .filter(sub => sub.areaOfFocus === areaOfFocus)
+              .forEach(sub => {
+                const locationKey = generateLocationKey(round.level, sub.region, sub.council);
+                locationKeySet.add(locationKey);
+              });
+
+            for (const locationKey of locationKeySet) {
+              // Recalculate and finalize leaderboard
+              await calculateAndUpdateLeaderboard(
+                round.year,
+                areaOfFocus,
+                round.level,
+                locationKey,
+                {
+                  region: round.region,
+                  council: round.council
+                }
+              );
+
+              await Leaderboard.updateOne(
+                {
+                  year: round.year,
+                  areaOfFocus,
+                  level: round.level,
+                  locationKey
+                },
+                {
+                  $set: {
+                    isFinalized: true,
+                    lastUpdated: new Date()
+                  }
+                }
+              );
+            }
+          }
+        } catch (leaderboardError) {
+          console.error('Error finalizing leaderboards:', leaderboardError);
+          // Don't fail the round closure if leaderboard finalization fails
         }
 
         // Mark round as ended/closed
