@@ -417,6 +417,17 @@ router.post('/verify-otp', otpVerifyLimiter, async (req, res) => {
       ).catch(() => {}); // Silently fail
     }
 
+    // Send onboarding completion notification (email + SMS via notification service)
+    notificationService.emit('SYSTEM_NOTIFICATION', {
+      userId: verifyResult.user.id,
+      title: 'Registration Complete',
+      message: 'Your TSCS registration is complete. You can now access all features.',
+      metadata: { event: 'registration_complete' },
+      sendEmail: true
+    }).catch((notifyError) => {
+      console.error('Failed to emit registration complete notification:', notifyError);
+    });
+
     res.json({
       success: true,
       message: 'Email verified successfully. Welcome to TSCS!',
@@ -487,6 +498,17 @@ router.post('/verify-otp-and-login', otpVerifyLimiter, async (req, res) => {
         { email: email.toLowerCase(), role: user.role }
       ).catch(() => {}); // Silently fail
     }
+
+    // Send onboarding completion notification (email + SMS via notification service)
+    notificationService.emit('SYSTEM_NOTIFICATION', {
+      userId: user._id,
+      title: 'Registration Complete',
+      message: 'Your TSCS account setup is complete and your account is now active.',
+      metadata: { event: 'registration_complete', role: user.role },
+      sendEmail: true
+    }).catch((notifyError) => {
+      console.error('Failed to emit registration complete notification:', notifyError);
+    });
 
     // Return login response with full user data
     if (!res.headersSent) {
