@@ -30,6 +30,7 @@ const uploadRoutes = require("./routes/uploads");
 const notificationRoutes = require("./routes/notifications");
 const leaderboardRoutes = require("./routes/leaderboard");
 const stakeholderRoutes = require("./routes/stakeholder");
+const feedbackRoutes = require("./routes/feedback");
 const { generalLimiter } = require("./middleware/rateLimiter");
 const requestTimeout = require("./middleware/timeout");
 
@@ -106,6 +107,7 @@ app.use("/api/uploads", uploadRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/leaderboard", leaderboardRoutes);
 app.use("/api/stakeholder", stakeholderRoutes);
+app.use("/api/feedback", feedbackRoutes);
 
 // Health check endpoint
 app.get("/api/health", (req, res) => {
