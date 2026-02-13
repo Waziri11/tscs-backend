@@ -225,18 +225,7 @@ const regionsAndCouncils = {
     "Pangani District Council",
     "Tanga District Council"
   ],
-  "Unguja North": [
-    "North A District Council",
-    "North B District Council"
-  ],
-  "Unguja South": [
-    "Central District Council",
-    "South District Council"
-  ],
-  "Unguja Urban/West": [
-    "Urban District Council",
-    "West District Council"
-  ]
+ 
 };
 
 // Helper function to validate region
