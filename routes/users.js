@@ -3,6 +3,12 @@ const User = require('../models/User');
 const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
 const { assignUnassignedSubmissionsToJudge } = require('../utils/judgeAssignment');
+const {
+  buildUserQueryForAdmin,
+  canAdminAccessUser,
+  adminCanRegisterStakeholder,
+  getAdminScope
+} = require('../utils/adminScope');
 
 const router = express.Router();
 
@@ -18,6 +24,15 @@ router.get('/', async (req, res) => {
     const { role, status, search } = req.query;
     
     let query = {};
+
+    // Admin scope: filter users by level/region/council
+    if (req.user.role === 'admin') {
+      const scopeQuery = buildUserQueryForAdmin(req.user);
+      if (Object.keys(scopeQuery).length > 0) {
+        query.$and = query.$and || [];
+        query.$and.push(scopeQuery);
+      }
+    }
     
     if (role) {
       query.role = role;
@@ -28,11 +43,18 @@ router.get('/', async (req, res) => {
     }
     
     if (search) {
-      query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { username: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } }
-      ];
+      const searchClause = {
+        $or: [
+          { name: { $regex: search, $options: 'i' } },
+          { username: { $regex: search, $options: 'i' } },
+          { email: { $regex: search, $options: 'i' } }
+        ]
+      };
+      if (query.$and) {
+        query.$and.push(searchClause);
+      } else {
+        query.$or = searchClause.$or;
+      }
     }
 
     const users = await User.find(query).select('-password').sort({ createdAt: -1 });
@@ -78,6 +100,14 @@ router.get('/:id', async (req, res) => {
       });
     }
 
+    // Admin scope: only allow viewing users in their scope
+    if (req.user.role === 'admin' && !canAdminAccessUser(req.user, user)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to view this user'
+      });
+    }
+
     // Log user detail view
     await logger.logAdminAction(
       'Admin viewed user details',
@@ -110,7 +140,7 @@ router.get('/:id', async (req, res) => {
 // @access  Private (Admin/Superadmin)
 router.post('/', async (req, res) => {
   try {
-    const userData = req.body;
+    const userData = { ...req.body };
 
     // Validate required fields
     if (!userData.password || userData.password.length < 6) {
@@ -118,6 +148,46 @@ router.post('/', async (req, res) => {
         success: false,
         message: 'Password is required and must be at least 6 characters'
       });
+    }
+
+    // Only superadmin can create admin users
+    if (userData.role === 'admin' && req.user.role !== 'superadmin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only superadmin can create admin users'
+      });
+    }
+
+    // Only national admin or superadmin can create stakeholders
+    if (userData.role === 'stakeholder' && !adminCanRegisterStakeholder(req.user)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only national admin can register stakeholders'
+      });
+    }
+
+    // Apply admin scope: enforce location for teachers and judges created by council/regional admins
+    const scope = getAdminScope(req.user);
+    if (scope && userData.role === 'teacher') {
+      if (scope.level === 'Council') {
+        userData.region = scope.region;
+        userData.council = scope.council;
+      } else if (scope.level === 'Regional') {
+        userData.region = scope.region;
+        // Council can be set by regional admin (any council in region)
+        if (!userData.council) userData.council = null;
+      }
+    }
+    if (scope && userData.role === 'judge') {
+      if (scope.level === 'Council') {
+        userData.assignedLevel = 'Council';
+        userData.assignedRegion = scope.region;
+        userData.assignedCouncil = scope.council;
+      } else if (scope.level === 'Regional') {
+        userData.assignedLevel = 'Regional';
+        userData.assignedRegion = scope.region;
+        userData.assignedCouncil = null;
+      }
     }
 
     // Check if user already exists
@@ -185,6 +255,12 @@ router.post('/', async (req, res) => {
     res.status(201).json(response);
   } catch (error) {
     console.error('Create user error:', error);
+    if (error.message && error.message.includes('admin already exists')) {
+      return res.status(400).json({
+        success: false,
+        message: 'An admin already exists for this level and area'
+      });
+    }
     res.status(500).json({
       success: false,
       message: error.message || 'Server error'
@@ -207,9 +283,49 @@ router.put('/:id', async (req, res) => {
       });
     }
 
+    // Admin scope: only allow updating users in their scope
+    if (req.user.role === 'admin' && !canAdminAccessUser(req.user, originalUser)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to update this user'
+      });
+    }
+
+    // Prevent admin from changing user to admin (only superadmin can)
+    const updateData = { ...req.body };
+    if (req.user.role === 'admin' && updateData.role === 'admin') {
+      delete updateData.role;
+    }
+    if (req.user.role === 'admin' && updateData.role === 'stakeholder' && !adminCanRegisterStakeholder(req.user)) {
+      delete updateData.role;
+    }
+
+    // Enforce scope when admin updates teacher/judge location (use target role)
+    const scope = getAdminScope(req.user);
+    const targetRole = updateData.role !== undefined ? updateData.role : originalUser.role;
+    if (scope && targetRole === 'teacher') {
+      if (scope.level === 'Council') {
+        updateData.region = scope.region;
+        updateData.council = scope.council;
+      } else if (scope.level === 'Regional') {
+        updateData.region = scope.region;
+      }
+    }
+    if (scope && targetRole === 'judge') {
+      if (scope.level === 'Council') {
+        updateData.assignedLevel = 'Council';
+        updateData.assignedRegion = scope.region;
+        updateData.assignedCouncil = scope.council;
+      } else if (scope.level === 'Regional') {
+        updateData.assignedLevel = 'Regional';
+        updateData.assignedRegion = scope.region;
+        updateData.assignedCouncil = null;
+      }
+    }
+
     const user = await User.findByIdAndUpdate(
       req.params.id,
-      req.body,
+      updateData,
       { new: true, runValidators: true }
     ).select('-password');
 

@@ -7,6 +7,7 @@ const notificationService = require('../services/notificationService');
 const { assignJudgeToSubmission, manuallyAssignSubmission, getEligibleJudges, getAssignedJudge } = require('../utils/judgeAssignment');
 const User = require('../models/User');
 const { cacheMiddleware, invalidateCacheOnChange } = require('../middleware/cache');
+const { buildSubmissionQueryForAdmin, canAdminAccessSubmission, canAdminAccessUser } = require('../utils/adminScope');
 
 const router = express.Router();
 
@@ -90,8 +91,13 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
     } else if (req.user.role === 'teacher') {
       // Teachers only see their own submissions
       query.teacherId = req.user._id;
+    } else if (req.user.role === 'admin') {
+      // Admin scope: council/regional/national - filter submissions by level and location
+      const scopeQuery = buildSubmissionQueryForAdmin(req.user);
+      Object.assign(query, scopeQuery);
     }
-    
+    // Superadmin: no filter, sees all
+
     // Apply additional filters (but don't override role-based filters)
     if (status) {
       query.status = status;
@@ -223,6 +229,14 @@ router.get('/:id', async (req, res) => {
         'warning'
       );
       
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to access this submission'
+      });
+    }
+
+    // Admin scope: only allow viewing submissions in their scope
+    if (req.user.role === 'admin' && !canAdminAccessSubmission(req.user, submission)) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to access this submission'
@@ -451,6 +465,14 @@ router.put('/:id', invalidateCacheOnChange('cache:/api/submissions*'), async (re
       });
     }
 
+    // Admin scope: only allow updating submissions in their scope
+    if (req.user.role === 'admin' && !canAdminAccessSubmission(req.user, submission)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to update this submission'
+      });
+    }
+
     const updatedSubmission = await Submission.findByIdAndUpdate(
       req.params.id,
       req.body,
@@ -534,6 +556,14 @@ router.delete('/:id', authorize('admin', 'superadmin'), invalidateCacheOnChange(
       });
     }
 
+    // Admin scope: only allow deleting submissions in their scope
+    if (req.user.role === 'admin' && !canAdminAccessSubmission(req.user, submission)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to delete this submission'
+      });
+    }
+
     // Log submission deletion before deleting
     await logger.logAdminAction(
       'Admin deleted submission',
@@ -571,7 +601,17 @@ router.delete('/:id', authorize('admin', 'superadmin'), invalidateCacheOnChange(
 // @access  Private (Admin, Superadmin, Judge)
 router.get('/leaderboard/council', async (req, res) => {
   try {
-    const { year, region, council, areaOfFocus, includeDisqualified = false } = req.query;
+    let { year, region, council, areaOfFocus, includeDisqualified = false } = req.query;
+
+    // Admin scope: enforce region/council from scope for council/regional admins
+    if (req.user.role === 'admin') {
+      if (req.user.adminLevel === 'Council' && req.user.adminRegion && req.user.adminCouncil) {
+        region = req.user.adminRegion;
+        council = req.user.adminCouncil;
+      } else if (req.user.adminLevel === 'Regional' && req.user.adminRegion) {
+        region = req.user.adminRegion;
+      }
+    }
 
     // Build query for council level submissions
     const query = {
@@ -648,7 +688,12 @@ router.get('/leaderboard/council', async (req, res) => {
 // @access  Private (Admin, Superadmin, Judge)
 router.get('/leaderboard/regional', async (req, res) => {
   try {
-    const { year, region, areaOfFocus, includeDisqualified = false } = req.query;
+    let { year, region, areaOfFocus, includeDisqualified = false } = req.query;
+
+    // Admin scope: enforce region from scope for regional admins
+    if (req.user.role === 'admin' && req.user.adminLevel === 'Regional' && req.user.adminRegion) {
+      region = req.user.adminRegion;
+    }
 
     const query = {
       level: 'Regional',
@@ -784,6 +829,20 @@ router.get('/leaderboard/national', async (req, res) => {
 // @access  Private (Admin, Superadmin)
 router.get('/:id/eligible-judges', authorize('admin', 'superadmin'), async (req, res) => {
   try {
+    const submission = await Submission.findById(req.params.id);
+    if (!submission) {
+      return res.status(404).json({
+        success: false,
+        message: 'Submission not found'
+      });
+    }
+    if (req.user.role === 'admin' && !canAdminAccessSubmission(req.user, submission)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to access this submission'
+      });
+    }
+
     const result = await getEligibleJudges(req.params.id);
     
     if (!result.success) {
@@ -818,6 +877,12 @@ router.get('/:id/assigned-judge', authorize('admin', 'superadmin'), async (req, 
       return res.status(404).json({
         success: false,
         message: 'Submission not found'
+      });
+    }
+    if (req.user.role === 'admin' && !canAdminAccessSubmission(req.user, submission)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to access this submission'
       });
     }
 
@@ -862,6 +927,34 @@ router.post('/:id/assign-judge', authorize('admin', 'superadmin'), async (req, r
       return res.status(400).json({
         success: false,
         message: 'Judge ID is required'
+      });
+    }
+
+    const submission = await Submission.findById(req.params.id);
+    if (!submission) {
+      return res.status(404).json({
+        success: false,
+        message: 'Submission not found'
+      });
+    }
+    if (req.user.role === 'admin' && !canAdminAccessSubmission(req.user, submission)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to access this submission'
+      });
+    }
+
+    const judge = await User.findById(judgeId);
+    if (!judge) {
+      return res.status(404).json({
+        success: false,
+        message: 'Judge not found'
+      });
+    }
+    if (req.user.role === 'admin' && !canAdminAccessUser(req.user, judge)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to assign this judge'
       });
     }
 

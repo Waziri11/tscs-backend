@@ -2,6 +2,7 @@ const express = require('express');
 const Feedback = require('../models/Feedback');
 const User = require('../models/User');
 const { protect, authorize } = require('../middleware/auth');
+const { buildUserQueryForAdmin, canAdminAccessUser } = require('../utils/adminScope');
 
 const router = express.Router();
 
@@ -81,6 +82,19 @@ router.get('/', async (req, res) => {
     const { type, status, search } = req.query;
     
     let query = {};
+
+    // Admin scope: filter feedbacks to only those from users in admin's scope
+    if (req.user.role === 'admin') {
+      const userScopeQuery = buildUserQueryForAdmin(req.user, { includeStakeholders: false });
+      if (Object.keys(userScopeQuery).length > 0) {
+        const scopeUserIds = await User.find(userScopeQuery).select('_id').lean();
+        const ids = scopeUserIds.map(u => u._id);
+        query.userId = { $in: ids };
+        if (ids.length === 0) {
+          query._id = { $in: [] }; // No users in scope = no feedbacks
+        }
+      }
+    }
     
     if (type) {
       query.type = type;
@@ -122,13 +136,20 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const feedback = await Feedback.findById(req.params.id)
-      .populate('userId', 'name email role')
+      .populate('userId', 'name email role region council assignedLevel assignedRegion assignedCouncil')
       .populate('respondedBy', 'name email');
 
     if (!feedback) {
       return res.status(404).json({
         success: false,
         message: 'Feedback not found'
+      });
+    }
+
+    if (req.user.role === 'admin' && feedback.userId && !canAdminAccessUser(req.user, feedback.userId)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to view this feedback'
       });
     }
 
@@ -156,6 +177,14 @@ router.patch('/:id/status', async (req, res) => {
       return res.status(400).json({
         success: false,
         message: 'Valid status is required (new, read, or resolved)'
+      });
+    }
+
+    const existingFeedback = await Feedback.findById(req.params.id).populate('userId', 'role region council assignedLevel assignedRegion assignedCouncil');
+    if (existingFeedback && req.user.role === 'admin' && existingFeedback.userId && !canAdminAccessUser(req.user, existingFeedback.userId)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to update this feedback'
       });
     }
 
@@ -197,6 +226,14 @@ router.patch('/:id/response', async (req, res) => {
       return res.status(400).json({
         success: false,
         message: 'Response is required'
+      });
+    }
+
+    const existingFeedback = await Feedback.findById(req.params.id).populate('userId', 'role region council assignedLevel assignedRegion assignedCouncil');
+    if (existingFeedback && req.user.role === 'admin' && existingFeedback.userId && !canAdminAccessUser(req.user, existingFeedback.userId)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to respond to this feedback'
       });
     }
 
