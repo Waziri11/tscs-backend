@@ -212,6 +212,11 @@ router.post('/login', failedLoginLockout, async (req, res) => {
           assignedCouncil: user.assignedCouncil,
           specialization: user.specialization,
           experience: user.experience
+        }),
+        ...(user.role === 'admin' && {
+          adminLevel: user.adminLevel,
+          adminRegion: user.adminRegion,
+          adminCouncil: user.adminCouncil
         })
       }
     });

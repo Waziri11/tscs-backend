@@ -71,5 +71,15 @@ const authorize = (...roles) => {
   };
 };
 
-module.exports = { protect, authorize };
+// Only national admin or superadmin (for competitions, rounds, leaderboard finalize/advance)
+const authorizeNationalAdminOrSuperadmin = (req, res, next) => {
+  if (req.user.role === 'superadmin') return next();
+  if (req.user.role === 'admin' && req.user.adminLevel === 'National') return next();
+  return res.status(403).json({
+    success: false,
+    message: 'Only national admin or superadmin can perform this action'
+  });
+};
+
+module.exports = { protect, authorize, authorizeNationalAdminOrSuperadmin };
 

@@ -1,6 +1,6 @@
 const express = require('express');
 const TieBreaking = require('../models/TieBreaking');
-const { protect, authorize } = require('../middleware/auth');
+const { protect, authorize, authorizeNationalAdminOrSuperadmin } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
 
 const router = express.Router();
@@ -173,7 +173,7 @@ router.post('/:id/vote', authorize('judge'), async (req, res) => {
 // @route   POST /api/tie-breaking/:id/resolve
 // @desc    Resolve a tie-breaking round by counting votes (admin/superadmin only)
 // @access  Private (Admin/Superadmin)
-router.post('/:id/resolve', authorize('admin', 'superadmin'), async (req, res) => {
+router.post('/:id/resolve', authorize('admin', 'superadmin'), authorizeNationalAdminOrSuperadmin, async (req, res) => {
   try {
     const tieBreak = await TieBreaking.findById(req.params.id)
       .populate('submissionIds', 'averageScore');
@@ -267,7 +267,7 @@ router.post('/:id/resolve', authorize('admin', 'superadmin'), async (req, res) =
 // @route   POST /api/tie-breaking
 // @desc    Create tie-breaking round (admin/superadmin only)
 // @access  Private (Admin/Superadmin)
-router.post('/', authorize('admin', 'superadmin'), async (req, res) => {
+router.post('/', authorize('admin', 'superadmin'), authorizeNationalAdminOrSuperadmin, async (req, res) => {
   try {
     const tieBreak = await TieBreaking.create(req.body);
 

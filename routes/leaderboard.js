@@ -1,5 +1,5 @@
 const express = require('express');
-const { protect, authorize } = require('../middleware/auth');
+const { protect, authorize, authorizeNationalAdminOrSuperadmin } = require('../middleware/auth');
 const { cacheMiddleware, invalidateCacheOnChange } = require('../middleware/cache');
 const Leaderboard = require('../models/Leaderboard');
 const { getLeaderboard, getLeaderboards, getAvailableLocations, generateLocationKey } = require('../utils/leaderboardUtils');
@@ -164,7 +164,7 @@ router.get('/:id', cacheMiddleware(30), async (req, res) => {
 // @route   POST /api/leaderboard/:id/finalize
 // @desc    Finalize a leaderboard (Admin/Superadmin only)
 // @access  Private (Admin, Superadmin)
-router.post('/:id/finalize', authorize('admin', 'superadmin'), invalidateCacheOnChange('cache:/api/leaderboard*'), async (req, res) => {
+router.post('/:id/finalize', authorize('admin', 'superadmin'), authorizeNationalAdminOrSuperadmin, invalidateCacheOnChange('cache:/api/leaderboard*'), async (req, res) => {
   try {
     const leaderboard = await Leaderboard.findById(req.params.id);
 
@@ -214,7 +214,7 @@ router.post('/:id/finalize', authorize('admin', 'superadmin'), invalidateCacheOn
 // @route   POST /api/leaderboard/:year/:level/:areaOfFocus/advance
 // @desc    Advance submissions to next level for a specific areaOfFocus
 // @access  Private (Admin, Superadmin)
-router.post('/:year/:level/:areaOfFocus/advance', authorize('admin', 'superadmin'), invalidateCacheOnChange('cache:/api/leaderboard*'), async (req, res) => {
+router.post('/:year/:level/:areaOfFocus/advance', authorize('admin', 'superadmin'), authorizeNationalAdminOrSuperadmin, invalidateCacheOnChange('cache:/api/leaderboard*'), async (req, res) => {
   try {
     const { year, level, areaOfFocus } = req.params;
     const { locationKey, global } = req.body;

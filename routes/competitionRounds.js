@@ -5,7 +5,7 @@ const Evaluation = require('../models/Evaluation');
 const User = require('../models/User');
 const Quota = require('../models/Quota');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
-const { protect, authorize } = require('../middleware/auth');
+const { protect, authorize, authorizeNationalAdminOrSuperadmin } = require('../middleware/auth');
 const { cacheMiddleware, invalidateCacheOnChange } = require('../middleware/cache');
 const { emitRoundStateChange, emitLeaderboardModeChange } = require('../utils/socketManager');
 
@@ -128,8 +128,9 @@ router.get('/active', cacheMiddleware(60), async (req, res) => {
   }
 });
 
-// All other routes require superadmin or admin role (admins can manage rounds)
+// All other routes require superadmin or national admin (only national admin can manage rounds)
 router.use(authorize('superadmin', 'admin'));
+router.use(authorizeNationalAdminOrSuperadmin);
 
 // Helper: Get next level
 const getNextLevel = (currentLevel) => {
@@ -1147,7 +1148,7 @@ router.post('/:id/extend', async (req, res) => {
 // @route   PATCH /api/competition-rounds/:id/leaderboard-visibility
 // @desc    Toggle leaderboard visibility between live and frozen
 // @access  Private (Superadmin)
-router.patch('/:id/leaderboard-visibility', authorize('admin', 'superadmin'), async (req, res) => {
+router.patch('/:id/leaderboard-visibility', async (req, res) => {
   try {
     const { visibility } = req.body;
     if (!['live', 'frozen'].includes(visibility)) {
