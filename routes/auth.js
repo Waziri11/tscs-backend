@@ -7,7 +7,7 @@ const { protect } = require('../middleware/auth');
 const OTPService = require('../services/otpService');
 const emailService = require('../services/emailService');
 const notificationService = require('../services/notificationService');
-const { authLimiter } = require('../middleware/rateLimiter');
+const { failedLoginLockout, recordFailedAttempt, clearFailedAttempts } = require('../services/failedLoginTracker');
 
 // Safely import logger - if it fails, app should still work
 let logger = null;
@@ -40,7 +40,7 @@ const generateToken = (id) => {
 // @route   POST /api/auth/login
 // @desc    Login user
 // @access  Public
-router.post('/login', authLimiter, async (req, res) => {
+router.post('/login', failedLoginLockout, async (req, res) => {
   try {
     const { email, password } = req.body;
 
@@ -66,7 +66,7 @@ router.post('/login', authLimiter, async (req, res) => {
           'warning'
         ).catch(() => {}); // Silently fail
       }
-      
+      await recordFailedAttempt(req.ip);
       return res.status(401).json({
         success: false,
         message: 'Invalid email or password'
@@ -106,7 +106,7 @@ router.post('/login', authLimiter, async (req, res) => {
           'warning'
         ).catch(() => {}); // Silently fail
       }
-
+      await recordFailedAttempt(req.ip);
       return res.status(401).json({
         success: false,
         message: 'Invalid email or password'
@@ -174,6 +174,7 @@ router.post('/login', authLimiter, async (req, res) => {
 
     // Generate token
     const token = generateToken(user._id);
+    await clearFailedAttempts(req.ip);
 
     // Log successful login (non-blocking)
     if (logger) {
@@ -255,7 +256,7 @@ const otpVerifyLimiter = rateLimit({
 // @route   POST /api/auth/register
 // @desc    Register new user (teacher) - sends OTP for email verification
 // @access  Public
-router.post('/register', authLimiter, async (req, res) => {
+router.post('/register', async (req, res) => {
   try {
     const {
       firstName,

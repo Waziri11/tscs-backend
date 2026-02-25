@@ -74,19 +74,6 @@ const generalLimiter = createRateLimiter({
   }
 });
 
-// Auth endpoints rate limiter - 5 requests per 15 minutes (stricter)
-const authLimiter = createRateLimiter({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // Limit each IP to 5 requests per windowMs
-  message: {
-    success: false,
-    message: 'Too many authentication attempts, please try again later.'
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-  skipSuccessfulRequests: false,
-});
-
 // Upload endpoints rate limiter - 20 requests per hour
 const uploadLimiter = createRateLimiter({
   windowMs: 60 * 60 * 1000, // 1 hour
@@ -105,7 +92,6 @@ const uploadLimiter = createRateLimiter({
     const store = await createRedisStore();
     if (store) {
       generalLimiter.store = store;
-      authLimiter.store = store;
       uploadLimiter.store = store;
       console.log('Rate limiting upgraded to Redis store');
     } else {
@@ -118,7 +104,6 @@ const uploadLimiter = createRateLimiter({
 
 module.exports = {
   generalLimiter,
-  authLimiter,
   uploadLimiter
 };
 
