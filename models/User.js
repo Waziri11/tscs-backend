@@ -102,6 +102,19 @@ const userSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  adminLevel: {
+    type: String,
+    enum: ['Council', 'Regional', 'National', null],
+    default: null
+  },
+  adminRegion: {
+    type: String,
+    trim: true
+  },
+  adminCouncil: {
+    type: String,
+    trim: true
+  },
   // Superadmin specific fields
   permissions: {
     type: [String],
@@ -126,6 +139,39 @@ userSchema.pre('save', async function(next) {
   }
 });
 
+// Enforce admin uniqueness: one admin per level+area
+userSchema.pre('save', async function(next) {
+  if (this.role !== 'admin' || !this.adminLevel) return next();
+  if (!this.isNew && !this.isModified('adminLevel') && !this.isModified('adminRegion') && !this.isModified('adminCouncil')) return next();
+
+  const UserModel = this.constructor;
+  const query = {
+    role: 'admin',
+    adminLevel: this.adminLevel,
+    _id: { $ne: this._id }
+  };
+
+  if (this.adminLevel === 'Council') {
+    if (!this.adminRegion || !this.adminCouncil) {
+      return next(new Error('Council admin must have adminRegion and adminCouncil'));
+    }
+    query.adminRegion = this.adminRegion;
+    query.adminCouncil = this.adminCouncil;
+  } else if (this.adminLevel === 'Regional') {
+    if (!this.adminRegion) {
+      return next(new Error('Regional admin must have adminRegion'));
+    }
+    query.adminRegion = this.adminRegion;
+  }
+  // National: no region/council filter - one slot for entire system
+
+  const existing = await UserModel.findOne(query);
+  if (existing) {
+    return next(new Error('An admin already exists for this level and area'));
+  }
+  next();
+});
+
 // Method to compare password
 userSchema.methods.comparePassword = async function(candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
@@ -145,6 +191,7 @@ userSchema.index({ role: 1, assignedLevel: 1, assignedRegion: 1, assignedCouncil
 // Indexes for stakeholder teacher region queries
 userSchema.index({ role: 1, status: 1, region: 1 });
 userSchema.index({ role: 1, status: 1, region: 1, council: 1 });
+userSchema.index({ role: 1, adminLevel: 1, adminRegion: 1, adminCouncil: 1 }, { sparse: true });
 
 module.exports = mongoose.model('User', userSchema);
 
