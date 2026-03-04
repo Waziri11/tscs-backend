@@ -2,11 +2,28 @@ const express = require('express');
 const User = require('../models/User');
 const Submission = require('../models/Submission');
 const Evaluation = require('../models/Evaluation');
+const Competition = require('../models/Competition');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
 const { protect, authorize } = require('../middleware/auth');
 const { cacheMiddleware } = require('../middleware/cache');
 const { generalLimiter } = require('../middleware/rateLimiter');
 const { isValidRegion, isValidCouncil } = require('../data/locations');
+
+// Helper: extract all unique area-of-focus names from a Competition document
+const getAreasOfFocusFromCompetition = (competition) => {
+  if (!competition) return [];
+  const areasSet = new Set();
+  for (const category of competition.categories) {
+    for (const cls of category.classes) {
+      for (const subject of cls.subjects) {
+        for (const area of subject.areasOfFocus) {
+          if (area.name) areasSet.add(area.name);
+        }
+      }
+    }
+  }
+  return Array.from(areasSet).sort();
+};
 
 const router = express.Router();
 
@@ -63,12 +80,13 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(120), as
     const skip = (page - 1) * limit;
 
     // Run initial queries in parallel for better performance
-    const [totalTeachers, totalSubmissions, totalJudges, availableAreasOfFocus] = await Promise.all([
+    const [totalTeachers, totalSubmissions, totalJudges, competition] = await Promise.all([
       User.countDocuments(teacherMatchQuery).maxTimeMS(30000),
       Submission.countDocuments(submissionMatchQuery).maxTimeMS(30000),
       User.countDocuments({ role: 'judge', status: 'active' }).maxTimeMS(30000),
-      Submission.distinct('areaOfFocus', { year }).maxTimeMS(30000)
+      Competition.findOne({ year }).maxTimeMS(30000)
     ]);
+    const availableAreasOfFocus = getAreasOfFocusFromCompetition(competition);
 
     // Dynamic location stats based on filter level (with pagination)
     let locationStats = [];
@@ -84,13 +102,13 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(120), as
         { $project: { name: '$_id', submissionsCount: 1, _id: 0 } },
         { $sort: { submissionsCount: -1 } }
       ]).option({ maxTimeMS: 30000, allowDiskUse: true });
-      
+
       locationStatsTotalCount = byAreaOfFocus.length;
       locationStats = byAreaOfFocus.slice(skip, skip + limit);
     } else if (region) {
       // Region selected: show councils within that region
       locationStatsType = 'councils';
-      
+
       // Run queries in parallel
       const [teachersByCouncil, submissionsByCouncil] = await Promise.all([
         User.aggregate([
@@ -106,7 +124,7 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(120), as
       ]);
 
       const submissionsMap = new Map(submissionsByCouncil.map(item => [item.name, item.submissionsCount]));
-      
+
       const allCouncilStats = teachersByCouncil
         .map(({ name, teachersCount }) => ({
           name: name || 'Unknown',
@@ -114,13 +132,13 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(120), as
           submissionsCount: submissionsMap.get(name) || 0
         }))
         .sort((a, b) => b.teachersCount - a.teachersCount);
-      
+
       locationStatsTotalCount = allCouncilStats.length;
       locationStats = allCouncilStats.slice(skip, skip + limit);
     } else {
       // No region filter: show all regions
       locationStatsType = 'regions';
-      
+
       // Run queries in parallel
       const [allTeachersByRegion, submissionsByRegion] = await Promise.all([
         User.aggregate([
@@ -136,7 +154,7 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(120), as
       ]);
 
       const submissionsMap = new Map(submissionsByRegion.map(item => [item.name, item.submissionsCount]));
-      
+
       const allRegionStats = allTeachersByRegion
         .map(({ name, teachersCount }) => ({
           name: name || 'Unknown',
@@ -144,7 +162,7 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(120), as
           submissionsCount: submissionsMap.get(name) || 0
         }))
         .sort((a, b) => b.teachersCount - a.teachersCount);
-      
+
       locationStatsTotalCount = allRegionStats.length;
       locationStats = allRegionStats.slice(skip, skip + limit);
     }
@@ -249,7 +267,7 @@ router.get('/stats', protect, authorize('stakeholder'), cacheMiddleware(120), as
     const isProduction = process.env.NODE_ENV === 'production';
     res.status(500).json({
       success: false,
-      message: isProduction 
+      message: isProduction
         ? 'An error occurred while processing your request. Please try again later.'
         : (error.message || 'Server error')
     });
@@ -306,11 +324,11 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), cacheMiddlew
       disqualifiedCount,
       byRegion,
       byCouncil,
-      availableAreasOfFocus
+      competition_aof
     ] = await Promise.all([
       // Total submissions
       Submission.countDocuments(matchQuery).maxTimeMS(30000),
-      
+
       // Total distinct teachers
       Submission.aggregate([
         { $match: matchQuery },
@@ -376,14 +394,10 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), cacheMiddlew
         { $sort: { count: -1 } }
       ]).option({ maxTimeMS: 30000, allowDiskUse: true }) : Promise.resolve([]),
 
-      // Available areas of focus for the year
-      Submission.aggregate([
-        { $match: { year } },
-        { $group: { _id: '$areaOfFocus' } },
-        { $project: { areaOfFocus: '$_id', _id: 0 } },
-        { $sort: { areaOfFocus: 1 } }
-      ]).option({ maxTimeMS: 30000, allowDiskUse: true }).then(result => result.map(r => r.areaOfFocus))
+      // Available areas of focus from Competition model
+      Competition.findOne({ year }).maxTimeMS(30000)
     ]);
+    const availableAreasOfFocus = getAreasOfFocusFromCompetition(competition_aof);
 
     // Determine competitionBreakdown based on filters
     let competitionBreakdown;
@@ -424,7 +438,7 @@ router.get('/submissions-stats', protect, authorize('stakeholder'), cacheMiddlew
     const isProduction = process.env.NODE_ENV === 'production';
     res.status(500).json({
       success: false,
-      message: isProduction 
+      message: isProduction
         ? 'An error occurred while processing your request. Please try again later.'
         : (error.message || 'Server error')
     });
@@ -478,7 +492,7 @@ router.get('/competition-stats', protect, authorize('stakeholder'), cacheMiddlew
       byLevel,
       byAreaOfFocus,
       byRegion,
-      availableAreasOfFocus
+      competition_aof2
     ] = await Promise.all([
       // Total submissions
       Submission.countDocuments(matchQuery).maxTimeMS(30000),
@@ -534,14 +548,10 @@ router.get('/competition-stats', protect, authorize('stakeholder'), cacheMiddlew
         { $sort: { total: -1 } }
       ]).option({ maxTimeMS: 30000, allowDiskUse: true }) : Promise.resolve([]),
 
-      // Available areas of focus for the year
-      Submission.aggregate([
-        { $match: { year } },
-        { $group: { _id: '$areaOfFocus' } },
-        { $project: { areaOfFocus: '$_id', _id: 0 } },
-        { $sort: { areaOfFocus: 1 } }
-      ]).option({ maxTimeMS: 30000, allowDiskUse: true }).then(result => result.map(r => r.areaOfFocus))
+      // Available areas of focus from Competition model
+      Competition.findOne({ year }).maxTimeMS(30000)
     ]);
+    const availableAreasOfFocus = getAreasOfFocusFromCompetition(competition_aof2);
 
     const passRate = totalSubmissions > 0 ? Math.round((promotedCount / totalSubmissions) * 100 * 100) / 100 : 0;
 
@@ -565,7 +575,7 @@ router.get('/competition-stats', protect, authorize('stakeholder'), cacheMiddlew
     const isProduction = process.env.NODE_ENV === 'production';
     res.status(500).json({
       success: false,
-      message: isProduction 
+      message: isProduction
         ? 'An error occurred while processing your request. Please try again later.'
         : (error.message || 'Server error')
     });
@@ -616,7 +626,7 @@ router.get('/teachers-by-region', protect, authorize('stakeholder'), cacheMiddle
     const isProduction = process.env.NODE_ENV === 'production';
     res.status(500).json({
       success: false,
-      message: isProduction 
+      message: isProduction
         ? 'An error occurred while processing your request. Please try again later.'
         : (error.message || 'Server error')
     });

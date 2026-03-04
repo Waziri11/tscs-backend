@@ -276,5 +276,48 @@ router.put('/:year/evaluation-criteria/:category/:class/:subject/:area', authori
   }
 });
 
+// @route   GET /api/competitions/:year/areas-of-focus
+// @desc    Get all unique areas of focus for a competition year (from the Competition model)
+// @access  Private
+router.get('/:year/areas-of-focus', async (req, res) => {
+  try {
+    const competition = await Competition.findOne({ year: parseInt(req.params.year) });
+
+    if (!competition) {
+      return res.status(404).json({
+        success: false,
+        message: 'Competition not found'
+      });
+    }
+
+    // Extract all unique area of focus names from the competition structure
+    const areasSet = new Set();
+    for (const category of competition.categories) {
+      for (const cls of category.classes) {
+        for (const subject of cls.subjects) {
+          for (const area of subject.areasOfFocus) {
+            if (area.name) {
+              areasSet.add(area.name);
+            }
+          }
+        }
+      }
+    }
+
+    const areasOfFocus = Array.from(areasSet).sort();
+
+    res.json({
+      success: true,
+      areasOfFocus
+    });
+  } catch (error) {
+    console.error('Get areas of focus error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
 module.exports = router;
 
