@@ -12,6 +12,12 @@ const {
   markRoundEndedIfComplete
 } = require('../utils/roundJudgementService');
 const { canAdminAccessSubmission } = require('../utils/adminScope');
+const Competition = require('../models/Competition');
+const {
+  getEvaluationCriteriaFromCompetition,
+  normalizeStoredCriteria,
+  validateScoresAgainstCriteria
+} = require('../utils/evaluationCriteria');
 
 const router = express.Router();
 
@@ -210,9 +216,37 @@ router.post('/', authorize('judge'), invalidateCacheOnChange(['cache:/api/leader
       }
     }
 
-    const scoreValues = Object.values(scores).map((score) => Number(score) || 0);
-    const totalScore = scoreValues.reduce((sum, score) => sum + score, 0);
-    const averageScore = scoreValues.length > 0 ? totalScore / scoreValues.length : 0;
+    const competition = await Competition.findOne({ year: submission.year });
+    const rawCriteria = getEvaluationCriteriaFromCompetition(
+      competition,
+      submission.category,
+      submission.class,
+      submission.subject,
+      submission.areaOfFocus
+    );
+    if (!rawCriteria || rawCriteria.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No evaluation criteria configured for this competition area'
+      });
+    }
+
+    const rawArr = Array.isArray(rawCriteria)
+      ? rawCriteria.map((x) => (x && typeof x.toObject === 'function' ? x.toObject() : { ...x }))
+      : [];
+    const criteriaNorm = normalizeStoredCriteria(rawArr);
+
+    const scoresPlain = { ...scores };
+    const verdict = validateScoresAgainstCriteria(scoresPlain, criteriaNorm);
+    if (!verdict.ok) {
+      return res.status(400).json({
+        success: false,
+        message: verdict.message
+      });
+    }
+
+    const totalScore = verdict.totalScore;
+    const averageScore = verdict.averageScore;
 
     const evaluation = await Evaluation.findOneAndUpdate(
       { roundId: round._id, submissionId, judgeId: req.user._id },
