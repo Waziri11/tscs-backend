@@ -7,11 +7,16 @@ const mongoose = require('mongoose');
  * At National level, multiple judges can evaluate the same submission (no assignment needed).
  */
 const submissionAssignmentSchema = new mongoose.Schema({
+  roundId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'CompetitionRound',
+    required: true,
+    index: true
+  },
   submissionId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Submission',
     required: true,
-    unique: true,
     index: true
   },
   judgeId: {
@@ -48,12 +53,12 @@ const submissionAssignmentSchema = new mongoose.Schema({
 });
 
 // Compound indexes for efficient queries
-submissionAssignmentSchema.index({ judgeId: 1, level: 1 });
-submissionAssignmentSchema.index({ submissionId: 1, judgeId: 1 });
-submissionAssignmentSchema.index({ level: 1, region: 1, council: 1 });
+submissionAssignmentSchema.index({ roundId: 1, judgeId: 1, level: 1 });
+submissionAssignmentSchema.index({ roundId: 1, submissionId: 1, judgeId: 1 }, { unique: true });
+submissionAssignmentSchema.index({ roundId: 1, level: 1, region: 1, council: 1 });
+submissionAssignmentSchema.index({ roundId: 1, submissionId: 1 });
 
 module.exports = mongoose.model('SubmissionAssignment', submissionAssignmentSchema);
-
 
 
 

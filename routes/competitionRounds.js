@@ -3,11 +3,20 @@ const CompetitionRound = require('../models/CompetitionRound');
 const Submission = require('../models/Submission');
 const Evaluation = require('../models/Evaluation');
 const User = require('../models/User');
-const Quota = require('../models/Quota');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
+const AreaLeaderboard = require('../models/AreaLeaderboard');
+const RoundChunk = require('../models/RoundChunk');
+const RoundSnapshot = require('../models/RoundSnapshot');
 const { protect, authorize, authorizeNationalAdminOrSuperadmin } = require('../middleware/auth');
 const { cacheMiddleware, invalidateCacheOnChange } = require('../middleware/cache');
 const { emitRoundStateChange, emitLeaderboardModeChange } = require('../utils/socketManager');
+const {
+  activateRoundWithSnapshot,
+  getAreaReadiness,
+  approveAreaLeaderboardAndPromote,
+  rebuildAreaLeaderboard,
+  ensureChunkAreasDoNotOverlap
+} = require('../utils/roundJudgementService');
 
 // Safely import logger
 let logger = null;
@@ -40,79 +49,17 @@ router.get('/active', cacheMiddleware(60), async (req, res) => {
       });
     }
 
-    // Fetch ALL active rounds (no filtering in query - let matching logic handle it)
-    const allRounds = await CompetitionRound.find({ status: 'active' })
-      .sort({ createdAt: -1 })
-      .limit(50);
+    // National single timeline per level:
+    // Judges should see the latest active round for their level,
+    // or latest ended round as fallback while finishing pending tasks.
+    const levelRounds = await CompetitionRound.find({
+      level: user.assignedLevel,
+      status: { $in: ['active', 'ended'] }
+    }).sort({ createdAt: -1 });
 
-    // Simple helper to normalize strings (handles null, undefined, empty strings)
-    const normalize = (str) => {
-      if (!str) return null;
-      return str.toString().trim().toLowerCase() || null;
-    };
-
-    const judgeLevel = user.assignedLevel;
-    const judgeRegion = normalize(user.assignedRegion);
-    const judgeCouncil = normalize(user.assignedCouncil);
-
-    // Find the best matching round using priority system
-    let bestRound = null;
-    let bestPriority = -1; // -1 means not eligible
-
-    for (const round of allRounds) {
-      const roundRegion = normalize(round.region);
-      const roundCouncil = normalize(round.council);
-      const isNationwide = !roundRegion && !roundCouncil;
-      
-      let priority = -1; // -1 means not eligible
-      
-      // Matching rules (in order of priority - higher number = better match)
-      
-      // Rule 1: Exact level + location match (highest priority = 100)
-      if (round.level === judgeLevel) {
-        if (judgeLevel === 'Council') {
-          // Council: exact region + council match
-          if (roundRegion === judgeRegion && roundCouncil === judgeCouncil) {
-            priority = 100;
-          }
-          // Council: region match, no specific council (all councils in region)
-          else if (roundRegion === judgeRegion && !roundCouncil) {
-            priority = 80;
-          }
-        } else if (judgeLevel === 'Regional') {
-          // Regional: exact region match, no council
-          if (roundRegion === judgeRegion && !roundCouncil) {
-            priority = 100;
-          }
-        } else if (judgeLevel === 'National') {
-          // National: must be nationwide
-          if (isNationwide) {
-            priority = 100;
-          }
-        }
-      }
-      
-      // Rule 2: Nationwide rounds (lower priority, but still eligible as fallback)
-      if (isNationwide && priority === -1) {
-        // Any judge can see nationwide rounds as fallback
-        if (judgeLevel === 'National') {
-          priority = 90; // National judges prefer nationwide
-        } else if (judgeLevel === 'Regional') {
-          priority = 50; // Regional judges can see nationwide
-        } else if (judgeLevel === 'Council') {
-          priority = 30; // Council judges can see nationwide (lowest priority)
-        }
-      }
-      
-      // Keep track of best match
-      if (priority > bestPriority) {
-        bestPriority = priority;
-        bestRound = round;
-      }
-    }
-
-    // Return the best matching round (or empty array)
-    const rounds = bestRound ? [bestRound] : [];
+    const activeRound = levelRounds.find((round) => round.status === 'active') || null;
+    const endedRound = levelRounds.find((round) => round.status === 'ended') || null;
+    const rounds = activeRound ? [activeRound] : endedRound ? [endedRound] : [];
 
     res.json({
       success: true,
@@ -131,278 +78,6 @@ router.get('/active', cacheMiddleware(60), async (req, res) => {
 // All other routes require superadmin or national admin (only national admin can manage rounds)
 router.use(authorize('superadmin', 'admin'));
 router.use(authorizeNationalAdminOrSuperadmin);
-
-// Helper: Get next level
-const getNextLevel = (currentLevel) => {
-  const levels = ['Council', 'Regional', 'National'];
-  const index = levels.indexOf(currentLevel);
-  return index >= 0 && index < levels.length - 1 ? levels[index + 1] : null;
-};
-
-// Helper: Check if all judges have completed evaluations for submissions at a level
-const checkAllJudgesCompleted = async (level, year, region = null, council = null) => {
-  try {
-    // Build query for submissions at this level
-    const submissionQuery = {
-      level,
-      year: parseInt(year),
-      status: { $in: ['submitted', 'evaluated'] }
-    };
-    
-    if (region) submissionQuery.region = region;
-    if (council) submissionQuery.council = council;
-
-    const submissions = await Submission.find(submissionQuery);
-    
-    if (submissions.length === 0) return { allCompleted: true, pendingCount: 0 };
-
-    // Get all judges assigned to this level
-    const judgeQuery = { role: 'judge', assignedLevel: level, status: 'active' };
-    if (level === 'Council' && region && council) {
-      judgeQuery.assignedRegion = region;
-      judgeQuery.assignedCouncil = council;
-    } else if (level === 'Regional' && region) {
-      judgeQuery.assignedRegion = region;
-    }
-    
-    const judges = await User.find(judgeQuery);
-    
-    if (judges.length === 0) {
-      return { allCompleted: false, pendingCount: submissions.length, reason: 'No judges assigned' };
-    }
-
-    // Check if each submission has been evaluated by all assigned judges
-    let pendingCount = 0;
-    for (const submission of submissions) {
-      const evaluations = await Evaluation.find({ submissionId: submission._id });
-      const evaluatedJudgeIds = evaluations.map(e => e.judgeId.toString());
-      
-      // Check if all judges have evaluated this submission
-      const allJudgesEvaluated = judges.every(judge => 
-        evaluatedJudgeIds.includes(judge._id.toString())
-      );
-      
-      if (!allJudgesEvaluated) {
-        pendingCount++;
-      }
-    }
-
-    return {
-      allCompleted: pendingCount === 0,
-      pendingCount,
-      totalSubmissions: submissions.length,
-      totalJudges: judges.length
-    };
-  } catch (error) {
-    console.error('Error checking judge completion:', error);
-    return { allCompleted: false, pendingCount: -1, error: error.message };
-  }
-};
-
-// Helper: Advance submissions for a specific round based on leaderboard and quota
-const advanceSubmissionsForRound = async (round, submissions) => {
-  try {
-    const nextLevel = getNextLevel(round.level);
-    if (!nextLevel) {
-      return { success: false, error: 'Already at top level' };
-    }
-
-    if (submissions.length === 0) {
-      return { success: false, error: 'No submissions found for this round' };
-    }
-
-    // Get quota for this level
-    const quotaDoc = await Quota.findOne({ year: round.year, level: round.level });
-    const quota = quotaDoc ? quotaDoc.quota : 0;
-
-    // Group submissions by location for quota application
-    // At council level, group by location AND area of focus for top 3 per area
-    const groups = {};
-    submissions.forEach(sub => {
-      let locationKey;
-      if (round.level === 'Council') {
-        // Group by region, council, AND area of focus for top 3 per area
-        locationKey = `${sub.region}::${sub.council}::${sub.areaOfFocus}`;
-      } else if (round.level === 'Regional') {
-        locationKey = sub.region;
-      } else {
-        locationKey = 'national';
-      }
-      
-      if (!groups[locationKey]) {
-        groups[locationKey] = [];
-      }
-      groups[locationKey].push(sub);
-    });
-
-    const toPromote = [];
-    const toEliminate = [];
-
-    // Process each location group based on leaderboard ranking
-    Object.keys(groups).forEach(locationKey => {
-      // Submissions are already sorted by averageScore descending
-      const locationSubs = groups[locationKey];
-
-      if (locationSubs.length <= quota) {
-        // All advance if within quota
-        toPromote.push(...locationSubs);
-      } else {
-        // Top N advance based on leaderboard ranking, rest eliminated
-        toPromote.push(...locationSubs.slice(0, quota));
-        toEliminate.push(...locationSubs.slice(quota));
-      }
-    });
-
-    // Update submissions using bulkWrite
-    const promotedIds = toPromote.map(sub => sub._id.toString());
-    const eliminatedIds = toEliminate.map(sub => sub._id.toString());
-
-    if (promotedIds.length > 0) {
-      await Submission.bulkWrite(
-        promotedIds.map(id => ({
-          updateOne: {
-            filter: { _id: id },
-            update: { $set: { level: nextLevel, status: 'promoted', roundId: round._id, promotedFromRoundId: round._id } }
-          }
-        }))
-      );
-    }
-    if (eliminatedIds.length > 0) {
-      await Submission.bulkWrite(
-        eliminatedIds.map(id => ({
-          updateOne: {
-            filter: { _id: id },
-            update: { $set: { status: 'eliminated', roundId: round._id } }
-          }
-        }))
-      );
-    }
-
-    return {
-      success: true,
-      promoted: promotedIds.length,
-      eliminated: eliminatedIds.length,
-      promotedIds,
-      eliminatedIds,
-      leaderboard: submissions.map((sub, index) => ({
-        rank: index + 1,
-        submissionId: sub._id.toString(),
-        teacherName: sub.teacherName,
-        averageScore: sub.averageScore || 0,
-        status: promotedIds.includes(sub._id.toString()) ? 'promoted' : 
-               eliminatedIds.includes(sub._id.toString()) ? 'eliminated' : sub.status
-      }))
-    };
-  } catch (error) {
-    console.error('Error advancing submissions for round:', error);
-    return { success: false, error: error.message };
-  }
-};
-
-// Helper: Advance submissions to next level based on quotas
-const advanceSubmissions = async (level, year, region = null, council = null) => {
-  try {
-    const nextLevel = getNextLevel(level);
-    if (!nextLevel) {
-      return { success: false, error: 'Already at top level' };
-    }
-
-    // Build query
-    const query = {
-      level,
-      year: parseInt(year),
-      status: { $in: ['submitted', 'evaluated'] }
-    };
-    
-    if (region) query.region = region;
-    if (council) query.council = council;
-
-    const submissions = await Submission.find(query)
-      .populate('teacherId', 'name email')
-      .sort({ averageScore: -1 });
-
-    if (submissions.length === 0) {
-      return { success: false, error: 'No submissions found' };
-    }
-
-    // Get quota for this level
-    const quotaDoc = await Quota.findOne({ year: parseInt(year), level });
-    const quota = quotaDoc ? quotaDoc.quota : 0;
-
-    // Group by location if Council or Regional level (Council groups by region::council::areaOfFocus)
-    const groups = {};
-    submissions.forEach(sub => {
-      let locationKey;
-      if (level === 'Council') {
-        locationKey = `${sub.region || 'unknown'}::${sub.council || 'unknown'}::${sub.areaOfFocus || 'unknown'}`;
-      } else if (level === 'Regional') {
-        locationKey = sub.region || 'unknown';
-      } else {
-        locationKey = 'national';
-      }
-      
-      if (!groups[locationKey]) {
-        groups[locationKey] = [];
-      }
-      groups[locationKey].push(sub);
-    });
-
-    const toPromote = [];
-    const toEliminate = [];
-
-    // Process each location group
-    Object.keys(groups).forEach(locationKey => {
-      const locationSubs = groups[locationKey].sort((a, b) => 
-        (b.averageScore || 0) - (a.averageScore || 0)
-      );
-
-      if (locationSubs.length <= quota) {
-        // All advance if within quota
-        toPromote.push(...locationSubs);
-      } else {
-        // Top N advance, rest eliminated
-        toPromote.push(...locationSubs.slice(0, quota));
-        toEliminate.push(...locationSubs.slice(quota));
-      }
-    });
-
-    // Update submissions using bulkWrite for atomicity
-    const promotedIds = toPromote.map(sub => sub._id.toString());
-    const eliminatedIds = toEliminate.map(sub => sub._id.toString());
-
-    if (promotedIds.length > 0) {
-      await Submission.bulkWrite(
-        promotedIds.map(id => ({
-          updateOne: {
-            filter: { _id: id },
-            update: { $set: { level: nextLevel, status: 'promoted' } }
-          }
-        }))
-      );
-    }
-    if (eliminatedIds.length > 0) {
-      await Submission.bulkWrite(
-        eliminatedIds.map(id => ({
-          updateOne: {
-            filter: { _id: id },
-            update: { $set: { status: 'eliminated' } }
-          }
-        }))
-      );
-    }
-
-    return {
-      success: true,
-      promoted: promotedIds.length,
-      eliminated: eliminatedIds.length,
-      promotedIds,
-      eliminatedIds
-    };
-  } catch (error) {
-    console.error('Error advancing submissions:', error);
-    return { success: false, error: error.message };
-  }
-};
 
 // @route   GET /api/competition-rounds
 // @desc    Get all competition rounds
@@ -462,6 +137,198 @@ router.get('/:id', async (req, res) => {
   }
 });
 
+// @route   GET /api/competition-rounds/:id/chunks
+// @desc    Get optional chunks for a round
+// @access  Private (Superadmin/National admin)
+router.get('/:id/chunks', async (req, res) => {
+  try {
+    const round = await CompetitionRound.findById(req.params.id).select('_id level');
+    if (!round) {
+      return res.status(404).json({
+        success: false,
+        message: 'Competition round not found'
+      });
+    }
+
+    const chunks = await RoundChunk.find({ roundId: round._id }).sort({ order: 1, name: 1 });
+    return res.json({
+      success: true,
+      roundId: round._id,
+      level: round.level,
+      chunks
+    });
+  } catch (error) {
+    console.error('Get round chunks error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/competition-rounds/:id/chunks
+// @desc    Create an optional chunk for a round
+// @access  Private (Superadmin/National admin)
+router.post('/:id/chunks', async (req, res) => {
+  try {
+    const round = await CompetitionRound.findById(req.params.id).select('_id level');
+    if (!round) {
+      return res.status(404).json({
+        success: false,
+        message: 'Competition round not found'
+      });
+    }
+
+    const { name, description = '', areaType, areas = [], isOptional = true, isActive = true, order = 0 } = req.body;
+    if (!name || !areaType || !Array.isArray(areas) || areas.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'name, areaType, and non-empty areas array are required'
+      });
+    }
+
+    const expectedAreaType = round.level === 'Council' ? 'council' : round.level === 'Regional' ? 'region' : null;
+    if (!expectedAreaType) {
+      return res.status(400).json({
+        success: false,
+        message: 'Chunks are only supported for Council and Regional rounds'
+      });
+    }
+    if (areaType !== expectedAreaType) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid areaType for ${round.level} round. Expected: ${expectedAreaType}`
+      });
+    }
+
+    const chunk = await RoundChunk.create({
+      roundId: round._id,
+      level: round.level,
+      name,
+      description,
+      areaType,
+      areas,
+      isOptional: Boolean(isOptional),
+      isActive: Boolean(isActive),
+      order: Number(order) || 0,
+      createdBy: req.user._id
+    });
+
+    const overlapCheck = await ensureChunkAreasDoNotOverlap(round._id, areaType);
+    if (!overlapCheck.valid) {
+      await RoundChunk.findByIdAndDelete(chunk._id);
+      return res.status(400).json({
+        success: false,
+        message: `Chunk area overlap detected for "${overlapCheck.area}" between "${overlapCheck.existingChunk}" and "${overlapCheck.conflictingChunk}"`
+      });
+    }
+
+    return res.status(201).json({
+      success: true,
+      chunk
+    });
+  } catch (error) {
+    console.error('Create round chunk error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   PUT /api/competition-rounds/:id/chunks/:chunkId
+// @desc    Update a chunk
+// @access  Private (Superadmin/National admin)
+router.put('/:id/chunks/:chunkId', async (req, res) => {
+  try {
+    const round = await CompetitionRound.findById(req.params.id).select('_id level');
+    if (!round) {
+      return res.status(404).json({
+        success: false,
+        message: 'Competition round not found'
+      });
+    }
+
+    const chunk = await RoundChunk.findOne({
+      _id: req.params.chunkId,
+      roundId: round._id
+    });
+    if (!chunk) {
+      return res.status(404).json({
+        success: false,
+        message: 'Chunk not found for this round'
+      });
+    }
+
+    const previousValues = {
+      name: chunk.name,
+      description: chunk.description,
+      areas: [...(chunk.areas || [])],
+      isOptional: chunk.isOptional,
+      isActive: chunk.isActive,
+      order: chunk.order
+    };
+
+    const allowedFields = ['name', 'description', 'areas', 'isOptional', 'isActive', 'order'];
+    allowedFields.forEach((field) => {
+      if (typeof req.body[field] !== 'undefined') {
+        chunk[field] = req.body[field];
+      }
+    });
+    await chunk.save();
+
+    const overlapCheck = await ensureChunkAreasDoNotOverlap(round._id, chunk.areaType);
+    if (!overlapCheck.valid) {
+      Object.assign(chunk, previousValues);
+      await chunk.save();
+      return res.status(400).json({
+        success: false,
+        message: `Chunk area overlap detected for "${overlapCheck.area}" between "${overlapCheck.existingChunk}" and "${overlapCheck.conflictingChunk}"`
+      });
+    }
+
+    return res.json({
+      success: true,
+      chunk
+    });
+  } catch (error) {
+    console.error('Update round chunk error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   DELETE /api/competition-rounds/:id/chunks/:chunkId
+// @desc    Delete a chunk from a round
+// @access  Private (Superadmin/National admin)
+router.delete('/:id/chunks/:chunkId', async (req, res) => {
+  try {
+    const chunk = await RoundChunk.findOneAndDelete({
+      _id: req.params.chunkId,
+      roundId: req.params.id
+    });
+    if (!chunk) {
+      return res.status(404).json({
+        success: false,
+        message: 'Chunk not found for this round'
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Chunk deleted successfully'
+    });
+  } catch (error) {
+    console.error('Delete round chunk error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
 // @route   POST /api/competition-rounds
 // @desc    Create new competition round
 // @access  Private (Superadmin)
@@ -479,18 +346,26 @@ router.post('/', async (req, res) => {
       autoAdvance,
       waitForAllJudges,
       reminderEnabled,
-      reminderFrequency
+      reminderFrequency,
+      chunking,
+      promotionPolicy
     } = req.body;
 
     // Validate required fields
-    if (!year || !level || !timingType || !endTime) {
+    if (!year || !level || !timingType) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide year, level, timingType, and endTime'
+        message: 'Please provide year, level, and timingType'
       });
     }
 
-    // Validate timing type
+    if (timingType === 'fixed_time' && !endTime) {
+      return res.status(400).json({
+        success: false,
+        message: 'endTime is required for fixed_time timing type'
+      });
+    }
+
     if (timingType === 'countdown' && !countdownDuration) {
       return res.status(400).json({
         success: false,
@@ -499,26 +374,24 @@ router.post('/', async (req, res) => {
     }
 
     // Calculate end time for countdown
-    let actualEndTime = new Date(endTime);
+    let actualEndTime = new Date(endTime || Date.now());
     if (timingType === 'countdown' && countdownDuration) {
       const start = startTime ? new Date(startTime) : new Date();
       actualEndTime = new Date(start.getTime() + parseInt(countdownDuration));
     }
 
-    // Check if round already exists for this year/level/location
+    // National single timeline: only one draft/pending/active round per year + level.
     const existingQuery = {
       year: parseInt(year),
       level,
-      status: { $in: ['pending', 'active'] }
+      status: { $in: ['draft', 'pending', 'active'] }
     };
-    if (region) existingQuery.region = region;
-    if (council) existingQuery.council = council;
 
     const existing = await CompetitionRound.findOne(existingQuery);
     if (existing) {
       return res.status(400).json({
         success: false,
-        message: 'An active or pending round already exists for this year, level, and location'
+        message: 'An active, pending, or draft round already exists for this year and level'
       });
     }
 
@@ -529,13 +402,23 @@ router.post('/', async (req, res) => {
       endTime: actualEndTime,
       startTime: startTime ? new Date(startTime) : null,
       countdownDuration: countdownDuration ? parseInt(countdownDuration) : null,
-      region: region || null,
-      council: council || null,
+      // Location-scoped rounds are deprecated: timeline is national per level.
+      region: null,
+      council: null,
       autoAdvance: autoAdvance !== undefined ? autoAdvance : true,
       waitForAllJudges: waitForAllJudges !== undefined ? waitForAllJudges : true,
       reminderEnabled: reminderEnabled !== undefined ? reminderEnabled : true,
       reminderFrequency: reminderFrequency || 'daily',
-      status: 'pending'
+      chunking: chunking || undefined,
+      promotionPolicy: promotionPolicy || undefined,
+      metadata: {
+        ...(req.body.metadata && typeof req.body.metadata === 'object' && !Array.isArray(req.body.metadata)
+          ? req.body.metadata
+          : {}),
+        requestedRegion: region || null,
+        requestedCouncil: council || null
+      },
+      status: 'draft'
     };
 
     const round = await CompetitionRound.create(roundData);
@@ -586,7 +469,7 @@ router.put('/:id', async (req, res) => {
     }
 
     // Don't allow updating ended/closed rounds
-    if (round.status === 'ended' || round.status === 'closed') {
+    if (round.status === 'ended' || round.status === 'closed' || round.status === 'archived') {
       return res.status(400).json({
         success: false,
         message: 'Cannot update ended or closed rounds'
@@ -595,6 +478,23 @@ router.put('/:id', async (req, res) => {
 
     // Update fields
     const updateData = { ...req.body };
+
+    const hasLocationScopeValue = (value) =>
+      typeof value !== 'undefined' && value !== null && String(value).trim() !== '';
+
+    if (hasLocationScopeValue(updateData.region) || hasLocationScopeValue(updateData.council)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Location-scoped rounds are not supported. Use optional chunks for area grouping.'
+      });
+    }
+
+    if (typeof updateData.region !== 'undefined') {
+      updateData.region = null;
+    }
+    if (typeof updateData.council !== 'undefined') {
+      updateData.council = null;
+    }
     
     // Recalculate end time if timing changed
     if (updateData.timingType === 'countdown' && updateData.countdownDuration) {
@@ -641,91 +541,15 @@ router.put('/:id', async (req, res) => {
 // @access  Private (Superadmin)
 router.post('/:id/activate', async (req, res) => {
   try {
-    const round = await CompetitionRound.findById(req.params.id);
-
-    if (!round) {
-      return res.status(404).json({
+    const activationResult = await activateRoundWithSnapshot(req.params.id, req.user._id);
+    if (!activationResult.success) {
+      return res.status(activationResult.status || 400).json({
         success: false,
-        message: 'Competition round not found'
+        message: activationResult.message
       });
     }
 
-    if (round.status !== 'pending') {
-      return res.status(400).json({
-        success: false,
-        message: 'Round must be in pending status to activate'
-      });
-    }
-
-    // Pre-check: if autoAdvance is enabled, verify quota exists
-    if (round.autoAdvance) {
-      const quotaDoc = await Quota.findOne({ year: round.year, level: round.level });
-      if (!quotaDoc) {
-        return res.status(400).json({
-          success: false,
-          message: `Cannot activate round with auto-advance: no quota is set for ${round.level} level in year ${round.year}. Please set a quota first.`
-        });
-      }
-    }
-
-    // Set start time when round is activated (for tracking when round actually started)
-    // For countdown rounds, also recalculate endTime
-    if (round.timingType === 'countdown' && !round.startTime) {
-      round.startTime = new Date();
-      round.endTime = new Date(round.startTime.getTime() + round.countdownDuration);
-    } else if (!round.startTime) {
-      // For fixed_time rounds, set startTime to track activation time
-      // This helps with judge progress tracking (only count evaluations after activation)
-      round.startTime = new Date();
-    }
-
-    // Get all judges assigned to this round's level and location
-    const judgeQuery = { 
-      role: 'judge', 
-      assignedLevel: round.level, 
-      status: 'active' 
-    };
-    
-    if (round.level === 'Council' && round.region && round.council) {
-      judgeQuery.assignedRegion = round.region;
-      judgeQuery.assignedCouncil = round.council;
-    } else if (round.level === 'Regional' && round.region) {
-      judgeQuery.assignedRegion = round.region;
-    }
-    // For National level, no location filter needed
-
-    const judges = await User.find(judgeQuery).select('_id assignedLevel assignedRegion assignedCouncil');
-    
-    if (judges.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'No active judges found for this round. Please assign judges before activating the round.'
-      });
-    }
-
-    // Capture snapshot of pending submissions at round activation time
-    const activationTime = new Date();
-    const submissionQuery = {
-      year: round.year,
-      level: round.level,
-      status: 'pending'
-    };
-
-    // Match round's location filters
-    if (round.region) submissionQuery.region = round.region;
-    if (round.council) submissionQuery.council = round.council;
-
-    // Only capture submissions created before round activation
-    submissionQuery.createdAt = { $lt: activationTime };
-
-    const pendingSubmissions = await Submission.find(submissionQuery).select('_id');
-    const pendingSubmissionIds = pendingSubmissions.map(sub => sub._id);
-
-    // Store snapshot
-    round.pendingSubmissionsSnapshot = pendingSubmissionIds;
-    round.snapshotCreatedAt = activationTime;
-    round.status = 'active';
-    await round.save();
+    const { round, snapshotSize, activeAreas, assignments } = activationResult;
 
     // Log activation
     if (logger) {
@@ -739,7 +563,9 @@ router.post('/:id/activate', async (req, res) => {
           level: round.level,
           region: round.region,
           council: round.council,
-          judgesCount: judges.length
+          snapshotSize,
+          activeAreas: activeAreas.length,
+          assignments
         },
         'success',
         'update'
@@ -759,7 +585,10 @@ router.post('/:id/activate', async (req, res) => {
     res.json({
       success: true,
       round,
-      message: 'Round activated. Judges can now evaluate submissions assigned to them.'
+      snapshotSize,
+      activeAreas,
+      assignments,
+      message: 'Round activated with a frozen national snapshot. Leaderboards now update provisionally per area.'
     });
   } catch (error) {
     console.error('Activate competition round error:', error);
@@ -771,7 +600,7 @@ router.post('/:id/activate', async (req, res) => {
 });
 
 // @route   POST /api/competition-rounds/:id/close
-// @desc    Close a competition round and advance submissions
+// @desc    Close a competition round after area finalization
 // @access  Private (Superadmin)
 router.post('/:id/close', invalidateCacheOnChange('cache:/api/leaderboard*'), async (req, res) => {
   try {
@@ -790,235 +619,62 @@ router.post('/:id/close', invalidateCacheOnChange('cache:/api/leaderboard*'), as
         message: 'Round is already closed'
       });
     }
+    const roundLeaderboards = await AreaLeaderboard.find({
+      roundId: round._id,
+      level: round.level
+    }).select('areaId state');
 
-    // Get all submissions dynamically based on round's level/location
-    // Submissions are not dependent on rounds - we query them based on judge assignments
-    const submissionQuery = {
-      year: round.year,
-      level: round.level,
-      status: { $nin: ['promoted', 'eliminated'] } // Exclude already processed submissions
-    };
-    
-    if (round.region) submissionQuery.region = round.region;
-    if (round.council) submissionQuery.council = round.council;
-
-    const allSubmissions = await Submission.find(submissionQuery)
-      .populate('teacherId', 'name email');
-
-    // Get all judges assigned to this round's level and location
-    const judgeQuery = { role: 'judge', assignedLevel: round.level, status: 'active' };
-    if (round.level === 'Council' && round.region && round.council) {
-      judgeQuery.assignedRegion = round.region;
-      judgeQuery.assignedCouncil = round.council;
-    } else if (round.level === 'Regional' && round.region) {
-      judgeQuery.assignedRegion = round.region;
+    // Ensure area leaderboards exist for active areas in snapshot.
+    if (roundLeaderboards.length === 0 && Array.isArray(round.activeAreas) && round.activeAreas.length > 0) {
+      for (const area of round.activeAreas) {
+        await rebuildAreaLeaderboard(round._id, area.areaId);
+      }
     }
 
-    const judges = await User.find(judgeQuery);
+    const refreshedLeaderboards = await AreaLeaderboard.find({
+      roundId: round._id,
+      level: round.level
+    }).select('areaId state totalSubmissions');
 
-    // Filter submissions to only include those assigned to the judges
-    const roundSubmissions = allSubmissions.filter(submission => {
-      return judges.some(judge => {
-        if (round.level === 'Council') {
-          return submission.region === judge.assignedRegion && 
-                 submission.council === judge.assignedCouncil;
-        } else if (round.level === 'Regional') {
-          return submission.region === judge.assignedRegion;
-        }
-        return true; // National level
-      });
-    }).sort((a, b) => (b.averageScore || 0) - (a.averageScore || 0)); // Sort by average score for leaderboard
+    const pendingFinalization = refreshedLeaderboards.filter(
+      (leaderboard) => !['finalized', 'published'].includes(leaderboard.state)
+    );
 
-    if (roundSubmissions.length === 0) {
+    const forceClose = req.body.force === true;
+    if (pendingFinalization.length > 0 && !forceClose) {
       return res.status(400).json({
         success: false,
-        message: 'No submissions found for this round'
+        message: 'Cannot close round: some areas are not finalized yet',
+        pendingAreas: pendingFinalization.map((leaderboard) => ({
+          areaId: leaderboard.areaId,
+          state: leaderboard.state
+        }))
       });
     }
 
-    // Check if all judges completed (if waitForAllJudges is enabled)
-    if (round.waitForAllJudges) {
-      const roundStartTime = round.startTime || round.createdAt;
-
-      // Check if all submissions have been evaluated
-      let pendingCount = 0;
-      for (const submission of roundSubmissions) {
-        // Skip disqualified submissions
-        if (submission.disqualified) continue;
-
-        const evaluations = await Evaluation.find({ 
-          submissionId: submission._id,
-          createdAt: { $gte: roundStartTime }
-        });
-        const evaluatedJudgeIds = evaluations.map(e => e.judgeId.toString());
-        
-        if (round.level === 'Council' || round.level === 'Regional') {
-          // 1-to-1 judging: Check if the assigned judge has evaluated
-          const assignment = await SubmissionAssignment.findOne({ submissionId: submission._id });
-          if (!assignment) {
-            pendingCount++;
-            continue;
-          }
-          
-          const assignedJudgeEvaluated = evaluatedJudgeIds.includes(assignment.judgeId.toString());
-          if (!assignedJudgeEvaluated) {
-            pendingCount++;
-          }
-        } else {
-          // National level: 1-to-many judging - All National judges evaluate all National submissions
-          // Judges see ALL submissions at National level (not filtered by areaOfFocus)
-          const allJudgesEvaluated = judges.every(judge => 
-            evaluatedJudgeIds.includes(judge._id.toString())
-          );
-
-          if (!allJudgesEvaluated) {
-            pendingCount++;
-          }
-        }
-      }
-
-      if (pendingCount > 0) {
-        return res.status(400).json({
-          success: false,
-          message: `Cannot close round - ${pendingCount} submissions still pending evaluation`,
-          pendingCount,
-          totalSubmissions: roundSubmissions.length
-        });
-      }
-    }
-
-    // Update average scores for submissions in the snapshot so they appear correctly in leaderboard
-    // Use submissions from the snapshot if available, otherwise use roundSubmissions
-    const submissionsToUpdate = round.pendingSubmissionsSnapshot && round.pendingSubmissionsSnapshot.length > 0
-      ? await Submission.find({ _id: { $in: round.pendingSubmissionsSnapshot } })
-      : roundSubmissions;
-
-    const { calculateAverageScore, generateLocationKey, calculateAndUpdateLeaderboard } = require('../utils/leaderboardUtils');
-    const Leaderboard = require('../models/Leaderboard');
-    
-    // Get unique areaOfFocus values from submissions
-    const areaOfFocusSet = new Set();
-    roundSubmissions.forEach(sub => {
-      if (sub.areaOfFocus) {
-        areaOfFocusSet.add(sub.areaOfFocus);
-      }
-    });
-
-    // Update leaderboards for each areaOfFocus
-    for (const submission of submissionsToUpdate) {
-      // Skip if already has a valid average score
-      if (submission.averageScore && submission.averageScore > 0) {
-        continue;
-      }
-      
-      // Calculate and update average score
-      const avgScore = await calculateAverageScore(submission._id);
-      if (avgScore > 0) {
-        await Submission.findByIdAndUpdate(submission._id, { averageScore: avgScore });
-      }
-    }
-
-    // Finalize all affected leaderboards
-    for (const areaOfFocus of areaOfFocusSet) {
-      // Get unique location keys for this areaOfFocus
-      const locationKeySet = new Set();
-      roundSubmissions
-        .filter(sub => sub.areaOfFocus === areaOfFocus)
-        .forEach(sub => {
-          const locationKey = generateLocationKey(round.level, sub.region, sub.council);
-          locationKeySet.add(locationKey);
-        });
-
-      // Update and finalize each leaderboard
-      for (const locationKey of locationKeySet) {
-        // Recalculate leaderboard to ensure it's up to date
-        await calculateAndUpdateLeaderboard(
-          round.year,
-          areaOfFocus,
-          round.level,
-          locationKey,
-          {
-            region: round.region,
-            council: round.council
-          }
-        );
-
-        // Finalize the leaderboard
-        await Leaderboard.updateOne(
-          {
-            year: round.year,
-            areaOfFocus,
-            level: round.level,
-            locationKey
-          },
-          {
-            $set: {
-              isFinalized: true,
-              lastUpdated: new Date()
-            }
-          }
-        );
-      }
-    }
-
-    // Note: Advancement is now manual via the leaderboard endpoint
-    // Only auto-advance if explicitly enabled (for backward compatibility)
-    let advanceResult = null;
-    if (round.autoAdvance) {
-      advanceResult = await advanceSubmissionsForRound(round, roundSubmissions);
-      
-      if (!advanceResult.success) {
-        console.warn('Auto-advancement failed:', advanceResult.error);
-      } else {
-        // Send notifications to teachers with leaderboard data
-        const { notifyTeachersOnPromotion, notifyTeachersOnElimination } = require('../utils/notifications');
-        const leaderboard = advanceResult.leaderboard || [];
-        
-        if (advanceResult.promotedIds && advanceResult.promotedIds.length > 0) {
-          const nextLevel = getNextLevel(round.level);
-          if (nextLevel) {
-            notifyTeachersOnPromotion(advanceResult.promotedIds, nextLevel, leaderboard).catch(err => 
-              console.error('Error sending promotion notifications:', err)
-            );
-          }
-        }
-        if (advanceResult.eliminatedIds && advanceResult.eliminatedIds.length > 0) {
-          notifyTeachersOnElimination(advanceResult.eliminatedIds, leaderboard).catch(err => 
-            console.error('Error sending elimination notifications:', err)
-          );
-        }
-      }
-    }
-
-    // Update round status
+    const now = new Date();
     round.status = 'closed';
-    round.closedAt = new Date();
+    if (!round.endedAt) {
+      round.endedAt = now;
+    }
+    round.closedAt = now;
     round.closedBy = req.user._id;
     await round.save();
 
-    // Get final statistics for reporting
-    const finalStats = {
-      totalSubmissions: roundSubmissions.length,
-      promoted: advanceResult.promoted,
-      eliminated: advanceResult.eliminated,
-      nextLevel: getNextLevel(round.level),
-      roundDuration: round.closedAt - round.startTime,
-      averageScore: roundSubmissions.length > 0 
-        ? roundSubmissions.reduce((sum, s) => sum + (s.averageScore || 0), 0) / roundSubmissions.length 
-        : 0
+    const stats = {
+      totalAreas: refreshedLeaderboards.length,
+      finalizedAreas: refreshedLeaderboards.filter((leaderboard) =>
+        ['finalized', 'published'].includes(leaderboard.state)
+      ).length,
+      publishedAreas: refreshedLeaderboards.filter((leaderboard) =>
+        leaderboard.state === 'published'
+      ).length,
+      totalSubmissions: refreshedLeaderboards.reduce(
+        (sum, leaderboard) => sum + (leaderboard.totalSubmissions || 0),
+        0
+      )
     };
 
-    // Get judge statistics (reuse judges variable already fetched above)
-    const roundStartTime = round.startTime || round.createdAt;
-    const totalEvaluations = await Evaluation.countDocuments({
-      submissionId: { $in: roundSubmissions.map(s => s._id) },
-      createdAt: { $gte: roundStartTime }
-    });
-
-    finalStats.totalJudges = judges.length;
-    finalStats.totalEvaluations = totalEvaluations;
-
-    // Log round closure with comprehensive details
     if (logger) {
       logger.logAdminAction(
         'Superadmin closed competition round',
@@ -1028,40 +684,102 @@ router.post('/:id/close', invalidateCacheOnChange('cache:/api/leaderboard*'), as
           roundId: req.params.id,
           year: round.year,
           level: round.level,
-          region: round.region,
-          council: round.council,
-          statistics: finalStats,
-          promotedIds: advanceResult.promotedIds,
-          eliminatedIds: advanceResult.eliminatedIds
+          stats,
+          forced: forceClose
         },
         'success',
         'update'
       ).catch(() => {});
     }
 
-    // Emit round state change via Socket.IO
     emitRoundStateChange(round.year, round.level, {
       roundId: round._id.toString(),
       status: 'closed',
       action: 'closed',
-      level: round.level,
-      promoted: advanceResult?.promoted || 0,
-      eliminated: advanceResult?.eliminated || 0,
+      level: round.level
     });
 
     res.json({
       success: true,
       round,
-      advancement: advanceResult,
-      statistics: finalStats,
-      leaderboard: advanceResult?.leaderboard || [],
-      message: round.autoAdvance 
-        ? `Round closed. ${advanceResult?.promoted || 0} submissions promoted, ${advanceResult?.eliminated || 0} eliminated.`
-        : 'Round closed. Leaderboard updated. Use the leaderboard page to manually advance submissions to the next level.'
+      statistics: stats,
+      message: 'Round closed successfully'
     });
   } catch (error) {
     console.error('Close competition round error:', error);
     res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   GET /api/competition-rounds/:id/areas/:areaId/readiness
+// @desc    Check if an area is ready for finalization (all assigned judges completed)
+// @access  Private (Superadmin/National admin)
+router.get('/:id/areas/:areaId/readiness', cacheMiddleware(20), async (req, res) => {
+  try {
+    const result = await getAreaReadiness({
+      roundId: req.params.id,
+      areaId: decodeURIComponent(req.params.areaId)
+    });
+
+    if (!result.success) {
+      return res.status(result.status || 400).json({
+        success: false,
+        message: result.message
+      });
+    }
+
+    return res.json({
+      success: true,
+      readiness: result.readiness,
+      leaderboard: result.leaderboard
+    });
+  } catch (error) {
+    console.error('Area readiness error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/competition-rounds/:id/areas/:areaId/approve
+// @desc    Approve area results and promote according to quota
+// @access  Private (Superadmin/National admin)
+router.post('/:id/areas/:areaId/approve', invalidateCacheOnChange('cache:/api/leaderboard*'), async (req, res) => {
+  try {
+    if (req.user.role !== 'superadmin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only superadmin can approve area promotions'
+      });
+    }
+
+    const result = await approveAreaLeaderboardAndPromote({
+      roundId: req.params.id,
+      areaId: decodeURIComponent(req.params.areaId),
+      approvedBy: req.user._id,
+      force: req.body.force === true
+    });
+
+    if (!result.success) {
+      return res.status(result.status || 400).json({
+        success: false,
+        message: result.message,
+        readiness: result.completion || null
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: `Area approved. ${result.promoted} promoted, ${result.eliminated} eliminated.`,
+      ...result
+    });
+  } catch (error) {
+    console.error('Area approval error:', error);
+    return res.status(500).json({
       success: false,
       message: error.message || 'Server error'
     });
@@ -1169,9 +887,17 @@ router.patch('/:id/leaderboard-visibility', async (req, res) => {
     round.leaderboardVisibility = visibility;
 
     if (visibility === 'frozen') {
-      const { calculateLeaderboard } = require('../utils/leaderboardUtils');
-      const snapshot = await calculateLeaderboard(round.year, round.level);
-      round.frozenLeaderboardSnapshot = snapshot;
+      const snapshot = await AreaLeaderboard.find({
+        roundId: round._id,
+        level: round.level
+      }).sort({ areaType: 1, areaId: 1 });
+      round.frozenLeaderboardSnapshot = snapshot.map((leaderboard) => ({
+        id: leaderboard._id.toString(),
+        areaType: leaderboard.areaType,
+        areaId: leaderboard.areaId,
+        state: leaderboard.state,
+        entries: leaderboard.entries
+      }));
     } else {
       round.frozenLeaderboardSnapshot = null;
     }
@@ -1201,7 +927,7 @@ router.patch('/:id/leaderboard-visibility', async (req, res) => {
 });
 
 // @route   GET /api/competition-rounds/:id/leaderboard
-// @desc    Get leaderboard for a competition round (ranked by average rating)
+// @desc    Get area leaderboards for a competition round
 // @access  Private (Superadmin)
 router.get('/:id/leaderboard', async (req, res) => {
   try {
@@ -1214,119 +940,16 @@ router.get('/:id/leaderboard', async (req, res) => {
       });
     }
 
-    // Optimize leaderboard query using aggregation pipeline
-    let matchStage = {};
-    
-    if (round.status === 'closed') {
-      // Closed rounds: show submissions that were evaluated in this round
-      matchStage = { roundId: round._id };
-    } else {
-      // Active rounds: query dynamically based on round filters
-      matchStage = {
-        year: round.year,
-        level: round.level,
-        status: { $nin: ['promoted', 'eliminated'] }
-      };
-      
-      if (round.region) matchStage.region = round.region;
-      if (round.council) matchStage.council = round.council;
+    const query = {
+      roundId: round._id,
+      level: round.level
+    };
 
-      // For active rounds, filter by judge assignments using aggregation
-      if (round.level === 'Council' || round.level === 'Regional') {
-        const judgeQuery = { role: 'judge', assignedLevel: round.level, status: 'active' };
-        if (round.level === 'Council' && round.region && round.council) {
-          judgeQuery.assignedRegion = round.region;
-          judgeQuery.assignedCouncil = round.council;
-        } else if (round.level === 'Regional' && round.region) {
-          judgeQuery.assignedRegion = round.region;
-        }
+    if (req.query.state) query.state = req.query.state;
+    if (req.query.areaId) query.areaId = req.query.areaId;
+    if (req.query.areaType) query.areaType = req.query.areaType;
 
-        const judges = await User.find(judgeQuery).select('assignedRegion assignedCouncil').lean();
-        
-        if (judges.length > 0) {
-          // Build filter for submissions assigned to judges
-          if (round.level === 'Council') {
-            const regionCouncilPairs = judges.map(j => ({
-              region: j.assignedRegion,
-              council: j.assignedCouncil
-            }));
-            matchStage.$or = regionCouncilPairs.map(pair => ({
-              region: pair.region,
-              council: pair.council
-            }));
-          } else if (round.level === 'Regional') {
-            const regions = [...new Set(judges.map(j => j.assignedRegion))];
-            matchStage.region = { $in: regions };
-          }
-        } else {
-          // No judges assigned, return empty result
-          matchStage._id = { $in: [] };
-        }
-      }
-    }
-
-    // Use aggregation pipeline to join with evaluations and get counts in one query
-    const leaderboard = await Submission.aggregate([
-      { $match: matchStage },
-      {
-        $lookup: {
-          from: 'evaluations',
-          localField: '_id',
-          foreignField: 'submissionId',
-          as: 'evaluations'
-        }
-      },
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'teacherId',
-          foreignField: '_id',
-          as: 'teacher'
-        }
-      },
-      {
-        $addFields: {
-          totalEvaluations: { $size: '$evaluations' },
-          teacherName: {
-            $ifNull: [
-              { $arrayElemAt: ['$teacher.name', 0] },
-              '$teacherName'
-            ]
-          },
-          teacherEmail: {
-            $ifNull: [
-              { $arrayElemAt: ['$teacher.email', 0] },
-              'N/A'
-            ]
-          }
-        }
-      },
-      {
-        $sort: { averageScore: -1 }
-      },
-      {
-        $project: {
-          rank: { $add: [{ $indexOfArray: ['$__rank', '$_id'] }, 1] },
-          submissionId: { $toString: '$_id' },
-          teacherName: 1,
-          teacherEmail: 1,
-          subject: 1,
-          class: 1,
-          category: 1,
-          region: 1,
-          council: 1,
-          school: 1,
-          averageScore: { $ifNull: ['$averageScore', 0] },
-          totalEvaluations: 1,
-          status: 1
-        }
-      }
-    ]);
-
-    // Add rank numbers (aggregation doesn't support $indexOfArray for ranking, so do it manually)
-    leaderboard.forEach((item, index) => {
-      item.rank = index + 1;
-    });
+    const leaderboards = await AreaLeaderboard.find(query).sort({ areaType: 1, areaId: 1 });
 
     res.json({
       success: true,
@@ -1338,8 +961,12 @@ router.get('/:id/leaderboard', async (req, res) => {
         region: round.region,
         council: round.council
       },
-      leaderboard,
-      totalSubmissions: leaderboard.length
+      leaderboards: leaderboards.map((leaderboard) => ({
+        ...leaderboard.toObject(),
+        locationKey: leaderboard.areaId,
+        isFinalized: ['finalized', 'published'].includes(leaderboard.state)
+      })),
+      totalAreas: leaderboards.length
     });
   } catch (error) {
     console.error('Get leaderboard error:', error);
@@ -1382,18 +1009,28 @@ router.get('/:id/judge-progress', async (req, res) => {
       roundStartTime = new Date(round.createdAt);
     }
     
-    // Get all submissions dynamically based on round's level/location
-    // Submissions are not dependent on rounds - we query them based on judge assignments
-    const submissionQuery = {
-      year: round.year,
-      level: round.level,
-      status: { $nin: ['promoted', 'eliminated'] } // Exclude already processed submissions
-    };
-    
+    let snapshotSubmissionIds = Array.isArray(round.pendingSubmissionsSnapshot)
+      ? round.pendingSubmissionsSnapshot
+      : [];
+    if (snapshotSubmissionIds.length === 0) {
+      const snapshot = await RoundSnapshot.findOne({ roundId: round._id }).select('submissionIds');
+      snapshotSubmissionIds = snapshot?.submissionIds || [];
+    }
+
     const regionRegex = toExactRegex(round.region);
     const councilRegex = toExactRegex(round.council);
-    if (regionRegex) submissionQuery.region = regionRegex;
-    if (councilRegex) submissionQuery.council = councilRegex;
+
+    const submissionQuery = snapshotSubmissionIds.length > 0
+      ? { _id: { $in: snapshotSubmissionIds } }
+      : {
+          year: round.year,
+          level: round.level,
+          status: { $nin: ['promoted', 'eliminated'] }
+        };
+    if (snapshotSubmissionIds.length === 0) {
+      if (regionRegex) submissionQuery.region = regionRegex;
+      if (councilRegex) submissionQuery.council = councilRegex;
+    }
 
     const allSubmissions = await Submission.find(submissionQuery);
 
@@ -1414,6 +1051,7 @@ router.get('/:id/judge-progress', async (req, res) => {
     if (round.level === 'Council' || round.level === 'Regional') {
       // For Council/Regional: Get submissions that have assignments
       const assignments = await SubmissionAssignment.find({
+        roundId: round._id,
         level: round.level,
         ...(round.level === 'Council' && regionRegex && councilRegex ? {
           region: regionRegex,
@@ -1437,6 +1075,7 @@ router.get('/:id/judge-progress', async (req, res) => {
     const judgeProgress = await Promise.all(judges.map(async (judge) => {
       // Only get evaluations created AFTER the round started
       const evaluationQuery = { 
+        roundId: round._id,
         judgeId: judge._id,
         createdAt: { $gte: roundStartTime }
       };
@@ -1450,6 +1089,7 @@ router.get('/:id/judge-progress', async (req, res) => {
       if (round.level === 'Council' || round.level === 'Regional') {
         // For Council/Regional: Get only submissions assigned to this judge
         const assignments = await SubmissionAssignment.find({
+          roundId: round._id,
           judgeId: judge._id,
           level: round.level,
           ...(round.level === 'Council' && regionRegex && councilRegex ? {
@@ -1501,6 +1141,7 @@ router.get('/:id/judge-progress', async (req, res) => {
     const totalSubmissions = submissions.length;
     const totalJudges = judges.length;
     const totalEvaluations = await Evaluation.countDocuments({
+      roundId: round._id,
       submissionId: { $in: submissions.map(s => s._id) },
       createdAt: { $gte: roundStartTime }
     });
@@ -1565,12 +1206,17 @@ router.get('/:id/judge-progress/export', async (req, res) => {
     // Get round start time
     const roundStartTime = round.startTime || round.createdAt;
     
-    // Get all submissions for this round
-    const submissionQuery = {
-      roundId: round._id
-    };
-    
-    const submissions = await Submission.find(submissionQuery);
+    let snapshotSubmissionIds = Array.isArray(round.pendingSubmissionsSnapshot)
+      ? round.pendingSubmissionsSnapshot
+      : [];
+    if (snapshotSubmissionIds.length === 0) {
+      const snapshot = await RoundSnapshot.findOne({ roundId: round._id }).select('submissionIds');
+      snapshotSubmissionIds = snapshot?.submissionIds || [];
+    }
+
+    const submissions = snapshotSubmissionIds.length > 0
+      ? await Submission.find({ _id: { $in: snapshotSubmissionIds } })
+      : await Submission.find({ year: round.year, level: round.level });
 
     // Get all judges assigned to this round's level
     const judgeQuery = { role: 'judge', assignedLevel: round.level, status: 'active' };
@@ -1586,6 +1232,7 @@ router.get('/:id/judge-progress/export', async (req, res) => {
     // Calculate progress for each judge
     const judgeProgress = await Promise.all(judges.map(async (judge) => {
       const evaluations = await Evaluation.find({ 
+        roundId: round._id,
         judgeId: judge._id,
         createdAt: { $gte: roundStartTime }
       });
@@ -1800,4 +1447,3 @@ router.post('/:id/remind-location', async (req, res) => {
 });
 
 module.exports = router;
-

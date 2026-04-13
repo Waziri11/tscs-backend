@@ -1,10 +1,11 @@
 const express = require('express');
 const Submission = require('../models/Submission');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
+const CompetitionRound = require('../models/CompetitionRound');
 const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
 const notificationService = require('../services/notificationService');
-const { assignJudgeToSubmission, manuallyAssignSubmission, getEligibleJudges, getAssignedJudge } = require('../utils/judgeAssignment');
+const { manuallyAssignSubmission, getEligibleJudges, getAssignedJudge } = require('../utils/judgeAssignment');
 const User = require('../models/User');
 const { cacheMiddleware, invalidateCacheOnChange } = require('../middleware/cache');
 const { buildSubmissionQueryForAdmin, canAdminAccessSubmission, canAdminAccessUser } = require('../utils/adminScope');
@@ -124,9 +125,21 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
     // For Council/Regional judges, filter to only show submissions assigned to them
     // Move this into MongoDB query to avoid N+1 problem
     if (req.user.role === 'judge' && (req.user.assignedLevel === 'Council' || req.user.assignedLevel === 'Regional')) {
+      const activeRoundsQuery = {
+        level: req.user.assignedLevel,
+        status: { $in: ['active', 'ended'] }
+      };
+      if (year) {
+        activeRoundsQuery.year = parseInt(year);
+      }
+
+      const activeRounds = await CompetitionRound.find(activeRoundsQuery).select('_id');
+      const activeRoundIds = activeRounds.map((round) => round._id);
+
       const assignedSubmissionIds = await SubmissionAssignment.find({
         judgeId: req.user._id,
-        level: req.user.assignedLevel
+        level: req.user.assignedLevel,
+        roundId: { $in: activeRoundIds }
       }).select('submissionId').lean();
       
       const assignedIds = assignedSubmissionIds.map(a => a.submissionId);
@@ -233,6 +246,41 @@ router.get('/:id', async (req, res) => {
         success: false,
         message: 'Not authorized to access this submission'
       });
+    }
+
+    // Judge scope: only assigned submissions at their exact level and round context
+    if (req.user.role === 'judge') {
+      if (!req.user.assignedLevel || req.user.assignedLevel !== submission.level) {
+        return res.status(403).json({
+          success: false,
+          message: 'Not authorized to access this submission'
+        });
+      }
+
+      if (submission.level === 'Council' || submission.level === 'Regional') {
+        const roundIds = (await CompetitionRound.find({
+          level: submission.level,
+          status: { $in: ['active', 'ended'] }
+        }).select('_id')).map((round) => round._id);
+
+        const assignment = await SubmissionAssignment.findOne({
+          submissionId: submission._id,
+          judgeId: req.user._id,
+          roundId: { $in: roundIds }
+        }).select('_id');
+
+        if (!assignment) {
+          return res.status(403).json({
+            success: false,
+            message: 'Not authorized to access this submission'
+          });
+        }
+      } else if (submission.level === 'National' && req.user.assignedLevel !== 'National') {
+        return res.status(403).json({
+          success: false,
+          message: 'Not authorized to access this submission'
+        });
+      }
     }
 
     // Admin scope: only allow viewing submissions in their scope
@@ -359,45 +407,8 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnC
       'create'
     );
 
-    // Assign judge to submission (for Council and Regional levels only)
-    let assignmentResult = null;
-    if (submission.level === 'Council' || submission.level === 'Regional') {
-      try {
-      assignmentResult = await assignJudgeToSubmission(submission);
-      
-      if (assignmentResult.success && assignmentResult.assignment) {
-        // Notify admins and superadmins about the assignment
-        const admins = await User.find({ 
-          role: { $in: ['admin', 'superadmin'] },
-          status: 'active'
-        }).select('_id');
-        
-        for (const admin of admins) {
-          notificationService.createNotification({
-            userId: admin._id,
-            type: 'system_announcement',
-            title: 'New Submission Assignment',
-            message: `Submission from ${submission.teacherName} (${submission.subject} - ${submission.areaOfFocus}) has been assigned to Judge ${assignmentResult.judge.name} for ${submission.level} level evaluation.`,
-            metadata: {
-              submissionId: submission._id.toString(),
-              judgeId: assignmentResult.judge._id.toString(),
-              judgeName: assignmentResult.judge.name,
-              teacherName: submission.teacherName,
-              subject: submission.subject,
-              areaOfFocus: submission.areaOfFocus,
-              level: submission.level
-            },
-            isSystem: true
-          }).catch(error => {
-            console.error('Error creating admin notification:', error);
-          });
-        }
-        }
-      } catch (judgeError) {
-        console.error('Judge assignment error (non-fatal):', judgeError);
-        // Continue - do not fail submission if judge assignment fails
-      }
-    }
+    // Round snapshots are frozen at activation.
+    // New submissions are not auto-assigned into currently running rounds.
 
     // Create notification for teacher when submission is successful
     if (req.user.role === 'teacher' || submissionData.teacherId) {
@@ -416,20 +427,10 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnC
       });
     }
 
-    // Include assignment info in response
-    const responseData = {
+    res.status(201).json({
       success: true,
       submission
-    };
-
-    if (assignmentResult && assignmentResult.assignment) {
-      responseData.assignment = {
-        judgeId: assignmentResult.judge._id,
-        judgeName: assignmentResult.judge.name
-      };
-    }
-
-    res.status(201).json(responseData);
+    });
   } catch (error) {
     console.error('Create submission error:', error);
     
@@ -446,7 +447,7 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnC
 // @route   PUT /api/submissions/:id
 // @desc    Update submission
 // @access  Private (Teacher owns it, or Admin/Superadmin)
-router.put('/:id', invalidateCacheOnChange('cache:/api/submissions*'), async (req, res) => {
+router.put('/:id', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnChange('cache:/api/submissions*'), async (req, res) => {
   try {
     const submission = await Submission.findById(req.params.id);
 
@@ -599,7 +600,7 @@ router.delete('/:id', authorize('admin', 'superadmin'), invalidateCacheOnChange(
 // @route   GET /api/submissions/leaderboard/council
 // @desc    Get council level leaderboard (per area of focus and overall)
 // @access  Private (Admin, Superadmin, Judge)
-router.get('/leaderboard/council', async (req, res) => {
+router.get('/leaderboard/council', authorize('admin', 'superadmin'), async (req, res) => {
   try {
     let { year, region, council, areaOfFocus, includeDisqualified = false } = req.query;
 
@@ -686,7 +687,7 @@ router.get('/leaderboard/council', async (req, res) => {
 // @route   GET /api/submissions/leaderboard/regional
 // @desc    Get regional level leaderboard
 // @access  Private (Admin, Superadmin, Judge)
-router.get('/leaderboard/regional', async (req, res) => {
+router.get('/leaderboard/regional', authorize('admin', 'superadmin'), async (req, res) => {
   try {
     let { year, region, areaOfFocus, includeDisqualified = false } = req.query;
 
@@ -760,7 +761,7 @@ router.get('/leaderboard/regional', async (req, res) => {
 // @route   GET /api/submissions/leaderboard/national
 // @desc    Get national level leaderboard
 // @access  Private (Admin, Superadmin, Judge)
-router.get('/leaderboard/national', async (req, res) => {
+router.get('/leaderboard/national', authorize('admin', 'superadmin'), async (req, res) => {
   try {
     const { year, areaOfFocus, includeDisqualified = false } = req.query;
 
@@ -895,7 +896,7 @@ router.get('/:id/assigned-judge', authorize('admin', 'superadmin'), async (req, 
       });
     }
 
-    const assignment = await getAssignedJudge(req.params.id);
+    const assignment = await getAssignedJudge(req.params.id, req.query.roundId || null);
     
     res.json({
       success: true,
@@ -903,7 +904,8 @@ router.get('/:id/assigned-judge', authorize('admin', 'superadmin'), async (req, 
         judgeId: assignment.judgeId._id,
         judgeName: assignment.judgeId.name,
         judgeEmail: assignment.judgeId.email,
-        assignedAt: assignment.assignedAt
+        assignedAt: assignment.assignedAt,
+        roundId: assignment.roundId?._id || assignment.roundId || null
       } : null,
       message: assignment ? 'Judge assigned' : 'No judge assigned'
     });
@@ -958,7 +960,9 @@ router.post('/:id/assign-judge', authorize('admin', 'superadmin'), async (req, r
       });
     }
 
-    const result = await manuallyAssignSubmission(req.params.id, judgeId);
+    const result = await manuallyAssignSubmission(req.params.id, judgeId, {
+      roundId: req.body.roundId || req.query.roundId || null
+    });
 
     if (!result.success) {
       return res.status(400).json({
@@ -987,7 +991,8 @@ router.post('/:id/assign-judge', authorize('admin', 'superadmin'), async (req, r
         id: result.assignment._id,
         submissionId: result.assignment.submissionId,
         judgeId: result.assignment.judgeId,
-        assignedAt: result.assignment.assignedAt
+        assignedAt: result.assignment.assignedAt,
+        roundId: result.assignment.roundId
       },
       message: result.message
     });

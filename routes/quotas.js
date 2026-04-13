@@ -2,6 +2,7 @@ const express = require('express');
 const mongoSanitize = require('express-mongo-sanitize');
 const helmet = require('helmet');
 const Quota = require('../models/Quota');
+const QuotaRule = require('../models/QuotaRule');
 const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
 const { quotaValidations, validate, validateQuery, validateParams } = require('../validation/quotas');
@@ -183,5 +184,149 @@ router.put('/:year/:level', validateParams(quotaValidations.params), validate(qu
   });
 }));
 
-module.exports = router;
+// @route   GET /api/quotas/quota-rules
+// @desc    Get round-scoped quota rules (area/chunk/level)
+// @access  Private (Superadmin)
+router.get('/quota-rules', asyncHandler(async (req, res) => {
+  const { roundId, level, scopeType } = req.query;
+  const query = {};
+  if (roundId) query.roundId = roundId;
+  if (level) query.level = level;
+  if (scopeType) query.scopeType = scopeType;
 
+  const rules = await QuotaRule.find(query).sort({ priority: -1, createdAt: -1 });
+  res.json({
+    success: true,
+    data: rules,
+    count: rules.length
+  });
+}));
+
+// @route   POST /api/quotas/quota-rules
+// @desc    Create or update a round-scoped quota rule
+// @access  Private (Superadmin)
+router.post('/quota-rules', asyncHandler(async (req, res) => {
+  const { roundId, level, scopeType, scopeId, areaType = null, quota, priority = 0, isActive = true } = req.body;
+
+  if (!roundId || !level || !scopeType || !scopeId || !quota) {
+    return res.status(400).json({
+      success: false,
+      message: 'roundId, level, scopeType, scopeId, and quota are required'
+    });
+  }
+
+  if (!['level', 'chunk', 'area'].includes(scopeType)) {
+    return res.status(400).json({
+      success: false,
+      message: 'scopeType must be one of: level, chunk, area'
+    });
+  }
+
+  const payload = {
+    roundId,
+    level,
+    scopeType,
+    scopeId,
+    areaType,
+    quota: parseInt(quota, 10),
+    priority: parseInt(priority, 10) || 0,
+    isActive: Boolean(isActive),
+    createdBy: req.user._id
+  };
+
+  const savedRule = await QuotaRule.findOneAndUpdate(
+    { roundId, level, scopeType, scopeId },
+    payload,
+    {
+      new: true,
+      upsert: true,
+      runValidators: true,
+      setDefaultsOnInsert: true
+    }
+  );
+
+  await logger.logAdminAction(
+    `${REQUIRED_ROLE} upserted quota rule`,
+    req.user._id,
+    req,
+    {
+      ruleId: savedRule._id.toString(),
+      roundId,
+      level,
+      scopeType,
+      scopeId,
+      quota: savedRule.quota
+    },
+    'success',
+    'create'
+  );
+
+  res.status(201).json({
+    success: true,
+    data: savedRule
+  });
+}));
+
+// @route   PATCH /api/quotas/quota-rules/:id
+// @desc    Update a quota rule
+// @access  Private (Superadmin)
+router.patch('/quota-rules/:id', asyncHandler(async (req, res) => {
+  const updateData = {};
+  ['quota', 'priority', 'isActive', 'areaType'].forEach((field) => {
+    if (typeof req.body[field] !== 'undefined') {
+      updateData[field] = req.body[field];
+    }
+  });
+
+  if (Object.keys(updateData).length === 0) {
+    return res.status(400).json({
+      success: false,
+      message: 'No updatable fields provided'
+    });
+  }
+
+  if (typeof updateData.quota !== 'undefined') {
+    updateData.quota = parseInt(updateData.quota, 10);
+  }
+  if (typeof updateData.priority !== 'undefined') {
+    updateData.priority = parseInt(updateData.priority, 10) || 0;
+  }
+
+  const rule = await QuotaRule.findByIdAndUpdate(
+    req.params.id,
+    updateData,
+    { new: true, runValidators: true }
+  );
+
+  if (!rule) {
+    return res.status(404).json({
+      success: false,
+      message: 'Quota rule not found'
+    });
+  }
+
+  res.json({
+    success: true,
+    data: rule
+  });
+}));
+
+// @route   DELETE /api/quotas/quota-rules/:id
+// @desc    Delete a quota rule
+// @access  Private (Superadmin)
+router.delete('/quota-rules/:id', asyncHandler(async (req, res) => {
+  const deleted = await QuotaRule.findByIdAndDelete(req.params.id);
+  if (!deleted) {
+    return res.status(404).json({
+      success: false,
+      message: 'Quota rule not found'
+    });
+  }
+
+  res.json({
+    success: true,
+    message: 'Quota rule deleted successfully'
+  });
+}));
+
+module.exports = router;

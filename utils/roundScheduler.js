@@ -1,11 +1,5 @@
 const CompetitionRound = require('../models/CompetitionRound');
-const Submission = require('../models/Submission');
-const Evaluation = require('../models/Evaluation');
-const User = require('../models/User');
-const Quota = require('../models/Quota');
-const Leaderboard = require('../models/Leaderboard');
-const { getNextLevel, advanceSubmissionsForRound, checkAllJudgesCompleted } = require('./advancementService');
-const { generateLocationKey, calculateAndUpdateLeaderboard } = require('./leaderboardUtils');
+const AreaLeaderboard = require('../models/AreaLeaderboard');
 
 // Safely import logger
 let logger = null;
@@ -19,170 +13,87 @@ try {
   };
 }
 
-
 // Check and process rounds that should end
 const checkAndProcessRounds = async () => {
   try {
-    // Check if MongoDB is connected before running queries
     const mongoose = require('mongoose');
     if (mongoose.connection.readyState !== 1) {
       return;
     }
 
     const now = new Date();
-    
-    // Find active rounds that should end
-    const activeRounds = await CompetitionRound.find({
-      status: 'active'
-    });
 
+    // Transition active rounds to ended when their timer finishes.
+    // Manual superadmin approval/publish flow handles promotions and closure.
+    const activeRounds = await CompetitionRound.find({ status: 'active' });
     for (const round of activeRounds) {
-      const actualEndTime = round.getActualEndTime();
-      
+      const actualEndTime = typeof round.getActualEndTime === 'function'
+        ? round.getActualEndTime()
+        : round.endTime;
+
+      if (!actualEndTime) {
+        continue;
+      }
+
       if (now >= actualEndTime) {
-        // Check if we should wait for all judges
-        if (round.waitForAllJudges) {
-          const completionStatus = await checkAllJudgesCompleted(
-            round.level,
-            round.year,
-            round.region || null,  // Explicitly pass null for nationwide
-            round.council || null  // Explicitly pass null for nationwide
-          );
+        round.status = 'ended';
+        round.endedAt = round.endedAt || now;
+        await round.save();
 
-          if (!completionStatus.allCompleted) {
-            // Don't advance yet, but mark as ended (will be closed when judges finish)
-            round.status = 'ended';
-            round.endedAt = now;
-            await round.save();
-            continue;
-          }
+        if (logger) {
+          logger.logSystemEvent(
+            'Competition round moved to ended state by scheduler',
+            null,
+            {
+              roundId: round._id.toString(),
+              year: round.year,
+              level: round.level,
+              endedAt: round.endedAt
+            },
+            'success',
+            'update'
+          ).catch(() => {});
         }
+      }
+    }
 
-        // Auto-advance if enabled
-        if (round.autoAdvance) {
-          const advanceResult = await advanceSubmissionsForRound(
-            round.level,
-            round.year,
-            round.region || null,  // Explicitly pass null for nationwide
-            round.council || null,  // Explicitly pass null for nationwide
-            round._id
-          );
+    // Optionally auto-close rounds that are ended and already finalized across all areas.
+    const endedRounds = await CompetitionRound.find({ status: 'ended', autoAdvance: true });
+    for (const round of endedRounds) {
+      const leaderboards = await AreaLeaderboard.find({
+        roundId: round._id,
+        level: round.level
+      }).select('state');
 
-          if (advanceResult.success) {
-            // Send notifications to teachers with leaderboard data
-            const { notifyTeachersOnPromotion, notifyTeachersOnElimination } = require('./notifications');
-            const leaderboard = advanceResult.leaderboard || [];
-            
-            if (advanceResult.promotedIds && advanceResult.promotedIds.length > 0) {
-              const nextLevel = getNextLevel(round.level);
-              if (nextLevel) {
-                notifyTeachersOnPromotion(advanceResult.promotedIds, nextLevel, leaderboard).catch(err => 
-                  console.error('Error sending promotion notifications:', err)
-                );
-              }
-            }
-            if (advanceResult.eliminatedIds && advanceResult.eliminatedIds.length > 0) {
-              notifyTeachersOnElimination(advanceResult.eliminatedIds, leaderboard).catch(err => 
-                console.error('Error sending elimination notifications:', err)
-              );
-            }
-            
-            // Log the auto-advancement
-            if (logger) {
-              logger.logSystemEvent(
-                'Competition round auto-advanced',
-                null,
-                {
-                  roundId: round._id.toString(),
-                  year: round.year,
-                  level: round.level,
-                  region: round.region,
-                  council: round.council,
-                  promoted: advanceResult.promoted,
-                  eliminated: advanceResult.eliminated
-                },
-                'success',
-                'update'
-              ).catch(() => {});
-            }
-          } else {
-            console.error(`[Round Scheduler] Failed to advance round ${round._id}:`, advanceResult.error);
-          }
-        }
+      if (leaderboards.length === 0) {
+        continue;
+      }
 
-        // Finalize leaderboards for this round
-        try {
-          // Get submissions for this round to determine affected leaderboards
-          const submissionQuery = {
+      const allFinalized = leaderboards.every((leaderboard) =>
+        ['finalized', 'published'].includes(leaderboard.state)
+      );
+
+      if (!allFinalized) {
+        continue;
+      }
+
+      round.status = 'closed';
+      round.closedAt = round.closedAt || now;
+      await round.save();
+
+      if (logger) {
+        logger.logSystemEvent(
+          'Competition round auto-closed after all areas finalized',
+          null,
+          {
+            roundId: round._id.toString(),
             year: round.year,
             level: round.level,
-            status: { $in: ['submitted', 'evaluated', 'promoted', 'eliminated'] }
-          };
-          if (round.region) submissionQuery.region = round.region;
-          if (round.council) submissionQuery.council = round.council;
-
-          const roundSubmissions = await Submission.find(submissionQuery);
-          
-          // Get unique areaOfFocus values
-          const areaOfFocusSet = new Set();
-          roundSubmissions.forEach(sub => {
-            if (sub.areaOfFocus) {
-              areaOfFocusSet.add(sub.areaOfFocus);
-            }
-          });
-
-          // Finalize leaderboards for each areaOfFocus
-          for (const areaOfFocus of areaOfFocusSet) {
-            const locationKeySet = new Set();
-            roundSubmissions
-              .filter(sub => sub.areaOfFocus === areaOfFocus)
-              .forEach(sub => {
-                const locationKey = generateLocationKey(round.level, sub.region, sub.council);
-                locationKeySet.add(locationKey);
-              });
-
-            for (const locationKey of locationKeySet) {
-              // Recalculate and finalize leaderboard
-              await calculateAndUpdateLeaderboard(
-                round.year,
-                areaOfFocus,
-                round.level,
-                locationKey,
-                {
-                  region: round.region,
-                  council: round.council
-                }
-              );
-
-              await Leaderboard.updateOne(
-                {
-                  year: round.year,
-                  areaOfFocus,
-                  level: round.level,
-                  locationKey
-                },
-                {
-                  $set: {
-                    isFinalized: true,
-                    lastUpdated: new Date()
-                  }
-                }
-              );
-            }
-          }
-        } catch (leaderboardError) {
-          console.error('Error finalizing leaderboards:', leaderboardError);
-          // Don't fail the round closure if leaderboard finalization fails
-        }
-
-        // Mark round as ended/closed
-        round.status = 'ended';
-        round.endedAt = now;
-        if (round.autoAdvance) {
-          round.status = 'closed';
-          round.closedAt = now;
-        }
-        await round.save();
+            closedAt: round.closedAt
+          },
+          'success',
+          'update'
+        ).catch(() => {});
       }
     }
   } catch (error) {
@@ -199,7 +110,6 @@ const checkAndProcessRounds = async () => {
   }
 };
 
-// Start the scheduler (check every minute)
 let schedulerInterval = null;
 
 const startScheduler = () => {
@@ -207,12 +117,10 @@ const startScheduler = () => {
     clearInterval(schedulerInterval);
   }
 
-  // Wait a bit for connection to be fully established before first check
   setTimeout(() => {
     checkAndProcessRounds();
-  }, 2000); // Wait 2 seconds after connection
+  }, 2000);
 
-  // Then check every 15 seconds
   schedulerInterval = setInterval(checkAndProcessRounds, 15 * 1000);
 };
 
@@ -221,10 +129,6 @@ const stopScheduler = () => {
     clearInterval(schedulerInterval);
     schedulerInterval = null;
   }
-  if (reminderInterval) {
-    clearInterval(reminderInterval);
-    reminderInterval = null;
-  }
 };
 
 module.exports = {
@@ -232,4 +136,3 @@ module.exports = {
   stopScheduler,
   checkAndProcessRounds
 };
-
