@@ -10,6 +10,7 @@ const User = require('../models/User');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
 const AreaLeaderboard = require('../models/AreaLeaderboard');
 const PromotionRecord = require('../models/PromotionRecord');
+const { getAdminScope } = require('./adminScope');
 
 const ROUND_LEVELS = ['Council', 'Regional', 'National'];
 const NEXT_LEVEL = {
@@ -1069,6 +1070,20 @@ const getAreaReadiness = async ({ roundId, areaId }) => {
   };
 };
 
+const canAdminAccessLeaderboard = (adminUser, leaderboard) => {
+  const scope = getAdminScope(adminUser);
+  if (!scope || scope.level === 'None') return false;
+  if (scope.level === 'National') return true;
+  if (scope.level === 'Regional') {
+    return leaderboard.level === 'Regional' && leaderboard.areaId === scope.region;
+  }
+  if (scope.level === 'Council') {
+    const expected = buildAreaId('Council', scope.region, scope.council);
+    return leaderboard.level === 'Council' && leaderboard.areaId === expected;
+  }
+  return false;
+};
+
 const listAreaLeaderboards = async ({ filters = {}, user }) => {
   const query = {};
   if (filters.roundId) query.roundId = filters.roundId;
@@ -1084,6 +1099,22 @@ const listAreaLeaderboards = async ({ filters = {}, user }) => {
 
   if (user.role === 'judge' || user.role === 'teacher' || user.role === 'stakeholder') {
     query.state = 'published';
+  }
+
+  if (user.role === 'admin') {
+    query.state = 'published';
+    const scope = getAdminScope(user);
+    if (!scope || scope.level === 'None') {
+      query._id = { $in: [] };
+    } else if (scope.level === 'Council' && scope.region && scope.council) {
+      query.level = 'Council';
+      query.areaType = 'council';
+      query.areaId = buildAreaId('Council', scope.region, scope.council);
+    } else if (scope.level === 'Regional' && scope.region) {
+      query.level = 'Regional';
+      query.areaType = 'region';
+      query.areaId = scope.region;
+    }
   }
 
   if (user.role === 'judge') {
@@ -1157,7 +1188,10 @@ const findAreaLeaderboardById = async ({ id, user }) => {
   const leaderboard = await AreaLeaderboard.findById(id);
   if (!leaderboard) return null;
 
-  if (['judge', 'teacher', 'stakeholder'].includes(user.role) && leaderboard.state !== 'published') {
+  if (['judge', 'teacher', 'stakeholder', 'admin'].includes(user.role) && leaderboard.state !== 'published') {
+    return null;
+  }
+  if (user.role === 'admin' && !canAdminAccessLeaderboard(user, leaderboard)) {
     return null;
   }
   if (user.role === 'judge' && !leaderboard.publishedAudiences.includes('judges')) {
