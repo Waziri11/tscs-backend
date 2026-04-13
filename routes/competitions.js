@@ -248,8 +248,15 @@ router.put('/:year/evaluation-criteria/:category/:class/:subject/:area', authori
       });
     }
 
-    // Update evaluation criteria
-    areaObj.evaluationCriteria = evaluationCriteria || [];
+    const { validateAndNormalizeEvaluationCriteria } = require('../utils/evaluationCriteria');
+    const check = validateAndNormalizeEvaluationCriteria(evaluationCriteria || []);
+    if (!check.ok) {
+      return res.status(400).json({
+        success: false,
+        message: check.message
+      });
+    }
+    areaObj.evaluationCriteria = check.normalized;
 
     await competition.save();
 

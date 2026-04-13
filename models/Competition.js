@@ -1,5 +1,27 @@
 const mongoose = require('mongoose');
 
+const evaluationSubcriterionSchema = new mongoose.Schema({
+  key: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  label: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  order: {
+    type: Number,
+    default: 0
+  },
+  maxPoints: {
+    type: Number,
+    required: true,
+    min: 0.01
+  }
+}, { _id: true });
+
 const evaluationCriterionSchema = new mongoose.Schema({
   key: {
     type: String,
@@ -14,6 +36,15 @@ const evaluationCriterionSchema = new mongoose.Schema({
   order: {
     type: Number,
     default: 0
+  },
+  maxPoints: {
+    type: Number,
+    default: 10,
+    min: 0.01
+  },
+  subcriteria: {
+    type: [evaluationSubcriterionSchema],
+    default: []
   }
 }, { _id: true });
 
