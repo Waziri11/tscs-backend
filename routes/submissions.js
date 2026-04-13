@@ -9,8 +9,20 @@ const { manuallyAssignSubmission, getEligibleJudges, getAssignedJudge } = requir
 const User = require('../models/User');
 const { cacheMiddleware, invalidateCacheOnChange } = require('../middleware/cache');
 const { buildSubmissionQueryForAdmin, canAdminAccessSubmission, canAdminAccessUser } = require('../utils/adminScope');
+const {
+  ACTIONABLE_ROUND_STATUSES,
+  getActionableRoundIdsForLevel,
+  resolveSubmissionRoundContext,
+  isRoundActionable
+} = require('../utils/roundContext');
 
 const router = express.Router();
+
+const parseBooleanParam = (value) => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value !== 'string') return false;
+  return ['true', '1', 'yes'].includes(value.toLowerCase());
+};
 
 // All routes require authentication
 router.use(protect);
@@ -20,25 +32,32 @@ router.use(protect);
 // @access  Private
 router.get('/', cacheMiddleware(30), async (req, res) => {
   try {
-    const { 
-      level, 
-      status, 
-      year, 
-      category, 
-      class: classLevel, 
-      subject, 
-      region, 
+    const {
+      level,
+      status,
+      year,
+      category,
+      class: classLevel,
+      subject,
+      region,
       council,
       search,
       page = 1,
       limit = 20
     } = req.query;
-    
-    let query = {};
-    
+
+    const parsedYear = (typeof year !== 'undefined' && year !== null && Number.isFinite(Number(year)))
+      ? Number(year)
+      : null;
+    const query = {};
+    const andClauses = [];
+
+    let responseMessage = null;
+    let judgeAssignmentsInActionableRounds = 0;
+    let activeRoundIds = [];
+
     // Role-based filtering (applied first, cannot be overridden)
     if (req.user.role === 'judge') {
-      // Check if judge has assignment data
       if (!req.user.assignedLevel) {
         return res.json({
           success: true,
@@ -48,11 +67,20 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
         });
       }
 
-      // Strict level matching: judges only see submissions at their exact assigned level
       query.level = req.user.assignedLevel;
-      
+      activeRoundIds = await getActionableRoundIdsForLevel({
+        level: req.user.assignedLevel,
+        year: parsedYear
+      });
+
+      if (activeRoundIds.length === 0) {
+        query._id = { $in: [] };
+        responseMessage = 'No active or ended round is available for your assigned level.';
+      } else {
+        query.roundId = { $in: activeRoundIds };
+      }
+
       if (req.user.assignedLevel === 'Council') {
-        // Council level: must match both region and council exactly
         if (!req.user.assignedRegion || !req.user.assignedCouncil) {
           return res.json({
             success: true,
@@ -61,15 +89,9 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
             message: 'Judge assignment incomplete. Please contact administrator.'
           });
         }
-        // Match region and council exactly (case-sensitive for now, can be made case-insensitive if needed)
         query.region = req.user.assignedRegion?.trim();
         query.council = req.user.assignedCouncil?.trim();
-        
-        // Council/Regional judges see ALL submissions in their location (not filtered by areaOfFocus)
-        // They only see submissions assigned to them via SubmissionAssignment
       } else if (req.user.assignedLevel === 'Regional') {
-        // Regional level: must match region (all councils in that region)
-        // Submissions must be at Regional level (after council round)
         if (!req.user.assignedRegion) {
           return res.json({
             success: true,
@@ -78,88 +100,95 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
             message: 'Judge assignment incomplete. Please contact administrator.'
           });
         }
-        // Match region exactly (case-sensitive for now, can be made case-insensitive if needed)
         query.region = req.user.assignedRegion?.trim();
-        
-        // Council/Regional judges see ALL submissions in their location (not filtered by areaOfFocus)
-        // They only see submissions assigned to them via SubmissionAssignment
-      } else if (req.user.assignedLevel === 'National') {
-        // National level: see all submissions at National level only
-        // No location filter needed
-        // National judges see ALL submissions at National level (not filtered by areaOfFocus)
       }
-
     } else if (req.user.role === 'teacher') {
-      // Teachers only see their own submissions
       query.teacherId = req.user._id;
     } else if (req.user.role === 'admin') {
-      // Admin scope: council/regional/national - filter submissions by level and location
-      const scopeQuery = buildSubmissionQueryForAdmin(req.user);
-      Object.assign(query, scopeQuery);
+      Object.assign(query, buildSubmissionQueryForAdmin(req.user));
     }
-    // Superadmin: no filter, sees all
 
-    // Apply additional filters (but don't override role-based filters)
+    // Apply additional filters
     if (status) {
       query.status = status;
     } else if (req.user.role === 'judge') {
-      // Judges should not see promoted/eliminated submissions in their active assignment list
-      // Unless they explicitly filter for them via status parameter
       query.status = { $nin: ['promoted', 'eliminated'] };
     }
-    if (year) query.year = parseInt(year);
+
+    if (parsedYear) query.year = parsedYear;
     if (category) query.category = category;
     if (classLevel) query.class = classLevel;
     if (subject) query.subject = subject;
-    // Note: level, region, and council are controlled by role-based filtering above
-    
+
     if (search) {
-      query.$or = [
-        { teacherName: { $regex: search, $options: 'i' } },
-        { school: { $regex: search, $options: 'i' } },
-        { category: { $regex: search, $options: 'i' } },
-        { subject: { $regex: search, $options: 'i' } }
-      ];
+      andClauses.push({
+        $or: [
+          { teacherName: { $regex: search, $options: 'i' } },
+          { school: { $regex: search, $options: 'i' } },
+          { category: { $regex: search, $options: 'i' } },
+          { subject: { $regex: search, $options: 'i' } }
+        ]
+      });
     }
 
-    // For Council/Regional judges, filter to only show submissions assigned to them
-    // Move this into MongoDB query to avoid N+1 problem
+    // Council/Regional judges: ensure assignment and submission round are exactly aligned.
     if (req.user.role === 'judge' && (req.user.assignedLevel === 'Council' || req.user.assignedLevel === 'Regional')) {
-      const activeRoundsQuery = {
-        level: req.user.assignedLevel,
-        status: { $in: ['active', 'ended'] }
-      };
-      if (year) {
-        activeRoundsQuery.year = parseInt(year);
+      let assignmentPairs = [];
+
+      if (activeRoundIds.length > 0) {
+        const assignmentDocs = await SubmissionAssignment.find({
+          judgeId: req.user._id,
+          level: req.user.assignedLevel,
+          roundId: { $in: activeRoundIds }
+        })
+          .select('submissionId roundId')
+          .lean();
+
+        assignmentPairs = assignmentDocs.map((assignment) => ({
+          _id: assignment.submissionId,
+          roundId: assignment.roundId
+        }));
       }
 
-      const activeRounds = await CompetitionRound.find(activeRoundsQuery).select('_id');
-      const activeRoundIds = activeRounds.map((round) => round._id);
+      judgeAssignmentsInActionableRounds = assignmentPairs.length;
 
-      const assignedSubmissionIds = await SubmissionAssignment.find({
-        judgeId: req.user._id,
-        level: req.user.assignedLevel,
-        roundId: { $in: activeRoundIds }
-      }).select('submissionId').lean();
-      
-      const assignedIds = assignedSubmissionIds.map(a => a.submissionId);
-      if (assignedIds.length > 0) {
-        query._id = { $in: assignedIds };
+      if (assignmentPairs.length > 0) {
+        andClauses.push({ $or: assignmentPairs });
       } else {
-        // If no assignments, return empty result
         query._id = { $in: [] };
+        if (!responseMessage) {
+          const historicalRoundIds = (
+            await CompetitionRound.find({
+              level: req.user.assignedLevel,
+              ...(parsedYear ? { year: parsedYear } : {}),
+              status: { $nin: ACTIONABLE_ROUND_STATUSES }
+            }).select('_id')
+          ).map((round) => round._id);
+
+          const historicalAssignments = historicalRoundIds.length > 0
+            ? await SubmissionAssignment.countDocuments({
+              judgeId: req.user._id,
+              level: req.user.assignedLevel,
+              roundId: { $in: historicalRoundIds }
+            })
+            : 0;
+
+          responseMessage = historicalAssignments > 0
+            ? 'No current-round assignments found. You have historical assignments in closed or archived rounds.'
+            : 'No submissions are assigned to you in active or ended rounds.';
+        }
       }
     }
 
-    // Parse pagination parameters
+    if (andClauses.length > 0) {
+      query.$and = andClauses;
+    }
+
     const pageNum = parseInt(page, 10) || 1;
     const limitNum = parseInt(limit, 10) || 20;
     const skip = (pageNum - 1) * limitNum;
 
-    // Get total count for pagination metadata
     const total = await Submission.countDocuments(query);
-
-    // Fetch submissions with pagination, using lean() for better performance on read-only queries
     const submissions = await Submission.find(query)
       .populate('teacherId', 'name email username')
       .sort({ createdAt: -1 })
@@ -177,32 +206,33 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
       submissions
     };
 
-    // Add debug info in development mode
+    if (responseMessage) {
+      response.message = responseMessage;
+    }
+
     if (process.env.NODE_ENV === 'development' && req.user.role === 'judge') {
       response.debug = {
         judgeAssignment: {
           assignedLevel: req.user.assignedLevel,
           assignedRegion: req.user.assignedRegion,
           assignedCouncil: req.user.assignedCouncil,
-          areasOfFocus: req.user.areasOfFocus
+          assignmentsInActionableRounds: judgeAssignmentsInActionableRounds
         },
-        query: query
+        query
       };
     }
 
-    // Log submission list view (non-blocking - don't let logging delay the response)
     logger.logUserActivity(
       'User viewed submissions list',
       req.user._id,
       req,
-      { 
+      {
         role: req.user.role,
         filters: { level, status, year, category, subject, region, council },
         count: submissions.length
       },
       'read'
-    ).catch(err => {
-      // Log error but don't fail the request
+    ).catch((err) => {
       console.error('Error logging user activity:', err);
     });
 
@@ -257,16 +287,23 @@ router.get('/:id', async (req, res) => {
         });
       }
 
-      if (submission.level === 'Council' || submission.level === 'Regional') {
-        const roundIds = (await CompetitionRound.find({
-          level: submission.level,
-          status: { $in: ['active', 'ended'] }
-        }).select('_id')).map((round) => round._id);
+      const roundContext = await resolveSubmissionRoundContext(submission, {
+        includeHistorical: false,
+        allowFallbackByYearLevel: false
+      });
 
+      if (!roundContext.round || !isRoundActionable(roundContext.round)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Submission is not in an active or ended round context'
+        });
+      }
+
+      if (submission.level === 'Council' || submission.level === 'Regional') {
         const assignment = await SubmissionAssignment.findOne({
           submissionId: submission._id,
           judgeId: req.user._id,
-          roundId: { $in: roundIds }
+          roundId: roundContext.round._id
         }).select('_id');
 
         if (!assignment) {
@@ -896,7 +933,22 @@ router.get('/:id/assigned-judge', authorize('admin', 'superadmin'), async (req, 
       });
     }
 
-    const assignment = await getAssignedJudge(req.params.id, req.query.roundId || null);
+    const includeHistorical = parseBooleanParam(req.query.includeHistorical);
+    const assignmentResult = await getAssignedJudge(req.params.id, {
+      roundId: req.query.roundId || null,
+      includeHistorical,
+      submission
+    });
+
+    if (!assignmentResult.success) {
+      return res.status(400).json({
+        success: false,
+        message: assignmentResult.error || 'Failed to resolve assignment context'
+      });
+    }
+
+    const assignment = assignmentResult.assignment;
+    const resolvedRound = assignmentResult.round || assignment?.roundId || null;
     
     res.json({
       success: true,
@@ -905,9 +957,18 @@ router.get('/:id/assigned-judge', authorize('admin', 'superadmin'), async (req, 
         judgeName: assignment.judgeId.name,
         judgeEmail: assignment.judgeId.email,
         assignedAt: assignment.assignedAt,
-        roundId: assignment.roundId?._id || assignment.roundId || null
+        roundId: assignment.roundId?._id || assignment.roundId || null,
+        roundStatus: assignment.roundId?.status || resolvedRound?.status || null,
+        isHistorical: assignmentResult.isHistorical === true
       } : null,
-      message: assignment ? 'Judge assigned' : 'No judge assigned'
+      roundContext: resolvedRound ? {
+        roundId: resolvedRound._id || resolvedRound,
+        roundStatus: resolvedRound.status || null,
+        isActionable: isRoundActionable(resolvedRound)
+      } : null,
+      message: assignment
+        ? assignmentResult.isHistorical ? 'Historical judge assignment found' : 'Judge assigned'
+        : 'No judge assigned for the current round context'
     });
   } catch (error) {
     console.error('Get assigned judge error:', error);
@@ -960,8 +1021,21 @@ router.post('/:id/assign-judge', authorize('admin', 'superadmin'), async (req, r
       });
     }
 
+    const roundResolution = await resolveSubmissionRoundContext(submission, {
+      explicitRoundId: req.body.roundId || req.query.roundId || null,
+      includeHistorical: false,
+      allowFallbackByYearLevel: true
+    });
+
+    if (!roundResolution.round) {
+      return res.status(400).json({
+        success: false,
+        message: 'No active or ended round found for this submission'
+      });
+    }
+
     const result = await manuallyAssignSubmission(req.params.id, judgeId, {
-      roundId: req.body.roundId || req.query.roundId || null
+      roundId: roundResolution.round._id
     });
 
     if (!result.success) {
@@ -992,7 +1066,8 @@ router.post('/:id/assign-judge', authorize('admin', 'superadmin'), async (req, r
         submissionId: result.assignment.submissionId,
         judgeId: result.assignment.judgeId,
         assignedAt: result.assignment.assignedAt,
-        roundId: result.assignment.roundId
+        roundId: result.assignment.roundId,
+        roundStatus: roundResolution.round.status
       },
       message: result.message
     });

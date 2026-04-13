@@ -3,8 +3,17 @@ const Submission = require('../models/Submission');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
 const CompetitionRound = require('../models/CompetitionRound');
 const notificationService = require('../services/notificationService');
+const {
+  buildCaseInsensitiveExactRegex,
+  locationsEqual,
+  resolveSubmissionRoundContext,
+  isRoundActionable,
+  isRoundHistorical
+} = require('./roundContext');
 
-const buildAreaQueryByLevel = (level, region, council) => {
+const ACTIONABLE_ASSIGNMENT_STATUSES = new Set(['pending', 'submitted', 'under_review', 'evaluated']);
+
+const buildSubmissionAreaQueryByLevel = (level, region, council) => {
   if (level === 'Council') {
     return { region, council };
   }
@@ -14,25 +23,57 @@ const buildAreaQueryByLevel = (level, region, council) => {
   return {};
 };
 
-const getRoundForSubmission = async (submission, explicitRoundId = null) => {
-  if (explicitRoundId) {
-    return CompetitionRound.findById(explicitRoundId);
+const buildJudgeAreaQueryByLevel = (level, region, council) => {
+  if (level === 'Council') {
+    const regionRegex = buildCaseInsensitiveExactRegex(region);
+    const councilRegex = buildCaseInsensitiveExactRegex(council);
+    if (!regionRegex || !councilRegex) return null;
+    return {
+      assignedRegion: regionRegex,
+      assignedCouncil: councilRegex
+    };
+  }
+  if (level === 'Regional') {
+    const regionRegex = buildCaseInsensitiveExactRegex(region);
+    if (!regionRegex) return null;
+    return {
+      assignedRegion: regionRegex
+    };
+  }
+  return {};
+};
+
+const isSubmissionActionableForAssignment = (submission) => {
+  if (!submission) return false;
+  if (submission.disqualified) return false;
+  return ACTIONABLE_ASSIGNMENT_STATUSES.has(submission.status);
+};
+
+const resolveActionableRoundForSubmission = async (submission, explicitRoundId = null) => {
+  const context = await resolveSubmissionRoundContext(submission, {
+    explicitRoundId,
+    includeHistorical: false,
+    allowFallbackByYearLevel: true
+  });
+
+  if (!context.round) {
+    return {
+      round: null,
+      reason: context.reason || 'round_not_found'
+    };
   }
 
-  if (submission.roundId) {
-    const bySubmissionRound = await CompetitionRound.findById(submission.roundId);
-    if (bySubmissionRound) return bySubmissionRound;
+  if (!isRoundActionable(context.round)) {
+    return {
+      round: null,
+      reason: 'round_not_actionable'
+    };
   }
 
-  const candidates = await CompetitionRound.find({
-    year: submission.year,
-    level: submission.level,
-    status: { $in: ['active', 'ended'] }
-  }).sort({ createdAt: -1 });
-
-  return candidates.find((candidate) => candidate.status === 'active')
-    || candidates.find((candidate) => candidate.status === 'ended')
-    || null;
+  return {
+    round: context.round,
+    reason: null
+  };
 };
 
 /**
@@ -56,8 +97,16 @@ async function assignJudgeToSubmission(submission, options = {}) {
       };
     }
 
-    const round = await getRoundForSubmission(submission, options.roundId || null);
-    if (!round) {
+    if (!isSubmissionActionableForAssignment(submission)) {
+      return {
+        success: false,
+        assignment: null,
+        error: `Submission status "${submission.status}" is not eligible for assignment`
+      };
+    }
+
+    const roundResolution = await resolveActionableRoundForSubmission(submission, options.roundId || null);
+    if (!roundResolution.round) {
       return {
         success: false,
         assignment: null,
@@ -65,7 +114,13 @@ async function assignJudgeToSubmission(submission, options = {}) {
       };
     }
 
+    const round = roundResolution.round;
     const roundId = round._id;
+
+    if (!submission.roundId || String(submission.roundId) !== String(roundId)) {
+      await Submission.updateOne({ _id: submission._id }, { $set: { roundId } });
+      submission.roundId = roundId;
+    }
 
     const existingAssignment = await SubmissionAssignment.findOne({
       roundId,
@@ -80,11 +135,20 @@ async function assignJudgeToSubmission(submission, options = {}) {
       };
     }
 
+    const areaQuery = buildJudgeAreaQueryByLevel(submission.level, submission.region, submission.council);
+    if (areaQuery === null) {
+      return {
+        success: false,
+        assignment: null,
+        error: 'Submission location is incomplete for judge assignment'
+      };
+    }
+
     const judgeQuery = {
       role: 'judge',
       status: 'active',
       assignedLevel: submission.level,
-      ...buildAreaQueryByLevel(submission.level, submission.region, submission.council)
+      ...areaQuery
     };
 
     const availableJudges = await User.find(judgeQuery).select('_id name email');
@@ -175,19 +239,67 @@ async function assignJudgeToSubmission(submission, options = {}) {
  * If roundId is not provided, returns the latest assignment.
  */
 async function getAssignedJudge(submissionId, roundId = null) {
+  const options = (roundId && typeof roundId === 'object')
+    ? roundId
+    : { roundId };
+
   try {
-    const query = { submissionId };
-    if (roundId) query.roundId = roundId;
+    const submission = options.submission || await Submission.findById(submissionId).select('_id year level roundId');
+    if (!submission) {
+      return {
+        success: false,
+        assignment: null,
+        round: null,
+        isHistorical: false,
+        error: 'Submission not found'
+      };
+    }
 
-    const assignment = await SubmissionAssignment.findOne(query)
-      .sort({ createdAt: -1 })
-      .populate('judgeId', 'name email username')
-      .populate('roundId', 'year level status');
+    const includeHistorical = options.includeHistorical === true;
 
-    return assignment;
+    const context = await resolveSubmissionRoundContext(submission, {
+      explicitRoundId: options.roundId || null,
+      includeHistorical,
+      allowFallbackByYearLevel: true
+    });
+
+    let assignment = null;
+    let resolvedRound = context.round || null;
+
+    if (resolvedRound) {
+      assignment = await SubmissionAssignment.findOne({
+        submissionId,
+        roundId: resolvedRound._id
+      })
+        .populate('judgeId', 'name email username')
+        .populate('roundId', 'year level status');
+    }
+
+    if (!assignment && includeHistorical) {
+      assignment = await SubmissionAssignment.findOne({ submissionId })
+        .sort({ createdAt: -1 })
+        .populate('judgeId', 'name email username')
+        .populate('roundId', 'year level status');
+      resolvedRound = assignment?.roundId || resolvedRound;
+    }
+
+    return {
+      success: true,
+      assignment,
+      round: resolvedRound,
+      source: context.source,
+      isHistorical: isRoundHistorical(resolvedRound),
+      error: null
+    };
   } catch (error) {
     console.error('Error getting assigned judge:', error);
-    return null;
+    return {
+      success: false,
+      assignment: null,
+      round: null,
+      isHistorical: false,
+      error: error.message
+    };
   }
 }
 
@@ -228,7 +340,7 @@ async function assignUnassignedSubmissionsToJudge(judge) {
 
     let assignedCount = 0;
     for (const round of rounds) {
-      const areaQuery = buildAreaQueryByLevel(
+      const areaQuery = buildSubmissionAreaQueryByLevel(
         judge.assignedLevel,
         judge.assignedRegion,
         judge.assignedCouncil
@@ -288,6 +400,14 @@ async function manuallyAssignSubmission(submissionId, judgeId, options = {}) {
       return { success: false, assignment: null, error: 'National level does not require assignment' };
     }
 
+    if (!isSubmissionActionableForAssignment(submission)) {
+      return {
+        success: false,
+        assignment: null,
+        error: `Submission status "${submission.status}" is not eligible for assignment`
+      };
+    }
+
     const judge = await User.findById(judgeId);
     if (!judge || judge.role !== 'judge' || judge.status !== 'active') {
       return { success: false, assignment: null, error: 'Invalid or inactive judge' };
@@ -298,18 +418,24 @@ async function manuallyAssignSubmission(submissionId, judgeId, options = {}) {
     }
 
     if (submission.level === 'Council') {
-      if (judge.assignedRegion !== submission.region || judge.assignedCouncil !== submission.council) {
+      if (!locationsEqual(judge.assignedRegion, submission.region) || !locationsEqual(judge.assignedCouncil, submission.council)) {
         return { success: false, assignment: null, error: 'Judge location does not match submission location' };
       }
     } else if (submission.level === 'Regional') {
-      if (judge.assignedRegion !== submission.region) {
+      if (!locationsEqual(judge.assignedRegion, submission.region)) {
         return { success: false, assignment: null, error: 'Judge region does not match submission region' };
       }
     }
 
-    const round = await getRoundForSubmission(submission, options.roundId || null);
-    if (!round) {
+    const roundResolution = await resolveActionableRoundForSubmission(submission, options.roundId || null);
+    if (!roundResolution.round) {
       return { success: false, assignment: null, error: 'No active or ended round found for this submission level' };
+    }
+
+    const round = roundResolution.round;
+    if (!submission.roundId || String(submission.roundId) !== String(round._id)) {
+      await Submission.updateOne({ _id: submissionId }, { $set: { roundId: round._id } });
+      submission.roundId = round._id;
     }
 
     const assignmentQuery = {
@@ -371,7 +497,7 @@ async function manuallyAssignSubmission(submissionId, judgeId, options = {}) {
  */
 async function getEligibleJudges(submissionId) {
   try {
-    const submission = await Submission.findById(submissionId);
+    const submission = await Submission.findById(submissionId).select('_id level region council status disqualified');
 
     if (!submission) {
       return { success: false, judges: [], error: 'Submission not found' };
@@ -385,11 +511,28 @@ async function getEligibleJudges(submissionId) {
       };
     }
 
+    if (!isSubmissionActionableForAssignment(submission)) {
+      return {
+        success: true,
+        judges: [],
+        message: `Submission status "${submission.status}" is not eligible for assignment`
+      };
+    }
+
+    const areaQuery = buildJudgeAreaQueryByLevel(submission.level, submission.region, submission.council);
+    if (areaQuery === null) {
+      return {
+        success: true,
+        judges: [],
+        message: 'Submission location is incomplete for judge assignment'
+      };
+    }
+
     const judgeQuery = {
       role: 'judge',
       status: 'active',
       assignedLevel: submission.level,
-      ...buildAreaQueryByLevel(submission.level, submission.region, submission.council)
+      ...areaQuery
     };
 
     const judges = await User.find(judgeQuery)
