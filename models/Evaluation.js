@@ -1,6 +1,12 @@
 const mongoose = require('mongoose');
 
 const evaluationSchema = new mongoose.Schema({
+  roundId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'CompetitionRound',
+    required: true,
+    index: true
+  },
   submissionId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Submission',
@@ -39,10 +45,11 @@ const evaluationSchema = new mongoose.Schema({
 });
 
 // Indexes
-evaluationSchema.index({ submissionId: 1, judgeId: 1 }, { unique: true });
+evaluationSchema.index({ roundId: 1, submissionId: 1, judgeId: 1 }, { unique: true });
+evaluationSchema.index({ roundId: 1, submissionId: 1 });
+evaluationSchema.index({ roundId: 1, judgeId: 1 });
 evaluationSchema.index({ submissionId: 1 });
 evaluationSchema.index({ judgeId: 1 });
 evaluationSchema.index({ judgeId: 1, submittedAt: -1 }); // For judge evaluation history queries
 
 module.exports = mongoose.model('Evaluation', evaluationSchema);
-

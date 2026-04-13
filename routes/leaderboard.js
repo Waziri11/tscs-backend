@@ -1,9 +1,16 @@
 const express = require('express');
 const { protect, authorize, authorizeNationalAdminOrSuperadmin } = require('../middleware/auth');
 const { cacheMiddleware, invalidateCacheOnChange } = require('../middleware/cache');
-const Leaderboard = require('../models/Leaderboard');
-const { getLeaderboard, getLeaderboards, getAvailableLocations, generateLocationKey } = require('../utils/leaderboardUtils');
-const { advanceSubmissionsForLocation, advanceSubmissionsGlobal } = require('../utils/advancementService');
+const CompetitionRound = require('../models/CompetitionRound');
+const AreaLeaderboard = require('../models/AreaLeaderboard');
+const {
+  listAreaLeaderboards,
+  listAvailableLocations,
+  findAreaLeaderboardById,
+  approveAreaLeaderboardAndPromote,
+  publishAreaLeaderboard,
+  reopenAreaLeaderboard
+} = require('../utils/roundJudgementService');
 
 // Safely import logger
 let logger = null;
@@ -19,288 +26,11 @@ try {
 
 const router = express.Router();
 
-// All routes require authentication
 router.use(protect);
 
-// @route   GET /api/leaderboard
-// @desc    Get leaderboards with filters (year, areaOfFocus, level, region, council)
-// @access  Private (Admin, Superadmin, Stakeholder, Judge)
-router.get('/', cacheMiddleware(30), async (req, res) => {
-  try {
-    const { year, areaOfFocus, level, region, council, isFinalized } = req.query;
-
-    // Build filters
-    const filters = {};
-    if (year) filters.year = parseInt(year);
-    if (areaOfFocus) filters.areaOfFocus = areaOfFocus;
-    if (level) filters.level = level;
-    if (region) filters.region = region;
-    if (council) filters.council = council;
-    if (isFinalized !== undefined) filters.isFinalized = isFinalized === 'true';
-
-    // Judge-specific filtering: only finalized leaderboards for their assignment
-    if (req.user.role === 'judge') {
-      filters.isFinalized = true;
-      
-      // Filter by judge's assignment
-      // Note: Judges may have areasOfFocus array, we'll filter after fetching
-      if (req.user.assignedLevel) {
-        filters.level = req.user.assignedLevel;
-      }
-      if (req.user.assignedRegion) {
-        filters.region = req.user.assignedRegion;
-      }
-      if (req.user.assignedCouncil) {
-        filters.council = req.user.assignedCouncil;
-      }
-    }
-
-    let leaderboards = await getLeaderboards(filters);
-
-    // For judges, filter by areasOfFocus array
-    if (req.user.role === 'judge' && req.user.areasOfFocus && req.user.areasOfFocus.length > 0) {
-      leaderboards = leaderboards.filter(lb => 
-        req.user.areasOfFocus.includes(lb.areaOfFocus)
-      );
-    }
-
-    // Log leaderboard view
-    if (logger) {
-      logger.logUserActivity(
-        `${req.user.role} viewed leaderboards`,
-        req.user._id,
-        req,
-        {
-          filters,
-          count: leaderboards.length
-        },
-        'read'
-      ).catch(() => {});
-    }
-
-    res.json({
-      success: true,
-      leaderboards,
-      count: leaderboards.length
-    });
-  } catch (error) {
-    console.error('Get leaderboards error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Server error'
-    });
-  }
-});
-
-// @route   GET /api/leaderboard/:id
-// @desc    Get specific leaderboard by ID
-// @access  Private (Admin, Superadmin, Stakeholder, Judge)
-router.get('/:id', cacheMiddleware(30), async (req, res) => {
-  try {
-    const leaderboard = await Leaderboard.findById(req.params.id);
-
-    if (!leaderboard) {
-      return res.status(404).json({
-        success: false,
-        message: 'Leaderboard not found'
-      });
-    }
-
-    // Judge-specific check: must be finalized and match assignment
-    if (req.user.role === 'judge') {
-      if (!leaderboard.isFinalized) {
-        return res.status(403).json({
-          success: false,
-          message: 'Leaderboard is not yet finalized'
-        });
-      }
-
-      // Check if judge's assignment matches (check areasOfFocus array)
-      if (req.user.areasOfFocus && req.user.areasOfFocus.length > 0) {
-        if (!req.user.areasOfFocus.includes(leaderboard.areaOfFocus)) {
-          return res.status(403).json({
-            success: false,
-            message: 'Not authorized to view this leaderboard'
-          });
-        }
-      }
-      if (req.user.assignedLevel && leaderboard.level !== req.user.assignedLevel) {
-        return res.status(403).json({
-          success: false,
-          message: 'Not authorized to view this leaderboard'
-        });
-      }
-    }
-
-    // Log leaderboard view
-    if (logger) {
-      logger.logUserActivity(
-        `${req.user.role} viewed leaderboard`,
-        req.user._id,
-        req,
-        {
-          leaderboardId: leaderboard._id.toString(),
-          year: leaderboard.year,
-          areaOfFocus: leaderboard.areaOfFocus,
-          level: leaderboard.level
-        },
-        'read'
-      ).catch(() => {});
-    }
-
-    res.json({
-      success: true,
-      leaderboard
-    });
-  } catch (error) {
-    console.error('Get leaderboard error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Server error'
-    });
-  }
-});
-
-// @route   POST /api/leaderboard/:id/finalize
-// @desc    Finalize a leaderboard (Admin/Superadmin only)
-// @access  Private (Admin, Superadmin)
-router.post('/:id/finalize', authorize('admin', 'superadmin'), authorizeNationalAdminOrSuperadmin, invalidateCacheOnChange('cache:/api/leaderboard*'), async (req, res) => {
-  try {
-    const leaderboard = await Leaderboard.findById(req.params.id);
-
-    if (!leaderboard) {
-      return res.status(404).json({
-        success: false,
-        message: 'Leaderboard not found'
-      });
-    }
-
-    leaderboard.isFinalized = true;
-    leaderboard.lastUpdated = new Date();
-    await leaderboard.save();
-
-    // Log finalization
-    if (logger) {
-      logger.logAdminAction(
-        `${req.user.role} finalized leaderboard`,
-        req.user._id,
-        req,
-        {
-          leaderboardId: leaderboard._id.toString(),
-          year: leaderboard.year,
-          areaOfFocus: leaderboard.areaOfFocus,
-          level: leaderboard.level,
-          locationKey: leaderboard.locationKey
-        },
-        'success',
-        'update'
-      ).catch(() => {});
-    }
-
-    res.json({
-      success: true,
-      message: 'Leaderboard finalized successfully',
-      leaderboard
-    });
-  } catch (error) {
-    console.error('Finalize leaderboard error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Server error'
-    });
-  }
-});
-
-// @route   POST /api/leaderboard/:year/:level/:areaOfFocus/advance
-// @desc    Advance submissions to next level for a specific areaOfFocus
-// @access  Private (Admin, Superadmin)
-router.post('/:year/:level/:areaOfFocus/advance', authorize('admin', 'superadmin'), authorizeNationalAdminOrSuperadmin, invalidateCacheOnChange('cache:/api/leaderboard*'), async (req, res) => {
-  try {
-    const { year, level, areaOfFocus } = req.params;
-    const { locationKey, global } = req.body;
-
-    // Validate level
-    if (!['Council', 'Regional', 'National'].includes(level)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid level. Must be Council, Regional, or National'
-      });
-    }
-
-    // Validate year
-    const yearNum = parseInt(year);
-    if (isNaN(yearNum) || yearNum < 2000 || yearNum > 2100) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid year'
-      });
-    }
-
-    // Decode areaOfFocus (URL encoded)
-    const decodedAreaOfFocus = decodeURIComponent(areaOfFocus);
-
-    let result;
-
-    if (global) {
-      // Advance all locations for this areaOfFocus
-      result = await advanceSubmissionsGlobal(yearNum, decodedAreaOfFocus, level);
-    } else {
-      // Advance specific location
-      if (!locationKey) {
-        return res.status(400).json({
-          success: false,
-          message: 'Please provide locationKey or set global to true'
-        });
-      }
-      const decodedLocationKey = decodeURIComponent(locationKey);
-      result = await advanceSubmissionsForLocation(yearNum, decodedAreaOfFocus, level, decodedLocationKey);
-    }
-
-    if (!result.success) {
-      return res.status(400).json({
-        success: false,
-        message: result.error || 'Failed to advance submissions'
-      });
-    }
-
-    // Log advancement action
-    if (logger) {
-      logger.logAdminAction(
-        `${req.user.role} advanced submissions to next level`,
-        req.user._id,
-        req,
-        {
-          year: yearNum,
-          areaOfFocus: decodedAreaOfFocus,
-          level,
-          locationKey: locationKey || 'global',
-          promoted: result.promoted || result.totalPromoted || 0,
-          eliminated: result.eliminated || result.totalEliminated || 0
-        },
-        'success',
-        'update'
-      ).catch(() => {});
-    }
-
-    res.json({
-      success: true,
-      message: global 
-        ? `Successfully advanced submissions globally. ${result.totalPromoted} promoted, ${result.totalEliminated} eliminated.`
-        : `Successfully advanced submissions for location. ${result.promoted} promoted, ${result.eliminated} eliminated.`,
-      ...result
-    });
-  } catch (error) {
-    console.error('Advance submissions error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Server error'
-    });
-  }
-});
-
 // @route   GET /api/leaderboard/available-locations
-// @desc    Get available locations for filters
-// @access  Private (Admin, Superadmin, Stakeholder, Judge)
+// @desc    Get available leaderboard area IDs for current filters
+// @access  Private
 router.get('/available-locations', cacheMiddleware(60), async (req, res) => {
   try {
     const { year, level, areaOfFocus } = req.query;
@@ -312,20 +42,449 @@ router.get('/available-locations', cacheMiddleware(60), async (req, res) => {
       });
     }
 
-    const locations = await getAvailableLocations(
-      parseInt(year),
+    const locations = await listAvailableLocations({
+      year: parseInt(year, 10),
       level,
-      areaOfFocus ? decodeURIComponent(areaOfFocus) : null
-    );
+      areaOfFocus: areaOfFocus || null,
+      user: req.user
+    });
 
-    res.json({
+    return res.json({
       success: true,
       locations,
       count: locations.length
     });
   } catch (error) {
     console.error('Get available locations error:', error);
-    res.status(500).json({
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   GET /api/leaderboard
+// @desc    Get area leaderboards with filters
+// @access  Private
+router.get('/', cacheMiddleware(30), async (req, res) => {
+  try {
+    const {
+      roundId,
+      year,
+      level,
+      areaType,
+      areaId,
+      areaOfFocus,
+      state,
+      chunkId,
+      region,
+      council,
+      isFinalized
+    } = req.query;
+
+    const filters = {};
+    if (roundId) filters.roundId = roundId;
+    if (year) filters.year = parseInt(year, 10);
+    if (level) filters.level = level;
+    if (areaType) filters.areaType = areaType;
+    if (areaId) filters.areaId = areaId;
+    if (chunkId) filters.chunkId = chunkId;
+    if (areaOfFocus) filters.areaOfFocus = decodeURIComponent(areaOfFocus);
+
+    // Backward compatibility for legacy query shape.
+    if (!filters.areaId && level === 'Council' && region && council) {
+      filters.areaType = 'council';
+      filters.areaId = `${region}::${council}`;
+    } else if (!filters.areaId && level === 'Regional' && region) {
+      filters.areaType = 'region';
+      filters.areaId = region;
+    }
+
+    // Backward compatibility for finalized flag.
+    if (!state && typeof isFinalized !== 'undefined') {
+      filters.state = isFinalized === 'true' ? 'finalized' : 'provisional';
+    } else if (state) {
+      filters.state = state;
+    }
+
+    const leaderboards = (await listAreaLeaderboards({ filters, user: req.user })).map((leaderboard) => {
+      const plain = leaderboard.toObject ? leaderboard.toObject() : leaderboard;
+      return {
+        ...plain,
+        locationKey: plain.areaId,
+        isFinalized: ['finalized', 'published'].includes(plain.state)
+      };
+    });
+
+    if (logger) {
+      logger.logUserActivity(
+        `${req.user.role} viewed area leaderboards`,
+        req.user._id,
+        req,
+        {
+          filters,
+          count: leaderboards.length
+        },
+        'read'
+      ).catch(() => {});
+    }
+
+    return res.json({
+      success: true,
+      leaderboards,
+      count: leaderboards.length
+    });
+  } catch (error) {
+    console.error('Get leaderboards error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   GET /api/leaderboard/:id
+// @desc    Get one area leaderboard by ID
+// @access  Private
+router.get('/:id', cacheMiddleware(30), async (req, res) => {
+  try {
+    const leaderboard = await findAreaLeaderboardById({
+      id: req.params.id,
+      user: req.user
+    });
+
+    if (!leaderboard) {
+      return res.status(404).json({
+        success: false,
+        message: 'Leaderboard not found or not accessible'
+      });
+    }
+
+    if (logger) {
+      logger.logUserActivity(
+        `${req.user.role} viewed area leaderboard`,
+        req.user._id,
+        req,
+        {
+          leaderboardId: leaderboard._id.toString(),
+          roundId: leaderboard.roundId?.toString() || null,
+          level: leaderboard.level,
+          areaId: leaderboard.areaId,
+          state: leaderboard.state
+        },
+        'read'
+      ).catch(() => {});
+    }
+
+    const plainLeaderboard = leaderboard.toObject ? leaderboard.toObject() : leaderboard;
+
+    return res.json({
+      success: true,
+      leaderboard: {
+        ...plainLeaderboard,
+        locationKey: plainLeaderboard.areaId,
+        isFinalized: ['finalized', 'published'].includes(plainLeaderboard.state)
+      }
+    });
+  } catch (error) {
+    console.error('Get leaderboard error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// Admin/superadmin-only operations
+router.use(authorize('admin', 'superadmin'));
+router.use(authorizeNationalAdminOrSuperadmin);
+
+// @route   POST /api/leaderboard/:id/finalize
+// @desc    Superadmin approval flow: finalize area leaderboard and promote by quota
+// @access  Private (National Admin/Superadmin)
+router.post('/:id/finalize', invalidateCacheOnChange('cache:/api/leaderboard*'), async (req, res) => {
+  try {
+    if (req.user.role !== 'superadmin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only superadmin can finalize and promote leaderboard results'
+      });
+    }
+
+    const leaderboard = await AreaLeaderboard.findById(req.params.id).select('roundId areaId state');
+    if (!leaderboard) {
+      return res.status(404).json({
+        success: false,
+        message: 'Leaderboard not found'
+      });
+    }
+
+    const result = await approveAreaLeaderboardAndPromote({
+      roundId: leaderboard.roundId,
+      areaId: leaderboard.areaId,
+      approvedBy: req.user._id,
+      force: req.body.force === true
+    });
+
+    if (!result.success) {
+      return res.status(result.status || 400).json({
+        success: false,
+        message: result.message,
+        readiness: result.completion || null
+      });
+    }
+
+    if (logger) {
+      logger.logAdminAction(
+        `${req.user.role} finalized area leaderboard`,
+        req.user._id,
+        req,
+        {
+          leaderboardId: req.params.id,
+          roundId: leaderboard.roundId.toString(),
+          areaId: leaderboard.areaId,
+          promoted: result.promoted,
+          eliminated: result.eliminated,
+          nextLevel: result.nextLevel
+        },
+        'success',
+        'update'
+      ).catch(() => {});
+    }
+
+    return res.json({
+      success: true,
+      message: `Leaderboard finalized. ${result.promoted} promoted, ${result.eliminated} eliminated.`,
+      ...result
+    });
+  } catch (error) {
+    console.error('Finalize leaderboard error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/leaderboard/:id/publish
+// @desc    Publish finalized leaderboard to judges and/or teachers
+// @access  Private (National Admin/Superadmin)
+router.post('/:id/publish', invalidateCacheOnChange('cache:/api/leaderboard*'), async (req, res) => {
+  try {
+    const leaderboard = await AreaLeaderboard.findById(req.params.id).select('roundId areaId');
+    if (!leaderboard) {
+      return res.status(404).json({
+        success: false,
+        message: 'Leaderboard not found'
+      });
+    }
+
+    const audiences = Array.isArray(req.body.audiences) ? req.body.audiences : [];
+    const result = await publishAreaLeaderboard({
+      roundId: leaderboard.roundId,
+      areaId: leaderboard.areaId,
+      publishedBy: req.user._id,
+      audiences
+    });
+
+    if (!result.success) {
+      return res.status(result.status || 400).json({
+        success: false,
+        message: result.message
+      });
+    }
+
+    if (logger) {
+      logger.logAdminAction(
+        `${req.user.role} published area leaderboard`,
+        req.user._id,
+        req,
+        {
+          leaderboardId: req.params.id,
+          roundId: leaderboard.roundId.toString(),
+          areaId: leaderboard.areaId,
+          audiences: result.leaderboard.publishedAudiences
+        },
+        'success',
+        'update'
+      ).catch(() => {});
+    }
+
+    return res.json({
+      success: true,
+      message: 'Leaderboard published successfully',
+      leaderboard: result.leaderboard
+    });
+  } catch (error) {
+    console.error('Publish leaderboard error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/leaderboard/:id/reopen
+// @desc    Reopen a finalized/published leaderboard for recalculation
+// @access  Private (National Admin/Superadmin)
+router.post('/:id/reopen', invalidateCacheOnChange('cache:/api/leaderboard*'), async (req, res) => {
+  try {
+    const leaderboard = await AreaLeaderboard.findById(req.params.id).select('roundId areaId');
+    if (!leaderboard) {
+      return res.status(404).json({
+        success: false,
+        message: 'Leaderboard not found'
+      });
+    }
+
+    const result = await reopenAreaLeaderboard({
+      roundId: leaderboard.roundId,
+      areaId: leaderboard.areaId
+    });
+
+    if (!result.success) {
+      return res.status(result.status || 400).json({
+        success: false,
+        message: result.message
+      });
+    }
+
+    if (logger) {
+      logger.logAdminAction(
+        `${req.user.role} reopened area leaderboard`,
+        req.user._id,
+        req,
+        {
+          leaderboardId: req.params.id,
+          roundId: leaderboard.roundId.toString(),
+          areaId: leaderboard.areaId
+        },
+        'warning',
+        'update'
+      ).catch(() => {});
+    }
+
+    return res.json({
+      success: true,
+      message: 'Leaderboard reopened to provisional state',
+      leaderboard: result.leaderboard
+    });
+  } catch (error) {
+    console.error('Reopen leaderboard error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/leaderboard/:year/:level/:areaOfFocus/advance
+// @desc    Legacy compatibility wrapper (advances by areaId/locationKey)
+// @access  Private (National Admin/Superadmin)
+router.post('/:year/:level/:areaOfFocus/advance', invalidateCacheOnChange('cache:/api/leaderboard*'), async (req, res) => {
+  try {
+    if (req.user.role !== 'superadmin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only superadmin can execute advancement approvals'
+      });
+    }
+
+    const { year, level } = req.params;
+    const { locationKey, global } = req.body || {};
+
+    if (!['Council', 'Regional', 'National'].includes(level)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid level. Must be Council, Regional, or National'
+      });
+    }
+
+    const yearNum = parseInt(year, 10);
+    if (Number.isNaN(yearNum) || yearNum < 2000 || yearNum > 2100) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid year'
+      });
+    }
+
+    const round = await CompetitionRound.findOne({
+      year: yearNum,
+      level,
+      status: { $in: ['active', 'ended'] }
+    }).sort({ status: -1, createdAt: -1 });
+
+    if (!round) {
+      return res.status(404).json({
+        success: false,
+        message: `No active or ended ${level} round found for ${yearNum}`
+      });
+    }
+
+    const areasToAdvance = [];
+    if (global) {
+      const areaLeaderboards = await AreaLeaderboard.find({
+        roundId: round._id,
+        level: round.level
+      }).select('areaId');
+      areaLeaderboards.forEach((lb) => areasToAdvance.push(lb.areaId));
+    } else if (locationKey) {
+      areasToAdvance.push(locationKey);
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide locationKey or set global to true'
+      });
+    }
+
+    const uniqueAreas = [...new Set(areasToAdvance)];
+    const results = [];
+
+    for (const areaId of uniqueAreas) {
+      const result = await approveAreaLeaderboardAndPromote({
+        roundId: round._id,
+        areaId,
+        approvedBy: req.user._id,
+        force: req.body.force === true
+      });
+      results.push({ areaId, ...result });
+    }
+
+    const totalPromoted = results.reduce((sum, item) => sum + (item.success ? (item.promoted || 0) : 0), 0);
+    const totalEliminated = results.reduce((sum, item) => sum + (item.success ? (item.eliminated || 0) : 0), 0);
+    const failed = results.filter((item) => !item.success);
+
+    if (logger) {
+      logger.logAdminAction(
+        `${req.user.role} executed legacy leaderboard advance`,
+        req.user._id,
+        req,
+        {
+          year: yearNum,
+          level,
+          global: !!global,
+          areas: uniqueAreas,
+          totalPromoted,
+          totalEliminated,
+          failedAreas: failed.map((item) => ({ areaId: item.areaId, message: item.message }))
+        },
+        'success',
+        'update'
+      ).catch(() => {});
+    }
+
+    return res.json({
+      success: failed.length === 0,
+      message: failed.length === 0
+        ? `Advanced ${uniqueAreas.length} area(s). ${totalPromoted} promoted, ${totalEliminated} eliminated.`
+        : `Advanced with partial failures. ${totalPromoted} promoted, ${totalEliminated} eliminated.`,
+      totalPromoted,
+      totalEliminated,
+      results
+    });
+  } catch (error) {
+    console.error('Legacy advance submissions error:', error);
+    return res.status(500).json({
       success: false,
       message: error.message || 'Server error'
     });

@@ -33,9 +33,23 @@ const cacheMiddleware = (ttl = 60) => {
       const queryParams = new URLSearchParams(req.query);
       queryParams.delete('_t'); // Remove cache-busting param
       const queryString = queryParams.toString();
-      const cacheKey = queryString 
+      const userScopeSegment = req.user
+        ? [
+            `uid:${req.user._id}`,
+            `role:${req.user.role || 'unknown'}`,
+            `assignedLevel:${req.user.assignedLevel || 'none'}`,
+            `assignedRegion:${req.user.assignedRegion || 'none'}`,
+            `assignedCouncil:${req.user.assignedCouncil || 'none'}`,
+            `adminLevel:${req.user.adminLevel || 'none'}`,
+            `adminRegion:${req.user.adminRegion || 'none'}`,
+            `adminCouncil:${req.user.adminCouncil || 'none'}`
+          ].join('|')
+        : 'uid:anonymous';
+
+      const keyBase = queryString
         ? `cache:${urlBase}?${queryString}`
         : `cache:${urlBase}`;
+      const cacheKey = `${keyBase}::${userScopeSegment}`;
       
       // Try to get cached response
       const cachedData = await redisClient.get(cacheKey);

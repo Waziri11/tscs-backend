@@ -12,8 +12,8 @@ const competitionRoundSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pending', 'active', 'ended', 'closed'],
-    default: 'pending'
+    enum: ['draft', 'pending', 'active', 'ended', 'closed', 'archived'],
+    default: 'draft'
   },
   // Timing configuration
   timingType: {
@@ -104,6 +104,66 @@ const competitionRoundSchema = new mongoose.Schema({
   snapshotCreatedAt: {
     type: Date,
     default: null
+  },
+  activationSnapshotId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'RoundSnapshot',
+    default: null
+  },
+  activeAreas: {
+    type: [{
+      areaType: {
+        type: String,
+        enum: ['council', 'region', 'national'],
+        required: true
+      },
+      areaId: {
+        type: String,
+        required: true,
+        trim: true
+      },
+      region: {
+        type: String,
+        default: null
+      },
+      council: {
+        type: String,
+        default: null
+      },
+      submissionCount: {
+        type: Number,
+        default: 0
+      }
+    }],
+    default: []
+  },
+  chunking: {
+    enabled: {
+      type: Boolean,
+      default: false
+    },
+    areaType: {
+      type: String,
+      enum: ['council', 'region', null],
+      default: null
+    }
+  },
+  promotionPolicy: {
+    trigger: {
+      type: String,
+      enum: ['manual_superadmin', 'auto_on_close', 'auto_on_deadline'],
+      default: 'manual_superadmin'
+    },
+    tiePolicy: {
+      type: String,
+      enum: ['deterministic', 'include_all_tied', 'manual_review'],
+      default: 'deterministic'
+    },
+    lateSubmissionPolicy: {
+      type: String,
+      enum: ['snapshot_freeze', 'rolling_include', 'admin_exceptions'],
+      default: 'snapshot_freeze'
+    }
   }
 }, {
   timestamps: true
@@ -114,6 +174,8 @@ competitionRoundSchema.index({ year: 1, level: 1, status: 1 });
 competitionRoundSchema.index({ year: 1, level: 1, region: 1, council: 1 });
 competitionRoundSchema.index({ endTime: 1, status: 1 });
 competitionRoundSchema.index({ status: 1 });
+competitionRoundSchema.index({ activationSnapshotId: 1 });
+competitionRoundSchema.index({ year: 1, level: 1, 'activeAreas.areaId': 1 });
 
 // Compound index for active rounds
 competitionRoundSchema.index({ status: 1, endTime: 1 });
@@ -151,4 +213,3 @@ competitionRoundSchema.methods.shouldEnd = function() {
 };
 
 module.exports = mongoose.model('CompetitionRound', competitionRoundSchema);
-

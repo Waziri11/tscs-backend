@@ -1,33 +1,49 @@
 const express = require('express');
 const Evaluation = require('../models/Evaluation');
 const Submission = require('../models/Submission');
-const CompetitionRound = require('../models/CompetitionRound');
-const SubmissionAssignment = require('../models/SubmissionAssignment');
 const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
 const { isJudgeAssigned } = require('../utils/judgeAssignment');
-const { cacheMiddleware, invalidateCacheOnChange } = require('../middleware/cache');
-const { emitScoreUpdate } = require('../utils/socketManager');
+const { invalidateCacheOnChange, cacheMiddleware } = require('../middleware/cache');
+const {
+  getRoundBySubmissionForEvaluation,
+  refreshSubmissionAndAreaLeaderboard,
+  getAreaIdFromSubmission,
+  markRoundEndedIfComplete
+} = require('../utils/roundJudgementService');
+const { canAdminAccessSubmission } = require('../utils/adminScope');
 
 const router = express.Router();
 
-// All routes require authentication
 router.use(protect);
 
 // @route   GET /api/evaluations
-// @desc    Get all evaluations (with filters)
+// @desc    Get evaluations with optional filters
 // @access  Private
 router.get('/', cacheMiddleware(15), async (req, res) => {
   try {
-    const { submissionId, judgeId } = req.query;
-    
-    let query = {};
-    
-    if (submissionId) {
-      query.submissionId = submissionId;
+    const { submissionId, judgeId, roundId } = req.query;
+    const query = {};
+
+    if (submissionId) query.submissionId = submissionId;
+    if (roundId) query.roundId = roundId;
+
+    if (submissionId && req.user.role === 'admin') {
+      const submission = await Submission.findById(submissionId).select('level region council');
+      if (!submission) {
+        return res.status(404).json({
+          success: false,
+          message: 'Submission not found'
+        });
+      }
+      if (!canAdminAccessSubmission(req.user, submission)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Not authorized to access evaluations for this submission'
+        });
+      }
     }
-    
-    // Judges only see their own evaluations
+
     if (req.user.role === 'judge') {
       query.judgeId = req.user._id;
     } else if (judgeId) {
@@ -35,18 +51,18 @@ router.get('/', cacheMiddleware(15), async (req, res) => {
     }
 
     const evaluations = await Evaluation.find(query)
-      .populate('submissionId', 'teacherName category subject level')
+      .populate('submissionId', 'teacherName category subject level region council')
       .populate('judgeId', 'name username')
+      .populate('roundId', 'year level status')
       .sort({ submittedAt: -1 });
 
-    // Log evaluation list view
     await logger.logUserActivity(
       'User viewed evaluations list',
       req.user._id,
       req,
-      { 
+      {
         role: req.user.role,
-        filters: { submissionId, judgeId },
+        filters: { submissionId, judgeId, roundId },
         count: evaluations.length
       },
       'read'
@@ -73,7 +89,8 @@ router.get('/:id', async (req, res) => {
   try {
     const evaluation = await Evaluation.findById(req.params.id)
       .populate('submissionId')
-      .populate('judgeId', 'name username');
+      .populate('judgeId', 'name username')
+      .populate('roundId', 'year level status');
 
     if (!evaluation) {
       return res.status(404).json({
@@ -82,9 +99,7 @@ router.get('/:id', async (req, res) => {
       });
     }
 
-    // Judges can only see their own evaluations
     if (req.user.role === 'judge' && evaluation.judgeId._id.toString() !== req.user._id.toString()) {
-      // Log unauthorized access attempt
       await logger.logSecurity(
         'Unauthorized evaluation access attempt',
         req.user._id,
@@ -92,22 +107,32 @@ router.get('/:id', async (req, res) => {
         { evaluationId: req.params.id },
         'warning'
       );
-      
+
       return res.status(403).json({
         success: false,
         message: 'Not authorized to access this evaluation'
       });
     }
 
-    // Log evaluation view
+    if (req.user.role === 'admin' && evaluation.submissionId) {
+      const sub = evaluation.submissionId;
+      if (!canAdminAccessSubmission(req.user, sub)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Not authorized to access this evaluation'
+        });
+      }
+    }
+
     await logger.logUserActivity(
       'User viewed evaluation details',
       req.user._id,
       req,
-      { 
+      {
         evaluationId: evaluation._id.toString(),
-        submissionId: evaluation.submissionId._id.toString(),
-        judgeId: evaluation.judgeId._id.toString()
+        submissionId: evaluation.submissionId?._id?.toString() || null,
+        judgeId: evaluation.judgeId._id.toString(),
+        roundId: evaluation.roundId?._id?.toString() || null
       },
       'read'
     );
@@ -126,21 +151,19 @@ router.get('/:id', async (req, res) => {
 });
 
 // @route   POST /api/evaluations
-// @desc    Create/update evaluation (judges only)
+// @desc    Create/update evaluation (judge only)
 // @access  Private (Judge)
-router.post('/', authorize('judge'), invalidateCacheOnChange('cache:/api/leaderboard*'), async (req, res) => {
+router.post('/', authorize('judge'), invalidateCacheOnChange(['cache:/api/leaderboard*', 'cache:/api/submissions*']), async (req, res) => {
   try {
     const { submissionId, scores, comments } = req.body;
 
-    // Validate input
-    if (!submissionId || !scores) {
+    if (!submissionId || !scores || typeof scores !== 'object') {
       return res.status(400).json({
         success: false,
         message: 'Please provide submissionId and scores'
       });
     }
 
-    // Check if submission exists
     const submission = await Submission.findById(submissionId);
     if (!submission) {
       return res.status(404).json({
@@ -149,150 +172,52 @@ router.post('/', authorize('judge'), invalidateCacheOnChange('cache:/api/leaderb
       });
     }
 
-    // Check if submission belongs to an active round
-    if (submission.roundId) {
-      const round = await CompetitionRound.findById(submission.roundId);
-      if (!round) {
-        return res.status(400).json({
-          success: false,
-          message: 'Submission is associated with a round that no longer exists'
-        });
-      }
-      
-      // Check if round is active
-      if (round.status !== 'active') {
-        return res.status(403).json({
-          success: false,
-          message: `Cannot evaluate submission. Round is ${round.status}. Evaluations are only allowed when the round is active.`
-        });
-      }
-      
-      // Check if round has ended (use actual end time for countdown rounds)
-      const now = new Date();
-      const actualEndTime = typeof round.getActualEndTime === 'function'
-        ? round.getActualEndTime()
-        : round.endTime;
-      if (now >= actualEndTime) {
-        return res.status(403).json({
-          success: false,
-          message: 'Cannot evaluate submission. Round has ended.'
-        });
-      }
-    } else {
-      // If submission doesn't have a roundId, find active round using same matching logic as /active endpoint
-      // This handles nationwide rounds and uses normalized matching
-      
-      // Fetch all active rounds
-      const allActiveRounds = await CompetitionRound.find({ status: 'active' })
-        .sort({ createdAt: -1 })
-        .limit(50);
-      
-      // Normalize helper (same as /active endpoint)
-      const normalize = (str) => {
-        if (!str) return null;
-        return str.toString().trim().toLowerCase() || null;
-      };
-      
-      const submissionLevel = submission.level;
-      const submissionRegion = normalize(submission.region);
-      const submissionCouncil = normalize(submission.council);
-      
-      // Find best matching round using priority system
-      let bestRound = null;
-      let bestPriority = -1;
-      
-      for (const round of allActiveRounds) {
-        const roundRegion = normalize(round.region);
-        const roundCouncil = normalize(round.council);
-        const isRoundNationwide = !roundRegion && !roundCouncil;
-        
-        let priority = -1;
-        
-        // Rule 1: Exact level + location match (highest priority = 100)
-        if (round.level === submissionLevel) {
-          if (submissionLevel === 'Council') {
-            // Council: exact region + council match
-            if (roundRegion === submissionRegion && roundCouncil === submissionCouncil) {
-              priority = 100;
-            }
-            // Council: region match, no specific council (all councils in region)
-            else if (roundRegion === submissionRegion && !roundCouncil) {
-              priority = 80;
-            }
-          } else if (submissionLevel === 'Regional') {
-            // Regional: exact region match, no council
-            if (roundRegion === submissionRegion && !roundCouncil) {
-              priority = 100;
-            }
-          } else if (submissionLevel === 'National') {
-            // National: must be nationwide
-            if (isRoundNationwide) {
-              priority = 100;
-            }
-          }
-        }
-        
-        // Rule 2: Nationwide rounds (lower priority, but still eligible)
-        if (isRoundNationwide && priority === -1) {
-          // Any submission can match nationwide rounds as fallback
-          if (submissionLevel === 'National') {
-            priority = 90;
-          } else if (submissionLevel === 'Regional') {
-            priority = 50;
-          } else if (submissionLevel === 'Council') {
-            priority = 30;
-          }
-        }
-        
-        // Keep track of best match
-        if (priority > bestPriority) {
-          bestPriority = priority;
-          bestRound = round;
-        }
-      }
-      
-      if (!bestRound) {
-        return res.status(403).json({
-          success: false,
-          message: 'Cannot evaluate submission. No active round found for this submission. Please wait for an admin to activate a round.'
-        });
-      }
-      
-      // Check if round has ended (use actual end time - closes 60s window before scheduler marks ended)
-      const now = new Date();
-      const actualEndTime = typeof bestRound.getActualEndTime === 'function'
-        ? bestRound.getActualEndTime()
-        : bestRound.endTime;
-      
-      if (now >= actualEndTime) {
-        return res.status(403).json({
-          success: false,
-          message: 'Cannot evaluate submission. Active round has ended.'
-        });
-      }
+    const round = await getRoundBySubmissionForEvaluation(submission);
+    if (!round) {
+      return res.status(403).json({
+        success: false,
+        message: 'No active round snapshot includes this submission for evaluation'
+      });
     }
 
-    // For Council/Regional levels, enforce 1-to-1 judging: only assigned judge can evaluate
+    if (round.status === 'closed' || round.status === 'archived') {
+      return res.status(403).json({
+        success: false,
+        message: `Round is ${round.status}. Evaluations are not allowed.`
+      });
+    }
+
+    const now = new Date();
+    const roundEndTime = typeof round.getActualEndTime === 'function'
+      ? round.getActualEndTime()
+      : round.endTime;
+
+    // Keep evaluation open after endTime only when waiting for all judges (to avoid deadlock).
+    if (round.status === 'active' && roundEndTime && now >= roundEndTime && !round.waitForAllJudges) {
+      return res.status(403).json({
+        success: false,
+        message: 'Cannot evaluate submission. Round has ended.'
+      });
+    }
+
     if (submission.level === 'Council' || submission.level === 'Regional') {
-      const isAssigned = await isJudgeAssigned(submissionId, req.user._id);
-      if (!isAssigned) {
+      const assigned = await isJudgeAssigned(submissionId, req.user._id, round._id);
+      if (!assigned) {
         return res.status(403).json({
           success: false,
-          message: 'You are not assigned to evaluate this submission. Only the assigned judge can evaluate submissions at this level.'
+          message: 'You are not assigned to evaluate this submission for the active round.'
         });
       }
     }
-    // For National level, multiple judges can evaluate (no assignment check needed)
 
-    // Calculate totals
-    const scoreValues = Object.values(scores);
-    const totalScore = scoreValues.reduce((sum, score) => sum + (score || 0), 0);
+    const scoreValues = Object.values(scores).map((score) => Number(score) || 0);
+    const totalScore = scoreValues.reduce((sum, score) => sum + score, 0);
     const averageScore = scoreValues.length > 0 ? totalScore / scoreValues.length : 0;
 
-    // Create or update evaluation
     const evaluation = await Evaluation.findOneAndUpdate(
-      { submissionId, judgeId: req.user._id },
+      { roundId: round._id, submissionId, judgeId: req.user._id },
       {
+        roundId: round._id,
         submissionId,
         judgeId: req.user._id,
         scores,
@@ -302,61 +227,40 @@ router.post('/', authorize('judge'), invalidateCacheOnChange('cache:/api/leaderb
         submittedAt: new Date()
       },
       { new: true, upsert: true, runValidators: true }
-    ).populate('submissionId', 'teacherName category subject');
+    )
+      .populate('submissionId', 'teacherName category subject level region council')
+      .populate('roundId', 'year level status');
 
-    // Update submission average score (recalculate from all evaluations)
-    await updateSubmissionAverageScore(submissionId);
+    await refreshSubmissionAndAreaLeaderboard({ submissionId, roundId: round._id });
+    await markRoundEndedIfComplete(round._id);
 
-    // Update leaderboard for this submission's areaOfFocus/level/location
-    try {
-      const { updateLeaderboardForSubmission } = require('../utils/leaderboardUtils');
-      await updateLeaderboardForSubmission(submissionId);
-    } catch (leaderboardErr) {
-      // Non-blocking: don't fail the evaluation if leaderboard update fails
-      console.error('Leaderboard update error (non-blocking):', leaderboardErr.message);
-    }
+    const areaId = getAreaIdFromSubmission(submission);
 
-    // Emit real-time score update via Socket.IO (National level only)
-    try {
-      const updatedSub = await Submission.findById(submissionId).populate('teacherId', 'name');
-      if (updatedSub && updatedSub.level === 'National') {
-        // Only emit for National level leaderboards
-        emitScoreUpdate(updatedSub.year, updatedSub.level, {
-          submissionId: submissionId.toString(),
-          averageScore: updatedSub.averageScore,
-          location: `${updatedSub.region || ''}::${updatedSub.council || ''}`,
-          teacherName: updatedSub.teacherId?.name || updatedSub.teacherName,
-          status: updatedSub.status,
-          areaOfFocus: updatedSub.areaOfFocus
-        });
-      }
-      // Council and Regional levels: no WebSocket emissions, updates only on page reload
-    } catch (socketErr) {
-      // Non-blocking: don't fail the evaluation if socket emit fails
-      console.error('Socket emit error (non-blocking):', socketErr.message);
-    }
-
-    // Log evaluation creation/update
-    const isUpdate = evaluation.createdAt && evaluation.updatedAt && 
-                     evaluation.createdAt.getTime() !== evaluation.updatedAt.getTime();
-    
     await logger.logUserActivity(
-      isUpdate ? 'Judge updated evaluation' : 'Judge submitted evaluation',
+      'Judge submitted evaluation',
       req.user._id,
       req,
       {
         evaluationId: evaluation._id.toString(),
+        roundId: round._id.toString(),
         submissionId: submissionId.toString(),
-        averageScore: averageScore,
-        totalScore: totalScore,
+        areaId,
+        averageScore,
+        totalScore,
         criteriaCount: Object.keys(scores).length
       },
-      isUpdate ? 'update' : 'create'
+      'create'
     );
 
     res.status(201).json({
       success: true,
-      evaluation
+      evaluation,
+      round: {
+        id: round._id,
+        year: round.year,
+        level: round.level,
+        status: round.status
+      }
     });
   } catch (error) {
     console.error('Create evaluation error:', error);
@@ -367,57 +271,41 @@ router.post('/', authorize('judge'), invalidateCacheOnChange('cache:/api/leaderb
   }
 });
 
-// Helper function to update submission average score
-// For Council/Regional: use single judge's score (1-to-1)
-// For National: average all judges' scores (1-to-many)
-async function updateSubmissionAverageScore(submissionId) {
-  try {
-    const submission = await Submission.findById(submissionId);
-    if (!submission) return;
-
-    const evaluations = await Evaluation.find({ submissionId });
-    
-    if (evaluations.length === 0) {
-      await Submission.findByIdAndUpdate(submissionId, { averageScore: 0 });
-      return;
-    }
-
-    let finalScore;
-    
-    if (submission.level === 'Council' || submission.level === 'Regional') {
-      // 1-to-1 judging: use the single judge's score directly
-      // There should only be one evaluation, but if multiple exist, use the first one
-      finalScore = evaluations[0].averageScore;
-    } else {
-      // National level: 1-to-many judging - average all judges' scores
-      const totalAverage = evaluations.reduce((sum, eval) => sum + eval.averageScore, 0);
-      finalScore = totalAverage / evaluations.length;
-    }
-
-    await Submission.findByIdAndUpdate(submissionId, {
-      averageScore: Math.round(finalScore * 100) / 100,
-      status: 'evaluated'
-    });
-  } catch (error) {
-    console.error('Error updating submission average score:', error);
-  }
-}
-
 // @route   GET /api/evaluations/submission/:submissionId
 // @desc    Get all evaluations for a submission
 // @access  Private
 router.get('/submission/:submissionId', async (req, res) => {
   try {
-    const evaluations = await Evaluation.find({ submissionId: req.params.submissionId })
+    const submission = await Submission.findById(req.params.submissionId).select('_id level region council');
+    if (!submission) {
+      return res.status(404).json({
+        success: false,
+        message: 'Submission not found'
+      });
+    }
+
+    if (req.user.role === 'admin' && !canAdminAccessSubmission(req.user, submission)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to access evaluations for this submission'
+      });
+    }
+
+    const query = { submissionId: req.params.submissionId };
+    if (req.user.role === 'judge') {
+      query.judgeId = req.user._id;
+    }
+
+    const evaluations = await Evaluation.find(query)
       .populate('judgeId', 'name username assignedLevel')
+      .populate('roundId', 'year level status')
       .sort({ submittedAt: -1 });
 
-    // Log submission evaluations view
     await logger.logUserActivity(
       'User viewed submission evaluations',
       req.user._id,
       req,
-      { 
+      {
         submissionId: req.params.submissionId,
         count: evaluations.length
       },
@@ -439,7 +327,7 @@ router.get('/submission/:submissionId', async (req, res) => {
 });
 
 // @route   POST /api/evaluations/:submissionId/disqualify
-// @desc    Flag a submission for disqualification (judges only, Council/Regional levels)
+// @desc    Flag a submission for disqualification (judge only)
 // @access  Private (Judge)
 router.post('/:submissionId/disqualify', authorize('judge'), async (req, res) => {
   try {
@@ -454,37 +342,46 @@ router.post('/:submissionId/disqualify', authorize('judge'), async (req, res) =>
       });
     }
 
-    // Only allow disqualification at Council/Regional levels
-    if (submission.level !== 'Council' && submission.level !== 'Regional') {
+    if (!['Council', 'Regional'].includes(submission.level)) {
       return res.status(403).json({
         success: false,
         message: 'Disqualification is only allowed at Council and Regional levels'
       });
     }
 
-    // Check if judge is assigned to this submission
-    const isAssigned = await isJudgeAssigned(submissionId, req.user._id);
-    if (!isAssigned) {
+    const round = await getRoundBySubmissionForEvaluation(submission);
+    if (!round) {
+      return res.status(400).json({
+        success: false,
+        message: 'No active round found for this submission'
+      });
+    }
+
+    const assigned = await isJudgeAssigned(submissionId, req.user._id, round._id);
+    if (!assigned) {
       return res.status(403).json({
         success: false,
         message: 'You are not assigned to evaluate this submission'
       });
     }
 
-    // Update submission with disqualification
     submission.disqualified = true;
     submission.disqualificationReason = reason || 'Disqualified by judge';
     submission.disqualifiedBy = req.user._id;
     submission.disqualifiedAt = new Date();
     await submission.save();
 
-    // Log disqualification
+    const areaId = getAreaIdFromSubmission(submission);
+    await refreshSubmissionAndAreaLeaderboard({ submissionId, roundId: round._id });
+
     await logger.logUserActivity(
       'Judge disqualified submission',
       req.user._id,
       req,
       {
+        roundId: round._id.toString(),
         submissionId: submissionId.toString(),
+        areaId,
         reason: reason || 'No reason provided',
         level: submission.level
       },
@@ -506,4 +403,3 @@ router.post('/:submissionId/disqualify', authorize('judge'), async (req, res) =>
 });
 
 module.exports = router;
-
