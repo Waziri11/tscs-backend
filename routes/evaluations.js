@@ -1,6 +1,7 @@
 const express = require('express');
 const Evaluation = require('../models/Evaluation');
 const Submission = require('../models/Submission');
+const SubmissionAssignment = require('../models/SubmissionAssignment');
 const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
 const { isJudgeAssigned } = require('../utils/judgeAssignment');
@@ -22,6 +23,40 @@ const {
 const router = express.Router();
 
 router.use(protect);
+
+/**
+ * Resolve which round an evaluation should be written to.
+ * Primary source is active/ended snapshot membership.
+ * Fallback source is the judge's explicit submission assignment round.
+ */
+async function resolveEvaluationRoundForJudge(submission, judgeId) {
+  const snapshotRound = await getRoundBySubmissionForEvaluation(submission);
+  if (snapshotRound) {
+    return {
+      round: snapshotRound,
+      source: 'snapshot'
+    };
+  }
+
+  const assignment = await SubmissionAssignment.findOne({
+    submissionId: submission._id,
+    judgeId
+  })
+    .sort({ assignedAt: -1, createdAt: -1 })
+    .populate('roundId');
+
+  if (assignment?.roundId) {
+    return {
+      round: assignment.roundId,
+      source: 'assignment'
+    };
+  }
+
+  return {
+    round: null,
+    source: 'none'
+  };
+}
 
 // @route   GET /api/evaluations
 // @desc    Get evaluations with optional filters
@@ -178,11 +213,11 @@ router.post('/', authorize('judge'), invalidateCacheOnChange(['cache:/api/leader
       });
     }
 
-    const round = await getRoundBySubmissionForEvaluation(submission);
+    const { round } = await resolveEvaluationRoundForJudge(submission, req.user._id);
     if (!round) {
       return res.status(403).json({
         success: false,
-        message: 'No active round snapshot includes this submission for evaluation'
+        message: 'No eligible round found for this submission. It must be in an active/ended snapshot or assigned to you in a valid round.'
       });
     }
 
@@ -383,11 +418,11 @@ router.post('/:submissionId/disqualify', authorize('judge'), async (req, res) =>
       });
     }
 
-    const round = await getRoundBySubmissionForEvaluation(submission);
+    const { round } = await resolveEvaluationRoundForJudge(submission, req.user._id);
     if (!round) {
       return res.status(400).json({
         success: false,
-        message: 'No active round found for this submission'
+        message: 'No eligible round found for this submission'
       });
     }
 
