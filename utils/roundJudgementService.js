@@ -11,6 +11,7 @@ const SubmissionAssignment = require('../models/SubmissionAssignment');
 const AreaLeaderboard = require('../models/AreaLeaderboard');
 const PromotionRecord = require('../models/PromotionRecord');
 const { getAdminScope } = require('./adminScope');
+const { resolveSubmissionRoundContext, isRoundActionable } = require('./roundContext');
 
 const ROUND_LEVELS = ['Council', 'Regional', 'National'];
 const NEXT_LEVEL = {
@@ -398,24 +399,13 @@ const activateRoundWithSnapshot = async (roundId, activatedBy) => {
 };
 
 const getRoundBySubmissionForEvaluation = async (submission) => {
-  let round = null;
-  if (submission.roundId) {
-    round = await CompetitionRound.findById(submission.roundId);
-  }
+  const context = await resolveSubmissionRoundContext(submission, {
+    includeHistorical: false,
+    allowFallbackByYearLevel: true
+  });
+  const round = context.round;
 
-  if (!round) {
-    const candidateRounds = await CompetitionRound.find({
-      year: submission.year,
-      level: submission.level,
-      status: { $in: ['active', 'ended'] }
-    }).sort({ createdAt: -1 });
-
-    round = candidateRounds.find((candidate) => candidate.status === 'active')
-      || candidateRounds.find((candidate) => candidate.status === 'ended')
-      || null;
-  }
-
-  if (!round) {
+  if (!round || !isRoundActionable(round)) {
     return null;
   }
 

@@ -54,12 +54,11 @@ const submissionAssignmentSchema = new mongoose.Schema({
 
 // Compound indexes for efficient queries
 submissionAssignmentSchema.index({ roundId: 1, judgeId: 1, level: 1 });
-submissionAssignmentSchema.index({ roundId: 1, submissionId: 1, judgeId: 1 }, { unique: true });
+submissionAssignmentSchema.index({ roundId: 1, submissionId: 1 }, { unique: true });
+submissionAssignmentSchema.index({ roundId: 1, submissionId: 1, judgeId: 1 });
 submissionAssignmentSchema.index({ roundId: 1, level: 1, region: 1, council: 1 });
-submissionAssignmentSchema.index({ roundId: 1, submissionId: 1 });
 
 module.exports = mongoose.model('SubmissionAssignment', submissionAssignmentSchema);
-
 
 
 
