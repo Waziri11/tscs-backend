@@ -1,5 +1,6 @@
 const CompetitionRound = require('../models/CompetitionRound');
 const AreaLeaderboard = require('../models/AreaLeaderboard');
+const { activateDueChunksForRound } = require('./roundJudgementService');
 
 // Safely import logger
 let logger = null;
@@ -27,6 +28,8 @@ const checkAndProcessRounds = async () => {
     // Manual superadmin approval/publish flow handles promotions and closure.
     const activeRounds = await CompetitionRound.find({ status: 'active' });
     for (const round of activeRounds) {
+      await activateDueChunksForRound(round);
+
       const actualEndTime = typeof round.getActualEndTime === 'function'
         ? round.getActualEndTime()
         : round.endTime;
