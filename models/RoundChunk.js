@@ -43,6 +43,17 @@ const roundChunkSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  // Optional delayed activation time for phased rollout inside a round.
+  // If null, chunk activates when the round activates.
+  scheduledActivationTime: {
+    type: Date,
+    default: null
+  },
+  // Set when the chunk has been activated for the round.
+  activatedAt: {
+    type: Date,
+    default: null
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
@@ -55,5 +66,6 @@ const roundChunkSchema = new mongoose.Schema({
 roundChunkSchema.index({ roundId: 1, name: 1 }, { unique: true });
 roundChunkSchema.index({ roundId: 1, areaType: 1 });
 roundChunkSchema.index({ roundId: 1, areas: 1 });
+roundChunkSchema.index({ roundId: 1, activatedAt: 1, scheduledActivationTime: 1 });
 
 module.exports = mongoose.model('RoundChunk', roundChunkSchema);

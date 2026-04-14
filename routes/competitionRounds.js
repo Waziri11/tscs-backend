@@ -12,6 +12,7 @@ const { cacheMiddleware, invalidateCacheOnChange } = require('../middleware/cach
 const { emitRoundStateChange, emitLeaderboardModeChange } = require('../utils/socketManager');
 const {
   activateRoundWithSnapshot,
+  activateDueChunksForRound,
   getAreaReadiness,
   approveAreaLeaderboardAndPromote,
   rebuildAreaLeaderboard,
@@ -31,6 +32,169 @@ try {
 }
 
 const router = express.Router();
+
+const getExpectedChunkAreaType = (level) => {
+  if (level === 'Council') return 'council';
+  if (level === 'Regional') return 'region';
+  return null;
+};
+
+const normalizeChunkAreaToken = (value) => {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+};
+
+const parseChunkAreaValue = (roundLevel, areaRaw) => {
+  if (roundLevel === 'Regional') {
+    const region = normalizeChunkAreaToken(
+      typeof areaRaw === 'object' && areaRaw ? areaRaw.region : areaRaw
+    );
+    if (!region) {
+      return { ok: false, message: `Invalid region "${region || areaRaw}" in chunk areas` };
+    }
+    return {
+      ok: true,
+      areaId: region
+    };
+  }
+
+  if (roundLevel === 'Council') {
+    if (typeof areaRaw === 'object' && areaRaw) {
+      const region = normalizeChunkAreaToken(areaRaw.region);
+      const council = normalizeChunkAreaToken(areaRaw.council);
+      if (!region || !council) {
+        return {
+          ok: false,
+          message: `Invalid council area "${region || ''}::${council || ''}" in chunk areas`
+        };
+      }
+      return {
+        ok: true,
+        areaId: `${region}::${council}`
+      };
+    }
+
+    const token = normalizeChunkAreaToken(areaRaw);
+    if (!token) {
+      return { ok: false, message: 'Chunk area cannot be empty' };
+    }
+    const [region, council] = token.split('::').map((part) => String(part || '').trim());
+    if (!region || !council) {
+      return { ok: false, message: `Invalid council area "${token}". Expected "Region::Council".` };
+    }
+    return {
+      ok: true,
+      areaId: `${region}::${council}`
+    };
+  }
+
+  return { ok: false, message: 'Chunks are only supported for Council and Regional rounds' };
+};
+
+const normalizeChunkPayload = (roundLevel, chunks = [], roundEndTime = null) => {
+  const expectedAreaType = getExpectedChunkAreaType(roundLevel);
+  if (!expectedAreaType) {
+    return { ok: false, message: 'Chunks are only supported for Council and Regional rounds' };
+  }
+
+  if (!Array.isArray(chunks)) {
+    return { ok: false, message: 'chunks must be an array' };
+  }
+
+  const normalized = [];
+  const nameSet = new Set();
+  const seenAreas = new Map();
+
+  for (let index = 0; index < chunks.length; index += 1) {
+    const chunk = chunks[index] || {};
+    const name = String(chunk.name || '').trim();
+    if (!name) {
+      return { ok: false, message: `Chunk #${index + 1} is missing a name` };
+    }
+    const normalizedName = name.toLowerCase();
+    if (nameSet.has(normalizedName)) {
+      return { ok: false, message: `Duplicate chunk name "${name}"` };
+    }
+    nameSet.add(normalizedName);
+
+    const areaType = chunk.areaType || expectedAreaType;
+    if (areaType !== expectedAreaType) {
+      return {
+        ok: false,
+        message: `Chunk "${name}" has invalid areaType "${areaType}" for ${roundLevel} round`
+      };
+    }
+
+    if (!Array.isArray(chunk.areas) || chunk.areas.length === 0) {
+      return { ok: false, message: `Chunk "${name}" must include at least one area` };
+    }
+
+    const areas = [];
+    const areaSet = new Set();
+    for (const areaRaw of chunk.areas) {
+      const parsed = parseChunkAreaValue(roundLevel, areaRaw);
+      if (!parsed.ok) {
+        return { ok: false, message: parsed.message };
+      }
+      if (areaSet.has(parsed.areaId)) continue;
+      areaSet.add(parsed.areaId);
+
+      if (seenAreas.has(parsed.areaId)) {
+        return {
+          ok: false,
+          message: `Area "${parsed.areaId}" overlaps between chunks "${seenAreas.get(parsed.areaId)}" and "${name}"`
+        };
+      }
+      seenAreas.set(parsed.areaId, name);
+      areas.push(parsed.areaId);
+    }
+
+    let scheduledActivationTime = null;
+    if (chunk.scheduledActivationTime) {
+      const parsedDate = new Date(chunk.scheduledActivationTime);
+      if (Number.isNaN(parsedDate.getTime())) {
+        return { ok: false, message: `Chunk "${name}" has invalid activation time` };
+      }
+      if (roundEndTime) {
+        const parsedEnd = new Date(roundEndTime);
+        if (!Number.isNaN(parsedEnd.getTime()) && parsedDate > parsedEnd) {
+          return { ok: false, message: `Chunk "${name}" activation time must be before round end time` };
+        }
+      }
+      scheduledActivationTime = parsedDate;
+    }
+
+    normalized.push({
+      name,
+      description: String(chunk.description || '').trim(),
+      areaType: expectedAreaType,
+      areas,
+      isOptional: typeof chunk.isOptional === 'boolean' ? chunk.isOptional : true,
+      isActive: typeof chunk.isActive === 'boolean' ? chunk.isActive : true,
+      order: Number.isFinite(Number(chunk.order)) ? Number(chunk.order) : index,
+      scheduledActivationTime,
+      activatedAt: chunk.activatedAt ? new Date(chunk.activatedAt) : null
+    });
+  }
+
+  return { ok: true, chunks: normalized, areaType: expectedAreaType };
+};
+
+const syncRoundChunks = async (round, userId, chunks = []) => {
+  await RoundChunk.deleteMany({ roundId: round._id });
+  if (!Array.isArray(chunks) || chunks.length === 0) {
+    return [];
+  }
+
+  const payload = chunks.map((chunk) => ({
+    ...chunk,
+    roundId: round._id,
+    level: round.level,
+    createdBy: userId || null
+  }));
+
+  return RoundChunk.insertMany(payload, { ordered: false });
+};
 
 // All routes require authentication
 router.use(protect);
@@ -171,7 +335,7 @@ router.get('/:id/chunks', async (req, res) => {
 // @access  Private (Superadmin/National admin)
 router.post('/:id/chunks', async (req, res) => {
   try {
-    const round = await CompetitionRound.findById(req.params.id).select('_id level');
+    const round = await CompetitionRound.findById(req.params.id).select('_id level endTime status');
     if (!round) {
       return res.status(404).json({
         success: false,
@@ -179,38 +343,47 @@ router.post('/:id/chunks', async (req, res) => {
       });
     }
 
-    const { name, description = '', areaType, areas = [], isOptional = true, isActive = true, order = 0 } = req.body;
-    if (!name || !areaType || !Array.isArray(areas) || areas.length === 0) {
+    const { name, description = '', areaType, areas = [], isOptional = true, isActive = true, order = 0, scheduledActivationTime = null } = req.body;
+    if (!name || !Array.isArray(areas) || areas.length === 0) {
       return res.status(400).json({
         success: false,
-        message: 'name, areaType, and non-empty areas array are required'
+        message: 'name and a non-empty areas array are required'
       });
     }
 
-    const expectedAreaType = round.level === 'Council' ? 'council' : round.level === 'Regional' ? 'region' : null;
+    const expectedAreaType = getExpectedChunkAreaType(round.level);
     if (!expectedAreaType) {
       return res.status(400).json({
         success: false,
         message: 'Chunks are only supported for Council and Regional rounds'
       });
     }
-    if (areaType !== expectedAreaType) {
+
+    const normalized = normalizeChunkPayload(
+      round.level,
+      [{
+        name,
+        description,
+        areaType: areaType || expectedAreaType,
+        areas,
+        isOptional,
+        isActive,
+        order,
+        scheduledActivationTime
+      }],
+      round.endTime
+    );
+    if (!normalized.ok) {
       return res.status(400).json({
         success: false,
-        message: `Invalid areaType for ${round.level} round. Expected: ${expectedAreaType}`
+        message: normalized.message
       });
     }
 
     const chunk = await RoundChunk.create({
       roundId: round._id,
       level: round.level,
-      name,
-      description,
-      areaType,
-      areas,
-      isOptional: Boolean(isOptional),
-      isActive: Boolean(isActive),
-      order: Number(order) || 0,
+      ...normalized.chunks[0],
       createdBy: req.user._id
     });
 
@@ -221,6 +394,10 @@ router.post('/:id/chunks', async (req, res) => {
         success: false,
         message: `Chunk area overlap detected for "${overlapCheck.area}" between "${overlapCheck.existingChunk}" and "${overlapCheck.conflictingChunk}"`
       });
+    }
+
+    if (round.status === 'active') {
+      await activateDueChunksForRound(round._id);
     }
 
     return res.status(201).json({
@@ -241,7 +418,7 @@ router.post('/:id/chunks', async (req, res) => {
 // @access  Private (Superadmin/National admin)
 router.put('/:id/chunks/:chunkId', async (req, res) => {
   try {
-    const round = await CompetitionRound.findById(req.params.id).select('_id level');
+    const round = await CompetitionRound.findById(req.params.id).select('_id level endTime status');
     if (!round) {
       return res.status(404).json({
         success: false,
@@ -264,17 +441,44 @@ router.put('/:id/chunks/:chunkId', async (req, res) => {
       name: chunk.name,
       description: chunk.description,
       areas: [...(chunk.areas || [])],
+      scheduledActivationTime: chunk.scheduledActivationTime,
+      activatedAt: chunk.activatedAt,
       isOptional: chunk.isOptional,
       isActive: chunk.isActive,
       order: chunk.order
     };
 
-    const allowedFields = ['name', 'description', 'areas', 'isOptional', 'isActive', 'order'];
-    allowedFields.forEach((field) => {
-      if (typeof req.body[field] !== 'undefined') {
-        chunk[field] = req.body[field];
-      }
-    });
+    const normalized = normalizeChunkPayload(
+      round.level,
+      [{
+        name: typeof req.body.name !== 'undefined' ? req.body.name : chunk.name,
+        description: typeof req.body.description !== 'undefined' ? req.body.description : chunk.description,
+        areaType: chunk.areaType,
+        areas: typeof req.body.areas !== 'undefined' ? req.body.areas : chunk.areas,
+        isOptional: typeof req.body.isOptional !== 'undefined' ? req.body.isOptional : chunk.isOptional,
+        isActive: typeof req.body.isActive !== 'undefined' ? req.body.isActive : chunk.isActive,
+        order: typeof req.body.order !== 'undefined' ? req.body.order : chunk.order,
+        scheduledActivationTime: typeof req.body.scheduledActivationTime !== 'undefined'
+          ? req.body.scheduledActivationTime
+          : chunk.scheduledActivationTime
+      }],
+      round.endTime
+    );
+    if (!normalized.ok) {
+      return res.status(400).json({
+        success: false,
+        message: normalized.message
+      });
+    }
+
+    const updatedChunk = normalized.chunks[0];
+    chunk.name = updatedChunk.name;
+    chunk.description = updatedChunk.description;
+    chunk.areas = updatedChunk.areas;
+    chunk.isOptional = updatedChunk.isOptional;
+    chunk.isActive = updatedChunk.isActive;
+    chunk.order = updatedChunk.order;
+    chunk.scheduledActivationTime = updatedChunk.scheduledActivationTime;
     await chunk.save();
 
     const overlapCheck = await ensureChunkAreasDoNotOverlap(round._id, chunk.areaType);
@@ -285,6 +489,10 @@ router.put('/:id/chunks/:chunkId', async (req, res) => {
         success: false,
         message: `Chunk area overlap detected for "${overlapCheck.area}" between "${overlapCheck.existingChunk}" and "${overlapCheck.conflictingChunk}"`
       });
+    }
+
+    if (round.status === 'active') {
+      await activateDueChunksForRound(round._id);
     }
 
     return res.json({
@@ -348,6 +556,7 @@ router.post('/', async (req, res) => {
       reminderEnabled,
       reminderFrequency,
       chunking,
+      chunks,
       promotionPolicy
     } = req.body;
 
@@ -395,6 +604,19 @@ router.post('/', async (req, res) => {
       });
     }
 
+    let normalizedChunks = [];
+    const hasChunkPayload = Array.isArray(chunks) && chunks.length > 0;
+    if (hasChunkPayload) {
+      const chunkCheck = normalizeChunkPayload(level, chunks, actualEndTime);
+      if (!chunkCheck.ok) {
+        return res.status(400).json({
+          success: false,
+          message: chunkCheck.message
+        });
+      }
+      normalizedChunks = chunkCheck.chunks;
+    }
+
     const roundData = {
       year: parseInt(year),
       level,
@@ -409,7 +631,12 @@ router.post('/', async (req, res) => {
       waitForAllJudges: waitForAllJudges !== undefined ? waitForAllJudges : true,
       reminderEnabled: reminderEnabled !== undefined ? reminderEnabled : true,
       reminderFrequency: reminderFrequency || 'daily',
-      chunking: chunking || undefined,
+      chunking: hasChunkPayload
+        ? {
+            enabled: true,
+            areaType: getExpectedChunkAreaType(level)
+          }
+        : (chunking || undefined),
       promotionPolicy: promotionPolicy || undefined,
       metadata: {
         ...(req.body.metadata && typeof req.body.metadata === 'object' && !Array.isArray(req.body.metadata)
@@ -422,6 +649,9 @@ router.post('/', async (req, res) => {
     };
 
     const round = await CompetitionRound.create(roundData);
+    if (hasChunkPayload) {
+      await syncRoundChunks(round, req.user._id, normalizedChunks);
+    }
 
     // Log round creation
     if (logger) {
@@ -478,6 +708,8 @@ router.put('/:id', async (req, res) => {
 
     // Update fields
     const updateData = { ...req.body };
+    const hasChunksField = Array.isArray(req.body.chunks);
+    let normalizedChunks = null;
 
     const hasLocationScopeValue = (value) =>
       typeof value !== 'undefined' && value !== null && String(value).trim() !== '';
@@ -502,11 +734,40 @@ router.put('/:id', async (req, res) => {
       updateData.endTime = new Date(start.getTime() + parseInt(updateData.countdownDuration));
     }
 
+    if (hasChunksField) {
+      const targetEndTime = updateData.endTime || round.endTime || null;
+      if (req.body.chunks.length > 0) {
+        const chunkCheck = normalizeChunkPayload(round.level, req.body.chunks, targetEndTime);
+        if (!chunkCheck.ok) {
+          return res.status(400).json({
+            success: false,
+            message: chunkCheck.message
+          });
+        }
+        normalizedChunks = chunkCheck.chunks;
+      } else {
+        normalizedChunks = [];
+      }
+
+      updateData.chunking = {
+        enabled: normalizedChunks.length > 0,
+        areaType: normalizedChunks.length > 0 ? getExpectedChunkAreaType(round.level) : null
+      };
+    }
+    delete updateData.chunks;
+
     const updatedRound = await CompetitionRound.findByIdAndUpdate(
       req.params.id,
       updateData,
       { new: true, runValidators: true }
     );
+
+    if (hasChunksField) {
+      await syncRoundChunks(updatedRound, req.user._id, normalizedChunks);
+      if (updatedRound.status === 'active') {
+        await activateDueChunksForRound(updatedRound._id);
+      }
+    }
 
     // Log round update
     if (logger) {
@@ -549,7 +810,7 @@ router.post('/:id/activate', async (req, res) => {
       });
     }
 
-    const { round, snapshotSize, activeAreas, assignments } = activationResult;
+    const { round, snapshotSize, activeAreas, assignments, chunkSchedule } = activationResult;
 
     // Log activation
     if (logger) {
@@ -565,7 +826,8 @@ router.post('/:id/activate', async (req, res) => {
           council: round.council,
           snapshotSize,
           activeAreas: activeAreas.length,
-          assignments
+          assignments,
+          chunkSchedule: chunkSchedule || null
         },
         'success',
         'update'
@@ -588,7 +850,8 @@ router.post('/:id/activate', async (req, res) => {
       snapshotSize,
       activeAreas,
       assignments,
-      message: 'Round activated with a frozen national snapshot. Leaderboards now update provisionally per area.'
+      chunkSchedule: chunkSchedule || null,
+      message: 'Round activated. Snapshot captured for currently active chunks; scheduled chunks will activate automatically on time.'
     });
   } catch (error) {
     console.error('Activate competition round error:', error);
@@ -1012,22 +1275,24 @@ router.get('/:id/judge-progress', async (req, res) => {
     let snapshotSubmissionIds = Array.isArray(round.pendingSubmissionsSnapshot)
       ? round.pendingSubmissionsSnapshot
       : [];
+    let snapshotDoc = null;
     if (snapshotSubmissionIds.length === 0) {
-      const snapshot = await RoundSnapshot.findOne({ roundId: round._id }).select('submissionIds');
-      snapshotSubmissionIds = snapshot?.submissionIds || [];
+      snapshotDoc = await RoundSnapshot.findOne({ roundId: round._id }).select('submissionIds');
+      snapshotSubmissionIds = snapshotDoc?.submissionIds || [];
     }
+    const hasSnapshotContext = Boolean(round.activationSnapshotId || snapshotDoc);
 
     const regionRegex = toExactRegex(round.region);
     const councilRegex = toExactRegex(round.council);
 
-    const submissionQuery = snapshotSubmissionIds.length > 0
+    const submissionQuery = hasSnapshotContext
       ? { _id: { $in: snapshotSubmissionIds } }
       : {
           year: round.year,
           level: round.level,
           status: { $nin: ['promoted', 'eliminated'] }
         };
-    if (snapshotSubmissionIds.length === 0) {
+    if (!hasSnapshotContext) {
       if (regionRegex) submissionQuery.region = regionRegex;
       if (councilRegex) submissionQuery.council = councilRegex;
     }
@@ -1209,12 +1474,14 @@ router.get('/:id/judge-progress/export', async (req, res) => {
     let snapshotSubmissionIds = Array.isArray(round.pendingSubmissionsSnapshot)
       ? round.pendingSubmissionsSnapshot
       : [];
+    let snapshotDoc = null;
     if (snapshotSubmissionIds.length === 0) {
-      const snapshot = await RoundSnapshot.findOne({ roundId: round._id }).select('submissionIds');
-      snapshotSubmissionIds = snapshot?.submissionIds || [];
+      snapshotDoc = await RoundSnapshot.findOne({ roundId: round._id }).select('submissionIds');
+      snapshotSubmissionIds = snapshotDoc?.submissionIds || [];
     }
+    const hasSnapshotContext = Boolean(round.activationSnapshotId || snapshotDoc);
 
-    const submissions = snapshotSubmissionIds.length > 0
+    const submissions = hasSnapshotContext
       ? await Submission.find({ _id: { $in: snapshotSubmissionIds } })
       : await Submission.find({ year: round.year, level: round.level });
 

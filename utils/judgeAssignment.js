@@ -2,6 +2,7 @@ const User = require('../models/User');
 const Submission = require('../models/Submission');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
 const CompetitionRound = require('../models/CompetitionRound');
+const RoundChunk = require('../models/RoundChunk');
 const notificationService = require('../services/notificationService');
 const {
   buildCaseInsensitiveExactRegex,
@@ -76,6 +77,38 @@ const resolveActionableRoundForSubmission = async (submission, explicitRoundId =
   };
 };
 
+const isSubmissionEligibleForRoundChunkSchedule = async (submission, round) => {
+  if (!submission || !round) return false;
+  if (!['Council', 'Regional'].includes(round.level)) return true;
+
+  const areaType = round.level === 'Council' ? 'council' : 'region';
+  const chunks = await RoundChunk.find({
+    roundId: round._id,
+    areaType,
+    isActive: true
+  }).select('areas scheduledActivationTime');
+
+  // No configured chunks means no chunk-based restrictions.
+  if (!chunks || chunks.length === 0) return true;
+
+  const areaId = submission.level === 'Council'
+    ? `${submission.region || ''}::${submission.council || ''}`
+    : (submission.region || '');
+
+  const chunk = chunks.find((item) => Array.isArray(item.areas) && item.areas.includes(areaId));
+  if (!chunk) {
+    return false;
+  }
+
+  if (!chunk.scheduledActivationTime) {
+    return true;
+  }
+
+  const activationTime = new Date(chunk.scheduledActivationTime);
+  if (Number.isNaN(activationTime.getTime())) return true;
+  return activationTime <= new Date();
+};
+
 /**
  * Assign a judge to a submission using round-robin algorithm.
  * Only for Council and Regional levels.
@@ -115,6 +148,14 @@ async function assignJudgeToSubmission(submission, options = {}) {
     }
 
     const round = roundResolution.round;
+    const chunkEligible = await isSubmissionEligibleForRoundChunkSchedule(submission, round);
+    if (!chunkEligible) {
+      return {
+        success: false,
+        assignment: null,
+        error: 'Submission area is not active for assignment in this round chunk schedule'
+      };
+    }
     const roundId = round._id;
 
     if (!submission.roundId || String(submission.roundId) !== String(roundId)) {
@@ -433,6 +474,14 @@ async function manuallyAssignSubmission(submissionId, judgeId, options = {}) {
     }
 
     const round = roundResolution.round;
+    const chunkEligible = await isSubmissionEligibleForRoundChunkSchedule(submission, round);
+    if (!chunkEligible) {
+      return {
+        success: false,
+        assignment: null,
+        error: 'Submission area is not active for assignment in this round chunk schedule'
+      };
+    }
     if (!submission.roundId || String(submission.roundId) !== String(round._id)) {
       await Submission.updateOne({ _id: submissionId }, { $set: { roundId: round._id } });
       submission.roundId = round._id;

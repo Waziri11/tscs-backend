@@ -106,6 +106,30 @@ const getChunksForArea = async (roundId, areaType, areaId) => {
   }).select('_id name areaType areas');
 };
 
+const getChunkActivationTime = (chunk) => {
+  if (!chunk || !chunk.scheduledActivationTime) return null;
+  const value = new Date(chunk.scheduledActivationTime);
+  return Number.isNaN(value.getTime()) ? null : value;
+};
+
+const isChunkDueForActivation = (chunk, now = new Date()) => {
+  if (!chunk || chunk.isActive === false) return false;
+  const activationTime = getChunkActivationTime(chunk);
+  if (!activationTime) return true;
+  return activationTime <= now;
+};
+
+const buildChunkAreaSet = (chunks = []) => {
+  const set = new Set();
+  for (const chunk of chunks) {
+    for (const area of chunk.areas || []) {
+      const normalized = String(area || '').trim();
+      if (normalized) set.add(normalized);
+    }
+  }
+  return set;
+};
+
 const ensureChunkAreasDoNotOverlap = async (roundId, areaType) => {
   if (!['council', 'region'].includes(areaType)) {
     return { valid: true };
@@ -306,7 +330,11 @@ const activateRoundWithSnapshot = async (roundId, activatedBy) => {
     return { success: false, status: 400, message: 'Round must be in draft or pending status to activate' };
   }
 
+  const activationTime = new Date();
   const chunkAreaType = round.level === 'Council' ? 'council' : round.level === 'Regional' ? 'region' : null;
+  let configuredChunks = [];
+  let dueChunksAtActivation = [];
+
   if (chunkAreaType) {
     const chunkValidation = await ensureChunkAreasDoNotOverlap(round._id, chunkAreaType);
     if (!chunkValidation.valid) {
@@ -316,6 +344,14 @@ const activateRoundWithSnapshot = async (roundId, activatedBy) => {
         message: `Chunk area overlap detected for "${chunkValidation.area}" between "${chunkValidation.existingChunk}" and "${chunkValidation.conflictingChunk}"`
       };
     }
+
+    configuredChunks = await RoundChunk.find({
+      roundId: round._id,
+      areaType: chunkAreaType,
+      isActive: true
+    }).select('_id areas scheduledActivationTime activatedAt');
+
+    dueChunksAtActivation = configuredChunks.filter((chunk) => isChunkDueForActivation(chunk, activationTime));
   }
 
   const query = buildActivationSubmissionQuery(round);
@@ -323,8 +359,18 @@ const activateRoundWithSnapshot = async (roundId, activatedBy) => {
     '_id region council status year level videoFileUrl videoLink preferredLink createdAt'
   );
 
-  const eligibleSubmissions = submissions.filter(hasSubmissionVideo);
-  if (eligibleSubmissions.length === 0) {
+  const hasChunkConfiguration = configuredChunks.length > 0;
+  const dueChunkAreaSet = hasChunkConfiguration ? buildChunkAreaSet(dueChunksAtActivation) : null;
+
+  let eligibleSubmissions = submissions.filter(hasSubmissionVideo);
+  if (hasChunkConfiguration) {
+    eligibleSubmissions = eligibleSubmissions.filter((submission) => {
+      const areaId = buildAreaId(round.level, submission.region, submission.council);
+      return dueChunkAreaSet.has(areaId);
+    });
+  }
+
+  if (eligibleSubmissions.length === 0 && !hasChunkConfiguration) {
     return {
       success: false,
       status: 400,
@@ -348,7 +394,6 @@ const activateRoundWithSnapshot = async (roundId, activatedBy) => {
     current.submissionCount += 1;
   }
 
-  const activationTime = new Date();
   const snapshotPayload = {
     roundId: round._id,
     year: round.year,
@@ -358,7 +403,9 @@ const activateRoundWithSnapshot = async (roundId, activatedBy) => {
     totalSubmissions: eligibleSubmissions.length,
     frozenAt: activationTime,
     metadata: {
-      activatedBy: activatedBy ? String(activatedBy) : null
+      activatedBy: activatedBy ? String(activatedBy) : null,
+      configuredChunkCount: configuredChunks.length,
+      activatedChunkCount: dueChunksAtActivation.length
     }
   };
 
@@ -387,6 +434,15 @@ const activateRoundWithSnapshot = async (roundId, activatedBy) => {
   await round.save();
 
   const assignmentResult = await assignRoundSubmissionsToJudges(round, eligibleSubmissions);
+  if (dueChunksAtActivation.length > 0) {
+    await RoundChunk.updateMany(
+      {
+        _id: { $in: dueChunksAtActivation.map((chunk) => chunk._id) },
+        activatedAt: null
+      },
+      { $set: { activatedAt: activationTime } }
+    );
+  }
 
   return {
     success: true,
@@ -394,7 +450,154 @@ const activateRoundWithSnapshot = async (roundId, activatedBy) => {
     snapshot,
     snapshotSize: snapshot.totalSubmissions,
     activeAreas: snapshot.activeAreas,
-    assignments: assignmentResult
+    assignments: assignmentResult,
+    chunkSchedule: {
+      configured: configuredChunks.length,
+      activatedNow: dueChunksAtActivation.length,
+      pending: Math.max(configuredChunks.length - dueChunksAtActivation.length, 0)
+    }
+  };
+};
+
+const activateDueChunksForRound = async (roundOrId, options = {}) => {
+  const now = options.now ? new Date(options.now) : new Date();
+  const round = (roundOrId && typeof roundOrId === 'object' && roundOrId._id)
+    ? roundOrId
+    : await CompetitionRound.findById(roundOrId);
+
+  if (!round) {
+    return { success: false, status: 404, message: 'Round not found' };
+  }
+
+  if (round.status !== 'active') {
+    return { success: true, activatedChunks: 0, addedSubmissions: 0, assignments: { assigned: 0, unassigned: 0 } };
+  }
+
+  const areaType = round.level === 'Council' ? 'council' : round.level === 'Regional' ? 'region' : null;
+  if (!areaType) {
+    return { success: true, activatedChunks: 0, addedSubmissions: 0, assignments: { assigned: 0, unassigned: 0 } };
+  }
+
+  const dueChunks = await RoundChunk.find({
+    roundId: round._id,
+    areaType,
+    isActive: true,
+    activatedAt: null,
+    $or: [
+      { scheduledActivationTime: null },
+      { scheduledActivationTime: { $lte: now } }
+    ]
+  }).select('_id areas');
+
+  if (dueChunks.length === 0) {
+    return { success: true, activatedChunks: 0, addedSubmissions: 0, assignments: { assigned: 0, unassigned: 0 } };
+  }
+
+  const areaSet = buildChunkAreaSet(dueChunks);
+  const query = buildActivationSubmissionQuery(round);
+  const candidates = await Submission.find(query).select(
+    '_id region council status year level videoFileUrl videoLink preferredLink createdAt'
+  );
+
+  const snapshot = await RoundSnapshot.findOne({ roundId: round._id });
+  const existingSubmissionIdSet = new Set([
+    ...((round.pendingSubmissionsSnapshot || []).map((id) => String(id))),
+    ...((snapshot?.submissionIds || []).map((id) => String(id)))
+  ]);
+
+  const dueSubmissions = candidates
+    .filter(hasSubmissionVideo)
+    .filter((submission) => {
+      const areaId = buildAreaId(round.level, submission.region, submission.council);
+      return areaSet.has(areaId);
+    })
+    .filter((submission) => !existingSubmissionIdSet.has(String(submission._id)));
+
+  const dueSubmissionIds = dueSubmissions.map((submission) => submission._id);
+  const mergedSubmissionIds = [
+    ...existingSubmissionIdSet,
+    ...dueSubmissionIds.map((id) => String(id))
+  ];
+
+  const existingAreaMap = new Map();
+  const baseAreas = Array.isArray(snapshot?.activeAreas) && snapshot.activeAreas.length > 0
+    ? snapshot.activeAreas
+    : (round.activeAreas || []);
+
+  for (const area of baseAreas) {
+    if (!area?.areaId) continue;
+    existingAreaMap.set(String(area.areaId), {
+      areaType: area.areaType,
+      areaId: area.areaId,
+      region: area.region || null,
+      council: area.council || null,
+      submissionCount: Number(area.submissionCount) || 0
+    });
+  }
+
+  for (const submission of dueSubmissions) {
+    const descriptor = getSubmissionAreaDescriptor(round.level, submission);
+    const current = existingAreaMap.get(descriptor.areaId) || {
+      areaType: descriptor.areaType,
+      areaId: descriptor.areaId,
+      region: descriptor.region,
+      council: descriptor.council,
+      submissionCount: 0
+    };
+    current.submissionCount += 1;
+    existingAreaMap.set(descriptor.areaId, current);
+  }
+
+  const snapshotPayload = {
+    roundId: round._id,
+    year: round.year,
+    level: round.level,
+    submissionIds: mergedSubmissionIds,
+    activeAreas: [...existingAreaMap.values()],
+    totalSubmissions: mergedSubmissionIds.length,
+    frozenAt: snapshot?.frozenAt || round.snapshotCreatedAt || now,
+    metadata: {
+      ...(snapshot?.metadata || {}),
+      lastChunkActivationAt: now,
+      lastActivatedChunkIds: dueChunks.map((chunk) => String(chunk._id))
+    }
+  };
+
+  const updatedSnapshot = await RoundSnapshot.findOneAndUpdate(
+    { roundId: round._id },
+    snapshotPayload,
+    { upsert: true, new: true, runValidators: true }
+  );
+
+  if (dueSubmissionIds.length > 0) {
+    await Submission.updateMany(
+      { _id: { $in: dueSubmissionIds } },
+      { $set: { roundId: round._id } }
+    );
+  }
+
+  round.pendingSubmissionsSnapshot = updatedSnapshot.submissionIds || [];
+  round.activeAreas = updatedSnapshot.activeAreas || [];
+  if (!round.activationSnapshotId) {
+    round.activationSnapshotId = updatedSnapshot._id;
+  }
+  if (!round.snapshotCreatedAt) {
+    round.snapshotCreatedAt = now;
+  }
+  await round.save();
+
+  const assignments = await assignRoundSubmissionsToJudges(round, dueSubmissions);
+
+  await RoundChunk.updateMany(
+    { _id: { $in: dueChunks.map((chunk) => chunk._id) }, activatedAt: null },
+    { $set: { activatedAt: now } }
+  );
+
+  return {
+    success: true,
+    activatedChunks: dueChunks.length,
+    addedSubmissions: dueSubmissions.length,
+    assignments
   };
 };
 
@@ -1249,6 +1452,7 @@ module.exports = {
   ensureChunkAreasDoNotOverlap,
   resolveQuotaForArea,
   activateRoundWithSnapshot,
+  activateDueChunksForRound,
   getRoundBySubmissionForEvaluation,
   recalculateSubmissionAverageForRound,
   refreshSubmissionAndAreaLeaderboard,
