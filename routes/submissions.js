@@ -2,6 +2,7 @@ const express = require('express');
 const Submission = require('../models/Submission');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
 const CompetitionRound = require('../models/CompetitionRound');
+const Evaluation = require('../models/Evaluation');
 const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
 const notificationService = require('../services/notificationService');
@@ -10,8 +11,6 @@ const User = require('../models/User');
 const { cacheMiddleware, invalidateCacheOnChange } = require('../middleware/cache');
 const { buildSubmissionQueryForAdmin, canAdminAccessSubmission, canAdminAccessUser } = require('../utils/adminScope');
 const {
-  ACTIONABLE_ROUND_STATUSES,
-  getActionableRoundIdsForLevel,
   resolveSubmissionRoundContext,
   isRoundActionable
 } = require('../utils/roundContext');
@@ -53,8 +52,8 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
     const andClauses = [];
 
     let responseMessage = null;
-    let judgeAssignmentsInActionableRounds = 0;
-    let activeRoundIds = [];
+    let judgeAssignmentsCount = 0;
+    let judgeAssignmentMap = new Map();
 
     // Role-based filtering (applied first, cannot be overridden)
     if (req.user.role === 'judge') {
@@ -68,17 +67,6 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
       }
 
       query.level = req.user.assignedLevel;
-      activeRoundIds = await getActionableRoundIdsForLevel({
-        level: req.user.assignedLevel,
-        year: parsedYear
-      });
-
-      if (activeRoundIds.length === 0) {
-        query._id = { $in: [] };
-        responseMessage = 'No active or ended round is available for your assigned level.';
-      } else {
-        query.roundId = { $in: activeRoundIds };
-      }
 
       if (req.user.assignedLevel === 'Council') {
         if (!req.user.assignedRegion || !req.user.assignedCouncil) {
@@ -111,8 +99,6 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
     // Apply additional filters
     if (status) {
       query.status = status;
-    } else if (req.user.role === 'judge') {
-      query.status = { $nin: ['promoted', 'eliminated'] };
     }
 
     if (parsedYear) query.year = parsedYear;
@@ -131,52 +117,36 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
       });
     }
 
-    // Council/Regional judges: ensure assignment and submission round are exactly aligned.
+    // Council/Regional judges: show all submissions assigned to them regardless of round status.
     if (req.user.role === 'judge' && (req.user.assignedLevel === 'Council' || req.user.assignedLevel === 'Regional')) {
       let assignmentPairs = [];
+      const assignmentDocs = await SubmissionAssignment.find({
+        judgeId: req.user._id,
+        level: req.user.assignedLevel
+      })
+        .select('submissionId roundId assignedAt createdAt')
+        .sort({ assignedAt: -1, createdAt: -1 })
+        .lean();
 
-      if (activeRoundIds.length > 0) {
-        const assignmentDocs = await SubmissionAssignment.find({
-          judgeId: req.user._id,
-          level: req.user.assignedLevel,
-          roundId: { $in: activeRoundIds }
-        })
-          .select('submissionId roundId')
-          .lean();
-
-        assignmentPairs = assignmentDocs.map((assignment) => ({
-          _id: assignment.submissionId,
-          roundId: assignment.roundId
-        }));
+      const uniqueSubmissionAssignments = new Map();
+      for (const assignment of assignmentDocs) {
+        const key = String(assignment.submissionId);
+        if (!uniqueSubmissionAssignments.has(key)) {
+          uniqueSubmissionAssignments.set(key, assignment);
+        }
       }
 
-      judgeAssignmentsInActionableRounds = assignmentPairs.length;
+      assignmentPairs = [...uniqueSubmissionAssignments.values()].map((assignment) => ({
+        _id: assignment.submissionId
+      }));
+      judgeAssignmentMap = uniqueSubmissionAssignments;
+      judgeAssignmentsCount = assignmentPairs.length;
 
       if (assignmentPairs.length > 0) {
         andClauses.push({ $or: assignmentPairs });
       } else {
         query._id = { $in: [] };
-        if (!responseMessage) {
-          const historicalRoundIds = (
-            await CompetitionRound.find({
-              level: req.user.assignedLevel,
-              ...(parsedYear ? { year: parsedYear } : {}),
-              status: { $nin: ACTIONABLE_ROUND_STATUSES }
-            }).select('_id')
-          ).map((round) => round._id);
-
-          const historicalAssignments = historicalRoundIds.length > 0
-            ? await SubmissionAssignment.countDocuments({
-              judgeId: req.user._id,
-              level: req.user.assignedLevel,
-              roundId: { $in: historicalRoundIds }
-            })
-            : 0;
-
-          responseMessage = historicalAssignments > 0
-            ? 'No current-round assignments found. You have historical assignments in closed or archived rounds.'
-            : 'No submissions are assigned to you in active or ended rounds.';
-        }
+        responseMessage = 'No submissions are assigned to you.';
       }
     }
 
@@ -195,6 +165,25 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
       .skip(skip)
       .limit(limitNum)
       .lean();
+
+    if (req.user.role === 'judge' && submissions.length > 0) {
+      const submissionIds = submissions.map((submission) => submission._id);
+      const evaluationDocs = await Evaluation.find({
+        submissionId: { $in: submissionIds },
+        judgeId: req.user._id
+      }).select('submissionId').lean();
+
+      const evaluatedSubmissionIds = new Set(evaluationDocs.map((evaluation) => String(evaluation.submissionId)));
+
+      for (const submission of submissions) {
+        const submissionId = String(submission._id);
+        const assignedMeta = judgeAssignmentMap.get(submissionId) || null;
+        const judgeCompleted = evaluatedSubmissionIds.has(submissionId);
+        submission.judgeCompleted = judgeCompleted;
+        submission.judgeCompletionStatus = judgeCompleted ? 'completed' : 'pending';
+        submission.assignedRoundId = assignedMeta?.roundId || submission.roundId || null;
+      }
+    }
 
     const response = {
       success: true,
@@ -216,7 +205,7 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
           assignedLevel: req.user.assignedLevel,
           assignedRegion: req.user.assignedRegion,
           assignedCouncil: req.user.assignedCouncil,
-          assignmentsInActionableRounds: judgeAssignmentsInActionableRounds
+          assignmentsCount: judgeAssignmentsCount
         },
         query
       };
@@ -287,26 +276,25 @@ router.get('/:id', async (req, res) => {
         });
       }
 
-      const roundContext = await resolveSubmissionRoundContext(submission, {
-        includeHistorical: false,
-        allowFallbackByYearLevel: false
-      });
-
-      if (!roundContext.round || !isRoundActionable(roundContext.round)) {
-        return res.status(403).json({
-          success: false,
-          message: 'Submission is not in an active or ended round context'
-        });
-      }
-
       if (submission.level === 'Council' || submission.level === 'Regional') {
+        const roundContext = await resolveSubmissionRoundContext(submission, {
+          includeHistorical: true,
+          allowFallbackByYearLevel: true
+        });
+
+        const preferredRoundId = roundContext.round?._id || submission.roundId || null;
         const assignment = await SubmissionAssignment.findOne({
           submissionId: submission._id,
           judgeId: req.user._id,
-          roundId: roundContext.round._id
+          ...(preferredRoundId ? { roundId: preferredRoundId } : {})
         }).select('_id');
 
-        if (!assignment) {
+        const fallbackAssignment = assignment || await SubmissionAssignment.findOne({
+          submissionId: submission._id,
+          judgeId: req.user._id
+        }).select('_id');
+
+        if (!fallbackAssignment) {
           return res.status(403).json({
             success: false,
             message: 'Not authorized to access this submission'
