@@ -49,8 +49,19 @@ const roundChunkSchema = new mongoose.Schema({
     type: Date,
     default: null
   },
+  // Optional scheduled time when this chunk stops being active.
+  // If null, chunk remains active until round ends or chunk is disabled.
+  scheduledEndTime: {
+    type: Date,
+    default: null
+  },
   // Set when the chunk has been activated for the round.
   activatedAt: {
+    type: Date,
+    default: null
+  },
+  // Set when the chunk has ended (scheduled end reached).
+  endedAt: {
     type: Date,
     default: null
   },
@@ -67,5 +78,6 @@ roundChunkSchema.index({ roundId: 1, name: 1 }, { unique: true });
 roundChunkSchema.index({ roundId: 1, areaType: 1 });
 roundChunkSchema.index({ roundId: 1, areas: 1 });
 roundChunkSchema.index({ roundId: 1, activatedAt: 1, scheduledActivationTime: 1 });
+roundChunkSchema.index({ roundId: 1, endedAt: 1, scheduledEndTime: 1 });
 
 module.exports = mongoose.model('RoundChunk', roundChunkSchema);

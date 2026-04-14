@@ -86,7 +86,7 @@ const isSubmissionEligibleForRoundChunkSchedule = async (submission, round) => {
     roundId: round._id,
     areaType,
     isActive: true
-  }).select('areas scheduledActivationTime');
+  }).select('areas scheduledActivationTime scheduledEndTime');
 
   // No configured chunks means no chunk-based restrictions.
   if (!chunks || chunks.length === 0) return true;
@@ -100,13 +100,20 @@ const isSubmissionEligibleForRoundChunkSchedule = async (submission, round) => {
     return false;
   }
 
-  if (!chunk.scheduledActivationTime) {
-    return true;
+  const now = new Date();
+  if (chunk.scheduledActivationTime) {
+    const activationTime = new Date(chunk.scheduledActivationTime);
+    if (!Number.isNaN(activationTime.getTime()) && activationTime > now) {
+      return false;
+    }
   }
-
-  const activationTime = new Date(chunk.scheduledActivationTime);
-  if (Number.isNaN(activationTime.getTime())) return true;
-  return activationTime <= new Date();
+  if (chunk.scheduledEndTime) {
+    const endTime = new Date(chunk.scheduledEndTime);
+    if (!Number.isNaN(endTime.getTime()) && endTime <= now) {
+      return false;
+    }
+  }
+  return true;
 };
 
 /**

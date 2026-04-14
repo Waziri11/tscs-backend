@@ -98,12 +98,27 @@ const getRoundSnapshot = async (roundId) => {
 
 const getChunksForArea = async (roundId, areaType, areaId) => {
   if (!areaType || areaType === 'national') return [];
+  const now = new Date();
   return RoundChunk.find({
     roundId,
     areaType,
     isActive: true,
-    areas: areaId
-  }).select('_id name areaType areas');
+    areas: areaId,
+    $and: [
+      {
+        $or: [
+          { scheduledActivationTime: null },
+          { scheduledActivationTime: { $lte: now } }
+        ]
+      },
+      {
+        $or: [
+          { scheduledEndTime: null },
+          { scheduledEndTime: { $gt: now } }
+        ]
+      }
+    ]
+  }).select('_id name areaType areas scheduledActivationTime scheduledEndTime');
 };
 
 const getChunkActivationTime = (chunk) => {
@@ -112,11 +127,23 @@ const getChunkActivationTime = (chunk) => {
   return Number.isNaN(value.getTime()) ? null : value;
 };
 
-const isChunkDueForActivation = (chunk, now = new Date()) => {
+const getChunkEndTime = (chunk) => {
+  if (!chunk || !chunk.scheduledEndTime) return null;
+  const value = new Date(chunk.scheduledEndTime);
+  return Number.isNaN(value.getTime()) ? null : value;
+};
+
+const isChunkActiveAtTime = (chunk, now = new Date()) => {
   if (!chunk || chunk.isActive === false) return false;
   const activationTime = getChunkActivationTime(chunk);
-  if (!activationTime) return true;
-  return activationTime <= now;
+  const endTime = getChunkEndTime(chunk);
+  if (activationTime && activationTime > now) return false;
+  if (endTime && endTime <= now) return false;
+  return true;
+};
+
+const isChunkDueForActivation = (chunk, now = new Date()) => {
+  return isChunkActiveAtTime(chunk, now);
 };
 
 const buildChunkAreaSet = (chunks = []) => {
@@ -334,6 +361,7 @@ const activateRoundWithSnapshot = async (roundId, activatedBy) => {
   const chunkAreaType = round.level === 'Council' ? 'council' : round.level === 'Regional' ? 'region' : null;
   let configuredChunks = [];
   let dueChunksAtActivation = [];
+  let endedChunkIdsAtActivation = [];
 
   if (chunkAreaType) {
     const chunkValidation = await ensureChunkAreasDoNotOverlap(round._id, chunkAreaType);
@@ -349,9 +377,15 @@ const activateRoundWithSnapshot = async (roundId, activatedBy) => {
       roundId: round._id,
       areaType: chunkAreaType,
       isActive: true
-    }).select('_id areas scheduledActivationTime activatedAt');
+    }).select('_id areas scheduledActivationTime scheduledEndTime activatedAt endedAt');
 
     dueChunksAtActivation = configuredChunks.filter((chunk) => isChunkDueForActivation(chunk, activationTime));
+    endedChunkIdsAtActivation = configuredChunks
+      .filter((chunk) => {
+        const endTime = getChunkEndTime(chunk);
+        return endTime && endTime <= activationTime;
+      })
+      .map((chunk) => chunk._id);
   }
 
   const query = buildActivationSubmissionQuery(round);
@@ -405,7 +439,8 @@ const activateRoundWithSnapshot = async (roundId, activatedBy) => {
     metadata: {
       activatedBy: activatedBy ? String(activatedBy) : null,
       configuredChunkCount: configuredChunks.length,
-      activatedChunkCount: dueChunksAtActivation.length
+      activatedChunkCount: dueChunksAtActivation.length,
+      endedChunkCount: endedChunkIdsAtActivation.length
     }
   };
 
@@ -444,6 +479,16 @@ const activateRoundWithSnapshot = async (roundId, activatedBy) => {
     );
   }
 
+  if (endedChunkIdsAtActivation.length > 0) {
+    await RoundChunk.updateMany(
+      {
+        _id: { $in: endedChunkIdsAtActivation },
+        endedAt: null
+      },
+      { $set: { endedAt: activationTime } }
+    );
+  }
+
   return {
     success: true,
     round,
@@ -454,7 +499,8 @@ const activateRoundWithSnapshot = async (roundId, activatedBy) => {
     chunkSchedule: {
       configured: configuredChunks.length,
       activatedNow: dueChunksAtActivation.length,
-      pending: Math.max(configuredChunks.length - dueChunksAtActivation.length, 0)
+      pending: Math.max(configuredChunks.length - dueChunksAtActivation.length - endedChunkIdsAtActivation.length, 0),
+      endedNow: endedChunkIdsAtActivation.length
     }
   };
 };
@@ -470,27 +516,71 @@ const activateDueChunksForRound = async (roundOrId, options = {}) => {
   }
 
   if (round.status !== 'active') {
-    return { success: true, activatedChunks: 0, addedSubmissions: 0, assignments: { assigned: 0, unassigned: 0 } };
+    return {
+      success: true,
+      activatedChunks: 0,
+      endedChunks: 0,
+      addedSubmissions: 0,
+      assignments: { assigned: 0, unassigned: 0 }
+    };
   }
 
   const areaType = round.level === 'Council' ? 'council' : round.level === 'Regional' ? 'region' : null;
   if (!areaType) {
-    return { success: true, activatedChunks: 0, addedSubmissions: 0, assignments: { assigned: 0, unassigned: 0 } };
+    return {
+      success: true,
+      activatedChunks: 0,
+      endedChunks: 0,
+      addedSubmissions: 0,
+      assignments: { assigned: 0, unassigned: 0 }
+    };
+  }
+
+  const endedChunks = await RoundChunk.find({
+    roundId: round._id,
+    areaType,
+    isActive: true,
+    endedAt: null,
+    scheduledEndTime: { $ne: null, $lte: now }
+  }).select('_id');
+
+  if (endedChunks.length > 0) {
+    await RoundChunk.updateMany(
+      { _id: { $in: endedChunks.map((chunk) => chunk._id) }, endedAt: null },
+      { $set: { endedAt: now } }
+    );
   }
 
   const dueChunks = await RoundChunk.find({
     roundId: round._id,
     areaType,
     isActive: true,
+    $or: [{ endedAt: null }, { endedAt: { $gt: now } }],
     activatedAt: null,
-    $or: [
-      { scheduledActivationTime: null },
-      { scheduledActivationTime: { $lte: now } }
+    $and: [
+      {
+        $or: [
+          { scheduledActivationTime: null },
+          { scheduledActivationTime: { $lte: now } }
+        ]
+      },
+      {
+        $or: [
+          { scheduledEndTime: null },
+          { scheduledEndTime: { $gt: now } }
+        ]
+      }
     ]
   }).select('_id areas');
 
   if (dueChunks.length === 0) {
-    return { success: true, activatedChunks: 0, addedSubmissions: 0, assignments: { assigned: 0, unassigned: 0 } };
+    return {
+      success: true,
+      activatedChunks: 0,
+      endedChunks: endedChunks.length,
+      addedSubmissions: 0,
+      assignments: { assigned: 0, unassigned: 0 }
+    };
   }
 
   const areaSet = buildChunkAreaSet(dueChunks);
@@ -559,7 +649,8 @@ const activateDueChunksForRound = async (roundOrId, options = {}) => {
     metadata: {
       ...(snapshot?.metadata || {}),
       lastChunkActivationAt: now,
-      lastActivatedChunkIds: dueChunks.map((chunk) => String(chunk._id))
+      lastActivatedChunkIds: dueChunks.map((chunk) => String(chunk._id)),
+      lastEndedChunkIds: endedChunks.map((chunk) => String(chunk._id))
     }
   };
 
@@ -596,6 +687,7 @@ const activateDueChunksForRound = async (roundOrId, options = {}) => {
   return {
     success: true,
     activatedChunks: dueChunks.length,
+    endedChunks: endedChunks.length,
     addedSubmissions: dueSubmissions.length,
     assignments
   };

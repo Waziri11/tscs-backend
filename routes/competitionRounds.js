@@ -164,6 +164,24 @@ const normalizeChunkPayload = (roundLevel, chunks = [], roundEndTime = null) => 
       scheduledActivationTime = parsedDate;
     }
 
+    let scheduledEndTime = null;
+    if (chunk.scheduledEndTime) {
+      const parsedEndDate = new Date(chunk.scheduledEndTime);
+      if (Number.isNaN(parsedEndDate.getTime())) {
+        return { ok: false, message: `Chunk "${name}" has invalid end time` };
+      }
+      if (roundEndTime) {
+        const parsedRoundEnd = new Date(roundEndTime);
+        if (!Number.isNaN(parsedRoundEnd.getTime()) && parsedEndDate > parsedRoundEnd) {
+          return { ok: false, message: `Chunk "${name}" end time must be before round end time` };
+        }
+      }
+      if (scheduledActivationTime && parsedEndDate <= scheduledActivationTime) {
+        return { ok: false, message: `Chunk "${name}" end time must be after activation time` };
+      }
+      scheduledEndTime = parsedEndDate;
+    }
+
     normalized.push({
       name,
       description: String(chunk.description || '').trim(),
@@ -173,7 +191,9 @@ const normalizeChunkPayload = (roundLevel, chunks = [], roundEndTime = null) => 
       isActive: typeof chunk.isActive === 'boolean' ? chunk.isActive : true,
       order: Number.isFinite(Number(chunk.order)) ? Number(chunk.order) : index,
       scheduledActivationTime,
-      activatedAt: chunk.activatedAt ? new Date(chunk.activatedAt) : null
+      scheduledEndTime,
+      activatedAt: chunk.activatedAt ? new Date(chunk.activatedAt) : null,
+      endedAt: chunk.endedAt ? new Date(chunk.endedAt) : null
     });
   }
 
@@ -343,7 +363,17 @@ router.post('/:id/chunks', async (req, res) => {
       });
     }
 
-    const { name, description = '', areaType, areas = [], isOptional = true, isActive = true, order = 0, scheduledActivationTime = null } = req.body;
+    const {
+      name,
+      description = '',
+      areaType,
+      areas = [],
+      isOptional = true,
+      isActive = true,
+      order = 0,
+      scheduledActivationTime = null,
+      scheduledEndTime = null
+    } = req.body;
     if (!name || !Array.isArray(areas) || areas.length === 0) {
       return res.status(400).json({
         success: false,
@@ -369,7 +399,8 @@ router.post('/:id/chunks', async (req, res) => {
         isOptional,
         isActive,
         order,
-        scheduledActivationTime
+        scheduledActivationTime,
+        scheduledEndTime
       }],
       round.endTime
     );
@@ -387,7 +418,7 @@ router.post('/:id/chunks', async (req, res) => {
       createdBy: req.user._id
     });
 
-    const overlapCheck = await ensureChunkAreasDoNotOverlap(round._id, areaType);
+    const overlapCheck = await ensureChunkAreasDoNotOverlap(round._id, expectedAreaType);
     if (!overlapCheck.valid) {
       await RoundChunk.findByIdAndDelete(chunk._id);
       return res.status(400).json({
@@ -442,7 +473,9 @@ router.put('/:id/chunks/:chunkId', async (req, res) => {
       description: chunk.description,
       areas: [...(chunk.areas || [])],
       scheduledActivationTime: chunk.scheduledActivationTime,
+      scheduledEndTime: chunk.scheduledEndTime,
       activatedAt: chunk.activatedAt,
+      endedAt: chunk.endedAt,
       isOptional: chunk.isOptional,
       isActive: chunk.isActive,
       order: chunk.order
@@ -460,7 +493,10 @@ router.put('/:id/chunks/:chunkId', async (req, res) => {
         order: typeof req.body.order !== 'undefined' ? req.body.order : chunk.order,
         scheduledActivationTime: typeof req.body.scheduledActivationTime !== 'undefined'
           ? req.body.scheduledActivationTime
-          : chunk.scheduledActivationTime
+          : chunk.scheduledActivationTime,
+        scheduledEndTime: typeof req.body.scheduledEndTime !== 'undefined'
+          ? req.body.scheduledEndTime
+          : chunk.scheduledEndTime
       }],
       round.endTime
     );
@@ -479,6 +515,7 @@ router.put('/:id/chunks/:chunkId', async (req, res) => {
     chunk.isActive = updatedChunk.isActive;
     chunk.order = updatedChunk.order;
     chunk.scheduledActivationTime = updatedChunk.scheduledActivationTime;
+    chunk.scheduledEndTime = updatedChunk.scheduledEndTime;
     await chunk.save();
 
     const overlapCheck = await ensureChunkAreasDoNotOverlap(round._id, chunk.areaType);
