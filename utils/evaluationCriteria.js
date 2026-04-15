@@ -185,24 +185,6 @@ function validateScoresAgainstCriteria(scores, criteria) {
     }
   }
 
-  const sortedCriteria = [...criteria].sort((a, b) => (a.order || 0) - (b.order || 0));
-  for (const c of sortedCriteria) {
-    const subs = Array.isArray(c.subcriteria) ? c.subcriteria : [];
-    if (subs.length === 0) continue;
-    let sum = 0;
-    for (const s of subs) {
-      const v = scores[s.key];
-      sum += typeof v === 'number' ? v : parseFloat(v);
-    }
-    const parentMax = Number(c.maxPoints) || 0;
-    if (sum > parentMax + 1e-6) {
-      return {
-        ok: false,
-        message: `Scores for "${c.label}" exceed maximum subtotal ${parentMax} (got ${sum.toFixed(2)})`
-      };
-    }
-  }
-
   let totalScore = 0;
   for (const leaf of leaves) {
     const v = scores[leaf.key];
