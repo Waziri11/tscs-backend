@@ -14,6 +14,10 @@ const {
 
 const ACTIONABLE_ASSIGNMENT_STATUSES = new Set(['pending', 'submitted', 'under_review', 'evaluated']);
 
+const isDuplicateKeyError = (error) => {
+  return Boolean(error && (error.code === 11000 || error?.cause?.code === 11000));
+};
+
 const buildSubmissionAreaQueryByLevel = (level, region, council) => {
   if (level === 'Council') {
     return { region, council };
@@ -240,15 +244,37 @@ async function assignJudgeToSubmission(submission, options = {}) {
       }
     }
 
-    const assignment = await SubmissionAssignment.create({
-      roundId,
-      submissionId: submission._id,
-      judgeId: selectedJudge._id,
-      level: submission.level,
-      region: submission.region,
-      council: submission.council || null,
-      judgeNotified: false
-    });
+    let assignment;
+    try {
+      assignment = await SubmissionAssignment.create({
+        roundId,
+        submissionId: submission._id,
+        judgeId: selectedJudge._id,
+        level: submission.level,
+        region: submission.region,
+        council: submission.council || null,
+        judgeNotified: false
+      });
+    } catch (error) {
+      if (!isDuplicateKeyError(error)) {
+        throw error;
+      }
+
+      const concurrentAssignment = await SubmissionAssignment.findOne({
+        roundId,
+        submissionId: submission._id
+      });
+
+      if (concurrentAssignment) {
+        return {
+          success: true,
+          assignment: concurrentAssignment,
+          message: 'Submission already assigned for this round'
+        };
+      }
+
+      throw error;
+    }
 
     notificationService.handleJudgeAssigned({
       userId: selectedJudge._id.toString(),
@@ -508,15 +534,31 @@ async function manuallyAssignSubmission(submissionId, judgeId, options = {}) {
       await assignment.save();
       message = 'Submission reassigned successfully';
     } else {
-      assignment = await SubmissionAssignment.create({
-        roundId: round._id,
-        submissionId,
-        judgeId,
-        level: submission.level,
-        region: submission.region,
-        council: submission.council || null,
-        judgeNotified: false
-      });
+      try {
+        assignment = await SubmissionAssignment.create({
+          roundId: round._id,
+          submissionId,
+          judgeId,
+          level: submission.level,
+          region: submission.region,
+          council: submission.council || null,
+          judgeNotified: false
+        });
+      } catch (error) {
+        if (!isDuplicateKeyError(error)) {
+          throw error;
+        }
+
+        assignment = await SubmissionAssignment.findOne(assignmentQuery);
+        if (!assignment) {
+          throw error;
+        }
+
+        assignment.judgeId = judgeId;
+        assignment.judgeNotified = false;
+        await assignment.save();
+        message = 'Submission reassigned successfully';
+      }
     }
 
     notificationService.handleJudgeAssigned({
