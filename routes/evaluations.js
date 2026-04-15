@@ -12,6 +12,7 @@ const {
   getAreaIdFromSubmission,
   markRoundEndedIfComplete
 } = require('../utils/roundJudgementService');
+const { resolveSubmissionRoundContext, isRoundActionable } = require('../utils/roundContext');
 const { canAdminAccessSubmission } = require('../utils/adminScope');
 const Competition = require('../models/Competition');
 const {
@@ -45,10 +46,23 @@ async function resolveEvaluationRoundForJudge(submission, judgeId) {
     .sort({ assignedAt: -1, createdAt: -1 })
     .populate('roundId');
 
-  if (assignment?.roundId) {
+  if (assignment?.roundId && isRoundActionable(assignment.roundId)) {
     return {
       round: assignment.roundId,
       source: 'assignment'
+    };
+  }
+
+  // Fallback to the currently actionable round context for the submission level/year.
+  // This prevents false "No eligible round found" when snapshot membership has drifted.
+  const context = await resolveSubmissionRoundContext(submission, {
+    includeHistorical: false,
+    allowFallbackByYearLevel: true
+  });
+  if (context.round && isRoundActionable(context.round)) {
+    return {
+      round: context.round,
+      source: 'context'
     };
   }
 

@@ -195,10 +195,10 @@ function validateScoresAgainstCriteria(scores, criteria) {
       sum += typeof v === 'number' ? v : parseFloat(v);
     }
     const parentMax = Number(c.maxPoints) || 0;
-    if (Math.abs(sum - parentMax) > 1e-6) {
+    if (sum > parentMax + 1e-6) {
       return {
         ok: false,
-        message: `Scores for "${c.label}" must sum exactly to ${parentMax} (got ${sum.toFixed(2)})`
+        message: `Scores for "${c.label}" exceed maximum subtotal ${parentMax} (got ${sum.toFixed(2)})`
       };
     }
   }
