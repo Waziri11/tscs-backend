@@ -4,7 +4,7 @@ const Submission = require('../models/Submission');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
 const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
-const { isJudgeAssigned } = require('../utils/judgeAssignment');
+const { resolveJudgeEvaluationAuthorization } = require('../utils/judgeAssignment');
 const { invalidateCacheOnChange, cacheMiddleware } = require('../middleware/cache');
 const {
   getRoundBySubmissionForEvaluation,
@@ -242,8 +242,21 @@ router.post('/', authorize('judge'), invalidateCacheOnChange(['cache:/api/leader
     }
 
     if (submission.level === 'Council' || submission.level === 'Regional') {
-      const assigned = await isJudgeAssigned(submissionId, req.user._id, round._id);
-      if (!assigned) {
+      const authorization = await resolveJudgeEvaluationAuthorization(
+        submissionId,
+        req.user._id,
+        round._id,
+        { allowVisibleAssignmentFallback: true }
+      );
+
+      if (!authorization.success) {
+        return res.status(500).json({
+          success: false,
+          message: authorization.error || 'Failed to verify judge assignment authorization'
+        });
+      }
+
+      if (!authorization.authorized) {
         return res.status(403).json({
           success: false,
           message: 'You are not assigned to evaluate this submission for the active round.'

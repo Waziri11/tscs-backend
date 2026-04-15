@@ -394,6 +394,75 @@ async function isJudgeAssigned(submissionId, judgeId, roundId = null) {
 }
 
 /**
+ * Resolve whether a judge can evaluate a submission in the resolved active round context.
+ * Strict check: assignment exists for submission + judge + round.
+ * Visibility-aligned fallback: assignment exists for submission + judge in any round.
+ */
+async function resolveJudgeEvaluationAuthorization(submissionId, judgeId, roundId = null, options = {}) {
+  const { allowVisibleAssignmentFallback = true } = options;
+
+  try {
+    if (roundId) {
+      const strictAssignment = await SubmissionAssignment.findOne({
+        submissionId,
+        judgeId,
+        roundId
+      }).select('_id roundId');
+
+      if (strictAssignment) {
+        return {
+          success: true,
+          authorized: true,
+          source: 'strict_round_assignment',
+          assignmentRoundId: strictAssignment.roundId || roundId
+        };
+      }
+    }
+
+    if (!allowVisibleAssignmentFallback) {
+      return {
+        success: true,
+        authorized: false,
+        source: 'none',
+        assignmentRoundId: null
+      };
+    }
+
+    const fallbackAssignment = await SubmissionAssignment.findOne({
+      submissionId,
+      judgeId
+    })
+      .sort({ assignedAt: -1, createdAt: -1 })
+      .select('_id roundId');
+
+    if (fallbackAssignment) {
+      return {
+        success: true,
+        authorized: true,
+        source: 'visible_assignment_fallback',
+        assignmentRoundId: fallbackAssignment.roundId || null
+      };
+    }
+
+    return {
+      success: true,
+      authorized: false,
+      source: 'none',
+      assignmentRoundId: null
+    };
+  } catch (error) {
+    console.error('Error resolving judge evaluation authorization:', error);
+    return {
+      success: false,
+      authorized: false,
+      source: 'error',
+      assignmentRoundId: null,
+      error: error.message
+    };
+  }
+}
+
+/**
  * Assign pending submissions from active rounds to judges in the same location.
  * This is useful when a new judge is created.
  */
@@ -652,6 +721,7 @@ module.exports = {
   assignJudgeToSubmission,
   getAssignedJudge,
   isJudgeAssigned,
+  resolveJudgeEvaluationAuthorization,
   assignUnassignedSubmissionsToJudge,
   manuallyAssignSubmission,
   getEligibleJudges
