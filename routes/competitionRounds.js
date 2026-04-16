@@ -1291,23 +1291,12 @@ router.get('/:id/judge-progress', async (req, res) => {
       });
     }
 
-    // Get round start time (when round was activated)
-    // For countdown rounds, startTime is set when activated
-    // For fixed_time rounds, use createdAt (rounds are typically activated soon after creation)
-    // This ensures we only count evaluations that happened during this round
     const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const normalize = (value) => (value ? value.toString().trim() : '');
     const toExactRegex = (value) => {
       const normalized = normalize(value);
       return normalized ? new RegExp(`^${escapeRegExp(normalized)}$`, 'i') : null;
     };
-
-    const startTimeRaw = round.startTime || round.createdAt;
-    let roundStartTime = new Date(startTimeRaw);
-    const now = new Date();
-    if (Number.isNaN(roundStartTime.getTime()) || roundStartTime > now) {
-      roundStartTime = new Date(round.createdAt);
-    }
     
     let snapshotSubmissionIds = Array.isArray(round.pendingSubmissionsSnapshot)
       ? round.pendingSubmissionsSnapshot
@@ -1375,11 +1364,9 @@ router.get('/:id/judge-progress', async (req, res) => {
     // Calculate progress for each judge
     const submissionIds = submissions.map(sub => sub._id);
     const judgeProgress = await Promise.all(judges.map(async (judge) => {
-      // Only get evaluations created AFTER the round started
       const evaluationQuery = { 
         roundId: round._id,
-        judgeId: judge._id,
-        createdAt: { $gte: roundStartTime }
+        judgeId: judge._id
       };
       if (submissionIds.length > 0) {
         evaluationQuery.submissionId = { $in: submissionIds };
@@ -1411,7 +1398,7 @@ router.get('/:id/judge-progress', async (req, res) => {
         assignedSubmissions = submissions;
       }
 
-      // Count completed: submissions evaluated by this judge AFTER round started
+      // Count completed using evaluations explicitly tied to this round.
       const completed = assignedSubmissions.filter(sub => 
         evaluatedSubmissionIds.includes(sub._id.toString())
       ).length;
@@ -1439,13 +1426,11 @@ router.get('/:id/judge-progress', async (req, res) => {
     }));
 
     // Calculate overall statistics
-    // Only count evaluations created AFTER the round started
     const totalSubmissions = submissions.length;
     const totalJudges = judges.length;
     const totalEvaluations = await Evaluation.countDocuments({
       roundId: round._id,
-      submissionId: { $in: submissions.map(s => s._id) },
-      createdAt: { $gte: roundStartTime }
+      submissionId: { $in: submissions.map(s => s._id) }
     });
     const averageProgress = judgeProgress.length > 0
       ? Math.round(judgeProgress.reduce((sum, j) => sum + j.percentage, 0) / judgeProgress.length)
@@ -1505,9 +1490,6 @@ router.get('/:id/judge-progress/export', async (req, res) => {
       });
     }
 
-    // Get round start time
-    const roundStartTime = round.startTime || round.createdAt;
-    
     let snapshotSubmissionIds = Array.isArray(round.pendingSubmissionsSnapshot)
       ? round.pendingSubmissionsSnapshot
       : [];
@@ -1518,7 +1500,7 @@ router.get('/:id/judge-progress/export', async (req, res) => {
     }
     const hasSnapshotContext = Boolean(round.activationSnapshotId || snapshotDoc);
 
-    const submissions = hasSnapshotContext
+    const allSubmissions = hasSnapshotContext
       ? await Submission.find({ _id: { $in: snapshotSubmissionIds } })
       : await Submission.find({ year: round.year, level: round.level });
 
@@ -1533,26 +1515,39 @@ router.get('/:id/judge-progress/export', async (req, res) => {
 
     const judges = await User.find(judgeQuery).select('name email username assignedLevel assignedRegion assignedCouncil areasOfFocus');
 
+    let submissions;
+    if (round.level === 'Council' || round.level === 'Regional') {
+      const assignments = await SubmissionAssignment.find({
+        roundId: round._id,
+        level: round.level
+      }).select('submissionId');
+
+      const assignedSubmissionIds = assignments.map((assignment) => String(assignment.submissionId));
+      submissions = allSubmissions.filter((submission) => assignedSubmissionIds.includes(String(submission._id)));
+    } else {
+      submissions = allSubmissions;
+    }
+
     // Calculate progress for each judge
     const judgeProgress = await Promise.all(judges.map(async (judge) => {
       const evaluations = await Evaluation.find({ 
         roundId: round._id,
-        judgeId: judge._id,
-        createdAt: { $gte: roundStartTime }
+        judgeId: judge._id
       });
       const evaluatedSubmissionIds = evaluations.map(e => e.submissionId.toString());
       
-      const assignedSubmissions = submissions.filter(sub => {
-        // Check if judge is assigned to this submission's location
-        // Judges see ALL submissions in their location (not filtered by areaOfFocus)
-        if (round.level === 'Council') {
-          return sub.region === judge.assignedRegion && sub.council === judge.assignedCouncil;
-        } else if (round.level === 'Regional') {
-          return sub.region === judge.assignedRegion;
-        } else {
-          return true; // National level - see all submissions
-        }
-      });
+      let assignedSubmissions;
+      if (round.level === 'Council' || round.level === 'Regional') {
+        const assignments = await SubmissionAssignment.find({
+          roundId: round._id,
+          judgeId: judge._id,
+          level: round.level
+        }).select('submissionId');
+        const assignedIds = assignments.map((assignment) => String(assignment.submissionId));
+        assignedSubmissions = submissions.filter((submission) => assignedIds.includes(String(submission._id)));
+      } else {
+        assignedSubmissions = submissions;
+      }
 
       const completed = assignedSubmissions.filter(sub => 
         evaluatedSubmissionIds.includes(sub._id.toString())

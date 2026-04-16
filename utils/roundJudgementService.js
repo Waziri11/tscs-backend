@@ -1387,7 +1387,6 @@ const listAreaLeaderboards = async ({ filters = {}, user }) => {
   }
 
   if (user.role === 'admin') {
-    query.state = 'published';
     const scope = getAdminScope(user);
     if (!scope || scope.level === 'None') {
       query._id = { $in: [] };
@@ -1449,6 +1448,115 @@ const listAreaLeaderboards = async ({ filters = {}, user }) => {
   }
 
   return leaderboards;
+};
+
+const listCouncilAreaLeaderboards = async ({ filters = {}, user }) => {
+  const normalizedFilters = {
+    ...filters,
+    level: 'Council',
+    areaType: 'council'
+  };
+
+  if (filters.region && filters.council && !filters.areaId) {
+    normalizedFilters.areaId = buildAreaId('Council', filters.region, filters.council);
+  }
+
+  const areaLeaderboards = await listAreaLeaderboards({
+    filters: normalizedFilters,
+    user
+  });
+  const scopedAreaLeaderboards = areaLeaderboards.filter((leaderboard) => {
+    if (filters.region && leaderboard.region !== filters.region) return false;
+    if (filters.council && leaderboard.council !== filters.council) return false;
+    return true;
+  });
+
+  const groupedLeaderboards = [];
+  const regionSet = new Set();
+  const councilKeySet = new Set();
+  const competitionAreaSet = new Set();
+
+  for (const leaderboard of scopedAreaLeaderboards) {
+    const plainLeaderboard = leaderboard.toObject ? leaderboard.toObject() : leaderboard;
+    const baseEntries = Array.isArray(plainLeaderboard.entries) ? plainLeaderboard.entries : [];
+
+    if (plainLeaderboard.region) regionSet.add(plainLeaderboard.region);
+    if (plainLeaderboard.region && plainLeaderboard.council) {
+      councilKeySet.add(`${plainLeaderboard.region}::${plainLeaderboard.council}`);
+    }
+
+    const areaMap = new Map();
+    for (const entry of baseEntries) {
+      const competitionArea = String(entry.areaOfFocus || '').trim();
+      if (!competitionArea) continue;
+      competitionAreaSet.add(competitionArea);
+      if (!areaMap.has(competitionArea)) {
+        areaMap.set(competitionArea, []);
+      }
+      areaMap.get(competitionArea).push(entry);
+    }
+
+    for (const [competitionArea, entries] of areaMap.entries()) {
+      if (filters.areaOfFocus && competitionArea !== filters.areaOfFocus) continue;
+
+      const rankedEntries = rankEntriesDeterministically(
+        entries.map((entry) => (entry && typeof entry.toObject === 'function' ? entry.toObject() : { ...entry }))
+      );
+
+      groupedLeaderboards.push({
+        id: `${plainLeaderboard._id.toString()}::${competitionArea}`,
+        sourceLeaderboardId: plainLeaderboard._id.toString(),
+        roundId: plainLeaderboard.roundId?.toString?.() || String(plainLeaderboard.roundId),
+        year: plainLeaderboard.year,
+        level: plainLeaderboard.level,
+        areaType: plainLeaderboard.areaType,
+        areaId: plainLeaderboard.areaId,
+        region: plainLeaderboard.region || null,
+        council: plainLeaderboard.council || null,
+        competitionArea,
+        state: plainLeaderboard.state,
+        isFinalized: ['finalized', 'published'].includes(plainLeaderboard.state),
+        quota: plainLeaderboard.quota || 0,
+        totalSubmissions: rankedEntries.length,
+        totalEvaluations: rankedEntries.reduce((sum, entry) => sum + (entry.totalEvaluations || 0), 0),
+        entries: rankedEntries,
+        lastUpdated: plainLeaderboard.lastUpdated || plainLeaderboard.updatedAt || null
+      });
+    }
+  }
+
+  groupedLeaderboards.sort((left, right) => {
+    if ((left.region || '') !== (right.region || '')) {
+      return (left.region || '').localeCompare(right.region || '');
+    }
+    if ((left.council || '') !== (right.council || '')) {
+      return (left.council || '').localeCompare(right.council || '');
+    }
+    return (left.competitionArea || '').localeCompare(right.competitionArea || '');
+  });
+
+  return {
+    leaderboards: groupedLeaderboards,
+    filters: {
+      regions: [...regionSet].sort((a, b) => a.localeCompare(b)),
+      councils: [...councilKeySet]
+        .map((value) => {
+          const [region, council] = String(value || '').split('::');
+          return {
+            value,
+            region: region || null,
+            council: council || null
+          };
+        })
+        .sort((a, b) => {
+          if ((a.region || '') !== (b.region || '')) {
+            return (a.region || '').localeCompare(b.region || '');
+          }
+          return (a.council || '').localeCompare(b.council || '');
+        }),
+      competitionAreas: [...competitionAreaSet].sort((a, b) => a.localeCompare(b))
+    }
+  };
 };
 
 const listAvailableLocations = async ({ year, level, areaOfFocus, user }) => {
@@ -1553,6 +1661,7 @@ module.exports = {
   publishAreaLeaderboard,
   reopenAreaLeaderboard,
   listAreaLeaderboards,
+  listCouncilAreaLeaderboards,
   listAvailableLocations,
   findAreaLeaderboardById,
   getAreaIdFromSubmission,
