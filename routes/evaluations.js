@@ -4,7 +4,7 @@ const Submission = require('../models/Submission');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
 const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
-const { isJudgeAssigned } = require('../utils/judgeAssignment');
+const { resolveJudgeEvaluationAuthorization } = require('../utils/judgeAssignment');
 const { invalidateCacheOnChange, cacheMiddleware } = require('../middleware/cache');
 const {
   getRoundBySubmissionForEvaluation,
@@ -12,6 +12,7 @@ const {
   getAreaIdFromSubmission,
   markRoundEndedIfComplete
 } = require('../utils/roundJudgementService');
+const { resolveSubmissionRoundContext, isRoundActionable } = require('../utils/roundContext');
 const { canAdminAccessSubmission } = require('../utils/adminScope');
 const Competition = require('../models/Competition');
 const {
@@ -45,10 +46,23 @@ async function resolveEvaluationRoundForJudge(submission, judgeId) {
     .sort({ assignedAt: -1, createdAt: -1 })
     .populate('roundId');
 
-  if (assignment?.roundId) {
+  if (assignment?.roundId && isRoundActionable(assignment.roundId)) {
     return {
       round: assignment.roundId,
       source: 'assignment'
+    };
+  }
+
+  // Fallback to the currently actionable round context for the submission level/year.
+  // This prevents false "No eligible round found" when snapshot membership has drifted.
+  const context = await resolveSubmissionRoundContext(submission, {
+    includeHistorical: false,
+    allowFallbackByYearLevel: true
+  });
+  if (context.round && isRoundActionable(context.round)) {
+    return {
+      round: context.round,
+      source: 'context'
     };
   }
 
@@ -242,8 +256,21 @@ router.post('/', authorize('judge'), invalidateCacheOnChange(['cache:/api/leader
     }
 
     if (submission.level === 'Council' || submission.level === 'Regional') {
-      const assigned = await isJudgeAssigned(submissionId, req.user._id, round._id);
-      if (!assigned) {
+      const authorization = await resolveJudgeEvaluationAuthorization(
+        submissionId,
+        req.user._id,
+        round._id,
+        { allowVisibleAssignmentFallback: true }
+      );
+
+      if (!authorization.success) {
+        return res.status(500).json({
+          success: false,
+          message: authorization.error || 'Failed to verify judge assignment authorization'
+        });
+      }
+
+      if (!authorization.authorized) {
         return res.status(403).json({
           success: false,
           message: 'You are not assigned to evaluate this submission for the active round.'

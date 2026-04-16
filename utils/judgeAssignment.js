@@ -14,6 +14,10 @@ const {
 
 const ACTIONABLE_ASSIGNMENT_STATUSES = new Set(['pending', 'submitted', 'under_review', 'evaluated']);
 
+const isDuplicateKeyError = (error) => {
+  return Boolean(error && (error.code === 11000 || error?.cause?.code === 11000));
+};
+
 const buildSubmissionAreaQueryByLevel = (level, region, council) => {
   if (level === 'Council') {
     return { region, council };
@@ -240,15 +244,37 @@ async function assignJudgeToSubmission(submission, options = {}) {
       }
     }
 
-    const assignment = await SubmissionAssignment.create({
-      roundId,
-      submissionId: submission._id,
-      judgeId: selectedJudge._id,
-      level: submission.level,
-      region: submission.region,
-      council: submission.council || null,
-      judgeNotified: false
-    });
+    let assignment;
+    try {
+      assignment = await SubmissionAssignment.create({
+        roundId,
+        submissionId: submission._id,
+        judgeId: selectedJudge._id,
+        level: submission.level,
+        region: submission.region,
+        council: submission.council || null,
+        judgeNotified: false
+      });
+    } catch (error) {
+      if (!isDuplicateKeyError(error)) {
+        throw error;
+      }
+
+      const concurrentAssignment = await SubmissionAssignment.findOne({
+        roundId,
+        submissionId: submission._id
+      });
+
+      if (concurrentAssignment) {
+        return {
+          success: true,
+          assignment: concurrentAssignment,
+          message: 'Submission already assigned for this round'
+        };
+      }
+
+      throw error;
+    }
 
     notificationService.handleJudgeAssigned({
       userId: selectedJudge._id.toString(),
@@ -364,6 +390,75 @@ async function isJudgeAssigned(submissionId, judgeId, roundId = null) {
   } catch (error) {
     console.error('Error checking judge assignment:', error);
     return false;
+  }
+}
+
+/**
+ * Resolve whether a judge can evaluate a submission in the resolved active round context.
+ * Strict check: assignment exists for submission + judge + round.
+ * Visibility-aligned fallback: assignment exists for submission + judge in any round.
+ */
+async function resolveJudgeEvaluationAuthorization(submissionId, judgeId, roundId = null, options = {}) {
+  const { allowVisibleAssignmentFallback = true } = options;
+
+  try {
+    if (roundId) {
+      const strictAssignment = await SubmissionAssignment.findOne({
+        submissionId,
+        judgeId,
+        roundId
+      }).select('_id roundId');
+
+      if (strictAssignment) {
+        return {
+          success: true,
+          authorized: true,
+          source: 'strict_round_assignment',
+          assignmentRoundId: strictAssignment.roundId || roundId
+        };
+      }
+    }
+
+    if (!allowVisibleAssignmentFallback) {
+      return {
+        success: true,
+        authorized: false,
+        source: 'none',
+        assignmentRoundId: null
+      };
+    }
+
+    const fallbackAssignment = await SubmissionAssignment.findOne({
+      submissionId,
+      judgeId
+    })
+      .sort({ assignedAt: -1, createdAt: -1 })
+      .select('_id roundId');
+
+    if (fallbackAssignment) {
+      return {
+        success: true,
+        authorized: true,
+        source: 'visible_assignment_fallback',
+        assignmentRoundId: fallbackAssignment.roundId || null
+      };
+    }
+
+    return {
+      success: true,
+      authorized: false,
+      source: 'none',
+      assignmentRoundId: null
+    };
+  } catch (error) {
+    console.error('Error resolving judge evaluation authorization:', error);
+    return {
+      success: false,
+      authorized: false,
+      source: 'error',
+      assignmentRoundId: null,
+      error: error.message
+    };
   }
 }
 
@@ -508,15 +603,31 @@ async function manuallyAssignSubmission(submissionId, judgeId, options = {}) {
       await assignment.save();
       message = 'Submission reassigned successfully';
     } else {
-      assignment = await SubmissionAssignment.create({
-        roundId: round._id,
-        submissionId,
-        judgeId,
-        level: submission.level,
-        region: submission.region,
-        council: submission.council || null,
-        judgeNotified: false
-      });
+      try {
+        assignment = await SubmissionAssignment.create({
+          roundId: round._id,
+          submissionId,
+          judgeId,
+          level: submission.level,
+          region: submission.region,
+          council: submission.council || null,
+          judgeNotified: false
+        });
+      } catch (error) {
+        if (!isDuplicateKeyError(error)) {
+          throw error;
+        }
+
+        assignment = await SubmissionAssignment.findOne(assignmentQuery);
+        if (!assignment) {
+          throw error;
+        }
+
+        assignment.judgeId = judgeId;
+        assignment.judgeNotified = false;
+        await assignment.save();
+        message = 'Submission reassigned successfully';
+      }
     }
 
     notificationService.handleJudgeAssigned({
@@ -610,6 +721,7 @@ module.exports = {
   assignJudgeToSubmission,
   getAssignedJudge,
   isJudgeAssigned,
+  resolveJudgeEvaluationAuthorization,
   assignUnassignedSubmissionsToJudge,
   manuallyAssignSubmission,
   getEligibleJudges

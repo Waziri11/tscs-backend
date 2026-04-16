@@ -762,6 +762,8 @@ npm start              # Start production server
 npm run dev            # Start development server (nodemon)
 npm run create-superadmin  # Create superadmin user
 npm run seed:landing   # Seed landing page content
+npm run migrate:submission-round-integrity  # Submission/round integrity dry run
+npm run migrate:round-indexes  # Drop legacy indexes and sync schema indexes
 ```
 
 ### Utility Scripts
@@ -769,6 +771,17 @@ npm run seed:landing   # Seed landing page content
 **migrateUploads.js**
 - Migrates files from root `uploads/` to subfolders
 - Run: `node scripts/migrateUploads.js`
+
+**migrateSubmissionRoundIntegrity.js**
+- Reconciles submission `roundId` with canonical actionable rounds
+- Reconciles and deduplicates `SubmissionAssignment` by `(roundId, submissionId)`
+- Run dry-run: `npm run migrate:submission-round-integrity`
+- Run apply mode: `node scripts/migrateSubmissionRoundIntegrity.js --apply`
+
+**migrateRoundScopedIndexes.js**
+- Drops legacy conflicting indexes (including `submissionId_1` on `submissionassignments`)
+- Rebuilds indexes from schema definitions via `syncIndexes()`
+- Run: `npm run migrate:round-indexes`
 
 **roundScheduler.js**
 - Automated round processing
@@ -837,6 +850,13 @@ npm run seed:landing   # Seed landing page content
    - Ensure `JWT_SECRET` is set
    - Check token expiration
    - Verify token format
+
+5. **`E11000` on `submissionassignments` (`submissionId_1`)**
+   - This indicates a legacy unique index on `submissionId` is still present
+   - Run integrity migration dry-run: `npm run migrate:submission-round-integrity`
+   - Run integrity apply: `node scripts/migrateSubmissionRoundIntegrity.js --apply`
+   - Run index sync: `npm run migrate:round-indexes`
+   - Verify final uniqueness is on `{ roundId: 1, submissionId: 1 }`
 
 ---
 

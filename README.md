@@ -61,6 +61,25 @@ npm start
 
 The server will start on `http://localhost:5000` (or the port specified in `.env`).
 
+## Round-Scoped Assignment Index Maintenance
+
+If you encounter a duplicate key error such as `E11000 ... submissionassignments index: submissionId_1`, run the migration scripts below to align indexes with the round-scoped assignment model:
+
+```bash
+# 1) Inspect and reconcile submission-round/assignment integrity (dry run)
+npm run migrate:submission-round-integrity
+
+# 2) Apply integrity reconciliation changes
+node scripts/migrateSubmissionRoundIntegrity.js --apply
+
+# 3) Drop legacy indexes and sync schema indexes
+npm run migrate:round-indexes
+```
+
+Expected `SubmissionAssignment` uniqueness after migration:
+- Unique on `{ roundId: 1, submissionId: 1 }`
+- No unique index on `{ submissionId: 1 }`
+
 ## API Endpoints
 
 ### Authentication
