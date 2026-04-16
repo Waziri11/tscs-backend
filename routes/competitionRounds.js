@@ -1291,6 +1291,19 @@ router.get('/:id/judge-progress', async (req, res) => {
       });
     }
 
+    const buildAreaKey = (level, submissionOrAssignment) => {
+      if (level === 'Council') {
+        const region = submissionOrAssignment?.region ? String(submissionOrAssignment.region).trim() : '';
+        const council = submissionOrAssignment?.council ? String(submissionOrAssignment.council).trim() : '';
+        return region && council ? `${region}::${council}` : null;
+      }
+      if (level === 'Regional') {
+        const region = submissionOrAssignment?.region ? String(submissionOrAssignment.region).trim() : '';
+        return region ? region : null;
+      }
+      return level === 'National' ? 'national' : null;
+    };
+
     const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const normalize = (value) => (value ? value.toString().trim() : '');
     const toExactRegex = (value) => {
@@ -1336,6 +1349,42 @@ router.get('/:id/judge-progress', async (req, res) => {
 
     // Get full judge details (including name, email, username) for both progress calculation and export
     const judges = await User.find(judgeQuery).select('_id name email username assignedLevel assignedRegion assignedCouncil areasOfFocus');
+
+    // Area stats for charts: total vs assigned per area (to detect unassigned submissions).
+    const areaTotalsMap = new Map();
+    for (const submission of allSubmissions) {
+      const key = buildAreaKey(round.level, submission);
+      if (!key) continue;
+      areaTotalsMap.set(key, (areaTotalsMap.get(key) || 0) + 1);
+    }
+
+    const assignmentDocsForAreaStats = (round.level === 'Council' || round.level === 'Regional')
+      ? await SubmissionAssignment.find({
+          roundId: round._id,
+          level: round.level,
+          ...(round.level === 'Council' && regionRegex && councilRegex ? {
+            region: regionRegex,
+            council: councilRegex
+          } : round.level === 'Regional' && regionRegex ? {
+            region: regionRegex
+          } : {})
+        }).select('submissionId region council')
+      : [];
+
+    const areaAssignedMap = new Map();
+    for (const assignment of assignmentDocsForAreaStats) {
+      const key = buildAreaKey(round.level, assignment);
+      if (!key) continue;
+      areaAssignedMap.set(key, (areaAssignedMap.get(key) || 0) + 1);
+    }
+
+    const areaStats = [...new Set([...areaTotalsMap.keys(), ...areaAssignedMap.keys()])]
+      .map((areaId) => ({
+        areaId,
+        totalSubmissions: areaTotalsMap.get(areaId) || 0,
+        assignedSubmissions: areaAssignedMap.get(areaId) || 0
+      }))
+      .sort((a, b) => b.totalSubmissions - a.totalSubmissions);
 
     // Get all submissions for this round (used for overall stats)
     let submissions;
@@ -1465,7 +1514,8 @@ router.get('/:id/judge-progress', async (req, res) => {
         totalEvaluations,
         averageProgress
       },
-      judgeProgress
+      judgeProgress,
+      areaStats
     });
   } catch (error) {
     console.error('Get judge progress error:', error);
