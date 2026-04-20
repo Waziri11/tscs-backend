@@ -219,13 +219,12 @@ const syncRoundChunks = async (round, userId, chunks = []) => {
 // All routes require authentication
 router.use(protect);
 
-// Public route for judges to get active rounds
+// Public route for judges/stakeholders to get active rounds
 router.get('/active', cacheMiddleware(60), async (req, res) => {
   try {
     const user = req.user;
-    
-    // Only judges can use this endpoint
-    if (!user || user.role !== 'judge' || !user.assignedLevel) {
+
+    if (!user) {
       return res.json({
         success: true,
         count: 0,
@@ -233,17 +232,24 @@ router.get('/active', cacheMiddleware(60), async (req, res) => {
       });
     }
 
-    // National single timeline per level:
-    // Judges should see the latest active round for their level,
-    // or latest ended round as fallback while finishing pending tasks.
-    const levelRounds = await CompetitionRound.find({
-      level: user.assignedLevel,
-      status: { $in: ['active', 'ended'] }
-    }).sort({ createdAt: -1 });
+    let rounds = [];
 
-    const activeRound = levelRounds.find((round) => round.status === 'active') || null;
-    const endedRound = levelRounds.find((round) => round.status === 'ended') || null;
-    const rounds = activeRound ? [activeRound] : endedRound ? [endedRound] : [];
+    if (user.role === 'judge' && user.assignedLevel) {
+      // Judges should see the latest active round for their level,
+      // or latest ended round as fallback while finishing pending tasks.
+      const levelRounds = await CompetitionRound.find({
+        level: user.assignedLevel,
+        status: { $in: ['active', 'ended'] }
+      }).sort({ createdAt: -1 });
+
+      const activeRound = levelRounds.find((round) => round.status === 'active') || null;
+      const endedRound = levelRounds.find((round) => round.status === 'ended') || null;
+      rounds = activeRound ? [activeRound] : endedRound ? [endedRound] : [];
+    } else if (user.role === 'stakeholder') {
+      const latestActiveRound = await CompetitionRound.findOne({ status: 'active' })
+        .sort({ updatedAt: -1, createdAt: -1 });
+      rounds = latestActiveRound ? [latestActiveRound] : [];
+    }
 
     res.json({
       success: true,
@@ -260,8 +266,19 @@ router.get('/active', cacheMiddleware(60), async (req, res) => {
 });
 
 // All other routes require superadmin or national admin (only national admin can manage rounds)
-router.use(authorize('superadmin', 'admin'));
-router.use(authorizeNationalAdminOrSuperadmin);
+const isJudgeProgressReadRoute = (req) => (
+  req.method === 'GET' && /^\/[^/]+\/judge-progress$/.test(req.path)
+);
+
+router.use((req, res, next) => {
+  if (isJudgeProgressReadRoute(req)) return next();
+  return authorize('superadmin', 'admin')(req, res, next);
+});
+
+router.use((req, res, next) => {
+  if (isJudgeProgressReadRoute(req)) return next();
+  return authorizeNationalAdminOrSuperadmin(req, res, next);
+});
 
 // @route   GET /api/competition-rounds
 // @desc    Get all competition rounds
@@ -1282,6 +1299,18 @@ router.get('/:id/leaderboard', async (req, res) => {
 // @access  Private (Superadmin)
 router.get('/:id/judge-progress', async (req, res) => {
   try {
+    const isSuperadmin = req.user?.role === 'superadmin';
+    const isNationalAdmin = req.user?.role === 'admin' && req.user?.adminLevel === 'National';
+    const isStakeholder = req.user?.role === 'stakeholder';
+    const canAccessJudgeProgress = isSuperadmin || isNationalAdmin || isStakeholder;
+
+    if (!canAccessJudgeProgress) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to view judge progress'
+      });
+    }
+
     const round = await CompetitionRound.findById(req.params.id);
 
     if (!round) {
@@ -1289,6 +1318,19 @@ router.get('/:id/judge-progress', async (req, res) => {
         success: false,
         message: 'Competition round not found'
       });
+    }
+
+    if (isStakeholder) {
+      const latestActiveRound = await CompetitionRound.findOne({ status: 'active' })
+        .sort({ updatedAt: -1, createdAt: -1 })
+        .select('_id status');
+
+      if (!latestActiveRound || String(latestActiveRound._id) !== String(round._id)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Stakeholders can only view judge progress for the current active round'
+        });
+      }
     }
 
     const buildAreaKey = (level, submissionOrAssignment) => {
