@@ -44,7 +44,7 @@ const submissionSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pending', 'submitted', 'under_review', 'evaluated', 'approved', 'eliminated', 'promoted'],
+    enum: ['pending', 'submitted', 'under_review', 'evaluated', 'approved', 'eliminated', 'promoted', 'disqualified'],
     default: 'pending'
   },
   region: {

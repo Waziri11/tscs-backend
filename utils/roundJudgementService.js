@@ -721,7 +721,27 @@ const getRoundBySubmissionForEvaluation = async (submission) => {
 };
 
 const recalculateSubmissionAverageForRound = async (submissionId, roundId) => {
+  const submission = await Submission.findById(submissionId).select('disqualified status');
   const evaluations = await Evaluation.find({ submissionId, roundId }).select('averageScore');
+
+  const isDisqualified = Boolean(
+    submission && (submission.disqualified === true || submission.status === 'disqualified')
+  );
+
+  if (isDisqualified) {
+    const totalAverage = evaluations.reduce((sum, evaluation) => sum + (evaluation.averageScore || 0), 0);
+    const averageScore = evaluations.length > 0
+      ? Math.round((totalAverage / evaluations.length) * 100) / 100
+      : 0;
+
+    await Submission.findByIdAndUpdate(submissionId, {
+      averageScore,
+      status: 'disqualified',
+      disqualified: true
+    });
+    return { averageScore, totalEvaluations: evaluations.length };
+  }
+
   if (evaluations.length === 0) {
     await Submission.findByIdAndUpdate(submissionId, {
       averageScore: 0,
@@ -938,6 +958,14 @@ const checkAreaJudgeCompletion = async (roundId, areaId) => {
     };
   }
 
+  const disqualifiedSubmissions = await Submission.find({
+    _id: { $in: submissionIds },
+    $or: [{ disqualified: true }, { status: 'disqualified' }]
+  }).select('_id');
+  const disqualifiedSubmissionIds = new Set(
+    disqualifiedSubmissions.map((submission) => String(submission._id))
+  );
+
   const evaluationGroups = await Evaluation.aggregate([
     {
       $match: {
@@ -973,6 +1001,9 @@ const checkAreaJudgeCompletion = async (roundId, areaId) => {
 
     for (const submissionId of submissionIds) {
       const submissionKey = String(submissionId);
+      if (disqualifiedSubmissionIds.has(submissionKey)) {
+        continue;
+      }
       const assignedJudgeId = assignmentMap.get(submissionKey);
       if (!assignedJudgeId) {
         pendingCount += 1;
@@ -1013,7 +1044,11 @@ const checkAreaJudgeCompletion = async (roundId, areaId) => {
   }
 
   for (const submissionId of submissionIds) {
-    const evaluatedJudgeIds = evaluationMap.get(String(submissionId)) || new Set();
+    const submissionKey = String(submissionId);
+    if (disqualifiedSubmissionIds.has(submissionKey)) {
+      continue;
+    }
+    const evaluatedJudgeIds = evaluationMap.get(submissionKey) || new Set();
     const allJudgesDone = judgeIds.every((judgeId) => evaluatedJudgeIds.has(judgeId));
     if (!allJudgesDone) {
       pendingCount += 1;

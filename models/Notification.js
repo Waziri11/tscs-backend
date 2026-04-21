@@ -18,6 +18,7 @@ const notificationSchema = new mongoose.Schema({
       'submission_successful', // Email: successful submission
       'submission_promoted',   // Email: approved/promoted
       'submission_eliminated', // Email: eliminated
+      'submission_disqualified', // Email: disqualified by judge/admin
       // Evaluation events (email enabled for judges)
       'evaluation_reminder',   // Email: time reminder
       'evaluation_pending',    // Email: new round available
