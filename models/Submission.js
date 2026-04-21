@@ -133,6 +133,19 @@ const submissionSchema = new mongoose.Schema({
   disqualifiedAt: {
     type: Date,
     default: null
+  },
+  isDeleted: {
+    type: Boolean,
+    default: false
+  },
+  deletedAt: {
+    type: Date,
+    default: null
+  },
+  deletedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
   }
 }, {
   timestamps: true
@@ -143,6 +156,7 @@ submissionSchema.index({ teacherId: 1 });
 submissionSchema.index({ level: 1, region: 1, council: 1 });
 submissionSchema.index({ year: 1, category: 1, class: 1, subject: 1 });
 submissionSchema.index({ status: 1 });
+submissionSchema.index({ isDeleted: 1, deletedAt: -1 });
 submissionSchema.index({ level: 1, status: 1 });
 submissionSchema.index({ roundId: 1 });
 submissionSchema.index({ roundId: 1, averageScore: -1 }); // For leaderboard queries

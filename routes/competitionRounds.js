@@ -16,8 +16,10 @@ const {
   getAreaReadiness,
   approveAreaLeaderboardAndPromote,
   rebuildAreaLeaderboard,
-  ensureChunkAreasDoNotOverlap
+  ensureChunkAreasDoNotOverlap,
+  addSubmissionToActiveRoundSnapshot
 } = require('../utils/roundJudgementService');
+const { manuallyAssignSubmission } = require('../utils/judgeAssignment');
 
 // Safely import logger
 let logger = null;
@@ -1240,6 +1242,350 @@ router.patch('/:id/leaderboard-visibility', async (req, res) => {
       success: false,
       message: error.message || 'Server error'
     });
+  }
+});
+
+// @route   GET /api/competition-rounds/:id/submission-areas
+// @desc    Get available area scopes for superadmin manual submission
+// @access  Private (Superadmin)
+router.get('/:id/submission-areas', authorize('superadmin'), async (req, res) => {
+  try {
+    const round = await CompetitionRound.findById(req.params.id).select('_id year level status');
+    if (!round) {
+      return res.status(404).json({ success: false, message: 'Competition round not found' });
+    }
+    if (round.status !== 'active') {
+      return res.status(400).json({ success: false, message: 'Round must be active' });
+    }
+    if (!['Council', 'Regional'].includes(round.level)) {
+      return res.status(400).json({ success: false, message: 'Manual additions are only supported for Council and Regional rounds' });
+    }
+
+    const teacherQuery = {
+      role: 'teacher',
+      status: 'active',
+      isDeleted: { $ne: true }
+    };
+
+    const teachers = await User.find(teacherQuery).select('region council');
+    const areaMap = new Map();
+    for (const teacher of teachers) {
+      if (round.level === 'Council') {
+        if (!teacher.region || !teacher.council) continue;
+        const areaId = `${teacher.region}::${teacher.council}`;
+        if (!areaMap.has(areaId)) {
+          areaMap.set(areaId, {
+            areaId,
+            region: teacher.region,
+            council: teacher.council
+          });
+        }
+      } else if (round.level === 'Regional') {
+        if (!teacher.region) continue;
+        const areaId = teacher.region;
+        if (!areaMap.has(areaId)) {
+          areaMap.set(areaId, {
+            areaId,
+            region: teacher.region,
+            council: null
+          });
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      scopeType: round.level === 'Council' ? 'council' : 'region',
+      areas: [...areaMap.values()].sort((a, b) => a.areaId.localeCompare(b.areaId))
+    });
+  } catch (error) {
+    console.error('Get round submission areas error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   GET /api/competition-rounds/:id/teachers
+// @desc    Get teachers in selected area scope for superadmin round submission
+// @access  Private (Superadmin)
+router.get('/:id/teachers', authorize('superadmin'), async (req, res) => {
+  try {
+    const { areaId } = req.query;
+    if (!areaId) {
+      return res.status(400).json({ success: false, message: 'areaId is required' });
+    }
+
+    const round = await CompetitionRound.findById(req.params.id).select('_id year level status');
+    if (!round) {
+      return res.status(404).json({ success: false, message: 'Competition round not found' });
+    }
+    if (round.status !== 'active') {
+      return res.status(400).json({ success: false, message: 'Round must be active' });
+    }
+    if (!['Council', 'Regional'].includes(round.level)) {
+      return res.status(400).json({ success: false, message: 'Manual additions are only supported for Council and Regional rounds' });
+    }
+
+    const query = { role: 'teacher', status: 'active', isDeleted: { $ne: true } };
+    if (round.level === 'Council') {
+      const [region, council] = String(areaId).split('::').map((token) => String(token || '').trim());
+      if (!region || !council) {
+        return res.status(400).json({ success: false, message: 'Invalid areaId for Council round. Expected "Region::Council".' });
+      }
+      query.region = region;
+      query.council = council;
+    } else {
+      query.region = String(areaId).trim();
+      if (!query.region) {
+        return res.status(400).json({ success: false, message: 'Invalid areaId for Regional round' });
+      }
+    }
+
+    const teachers = await User.find(query)
+      .select('_id name email username school region council subject')
+      .sort({ name: 1 });
+
+    res.json({
+      success: true,
+      count: teachers.length,
+      teachers
+    });
+  } catch (error) {
+    console.error('Get round teachers error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   GET /api/competition-rounds/:id/judges
+// @desc    Get eligible judges in selected area/focus for superadmin round submission
+// @access  Private (Superadmin)
+router.get('/:id/judges', authorize('superadmin'), async (req, res) => {
+  try {
+    const { areaId, areaOfFocus } = req.query;
+    if (!areaId) {
+      return res.status(400).json({ success: false, message: 'areaId is required' });
+    }
+
+    const round = await CompetitionRound.findById(req.params.id).select('_id year level status');
+    if (!round) {
+      return res.status(404).json({ success: false, message: 'Competition round not found' });
+    }
+    if (round.status !== 'active') {
+      return res.status(400).json({ success: false, message: 'Round must be active' });
+    }
+    if (!['Council', 'Regional'].includes(round.level)) {
+      return res.status(400).json({ success: false, message: 'Judge filtering is only supported for Council and Regional rounds' });
+    }
+
+    const query = {
+      role: 'judge',
+      status: 'active',
+      isDeleted: { $ne: true },
+      assignedLevel: round.level
+    };
+
+    if (round.level === 'Council') {
+      const [region, council] = String(areaId).split('::').map((token) => String(token || '').trim());
+      if (!region || !council) {
+        return res.status(400).json({ success: false, message: 'Invalid areaId for Council round. Expected "Region::Council".' });
+      }
+      query.assignedRegion = region;
+      query.assignedCouncil = council;
+    } else {
+      const region = String(areaId || '').trim();
+      if (!region) {
+        return res.status(400).json({ success: false, message: 'Invalid areaId for Regional round' });
+      }
+      query.assignedRegion = region;
+    }
+
+    let judges = await User.find(query)
+      .select('_id name email username assignedLevel assignedRegion assignedCouncil areasOfFocus')
+      .sort({ name: 1 });
+
+    const normalizedAreaOfFocus = typeof areaOfFocus === 'string' ? areaOfFocus.trim().toLowerCase() : '';
+    if (normalizedAreaOfFocus) {
+      judges = judges.filter((judge) =>
+        Array.isArray(judge.areasOfFocus)
+          && judge.areasOfFocus.some((focus) => String(focus || '').trim().toLowerCase() === normalizedAreaOfFocus)
+      );
+    }
+
+    res.json({
+      success: true,
+      count: judges.length,
+      judges
+    });
+  } catch (error) {
+    console.error('Get round judges error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   POST /api/competition-rounds/:id/submissions
+// @desc    Create submission for teacher and attach to active round
+// @access  Private (Superadmin)
+router.post('/:id/submissions', authorize('superadmin'), invalidateCacheOnChange(['cache:/api/submissions*', 'cache:/api/competition-rounds*']), async (req, res) => {
+  try {
+    const round = await CompetitionRound.findById(req.params.id).select('_id year level status');
+    if (!round) {
+      return res.status(404).json({ success: false, message: 'Competition round not found' });
+    }
+    if (round.status !== 'active') {
+      return res.status(400).json({ success: false, message: 'Round must be active' });
+    }
+    if (!['Council', 'Regional'].includes(round.level)) {
+      return res.status(400).json({ success: false, message: 'Manual additions are only supported for Council and Regional rounds' });
+    }
+
+    const {
+      teacherId,
+      judgeId,
+      category,
+      class: classLevel,
+      subject,
+      areaOfFocus,
+      videoLink,
+      preferredLink,
+      lessonPlanFileName,
+      lessonPlanFileUrl,
+      videoFileName,
+      videoFileUrl,
+      videoOriginalBytes,
+      notes
+    } = req.body || {};
+
+    if (!teacherId || !category || !classLevel || !subject || !areaOfFocus) {
+      return res.status(400).json({
+        success: false,
+        message: 'teacherId, category, class, subject, and areaOfFocus are required'
+      });
+    }
+
+    const teacher = await User.findOne({
+      _id: teacherId,
+      role: 'teacher',
+      status: 'active',
+      isDeleted: { $ne: true }
+    }).select('_id name school region council');
+
+    if (!teacher) {
+      return res.status(404).json({ success: false, message: 'Teacher not found or inactive' });
+    }
+
+    if (round.level === 'Council' && (!teacher.region || !teacher.council)) {
+      return res.status(400).json({ success: false, message: 'Teacher must have both region and council for Council round' });
+    }
+    if (round.level === 'Regional' && !teacher.region) {
+      return res.status(400).json({ success: false, message: 'Teacher must have region for Regional round' });
+    }
+
+    let selectedJudge = null;
+    if (judgeId) {
+      const judgeQuery = {
+        _id: judgeId,
+        role: 'judge',
+        status: 'active',
+        isDeleted: { $ne: true },
+        assignedLevel: round.level
+      };
+      if (round.level === 'Council') {
+        judgeQuery.assignedRegion = teacher.region;
+        judgeQuery.assignedCouncil = teacher.council;
+      } else {
+        judgeQuery.assignedRegion = teacher.region;
+      }
+
+      selectedJudge = await User.findOne(judgeQuery).select('_id areasOfFocus');
+      if (!selectedJudge) {
+        return res.status(400).json({
+          success: false,
+          message: 'Selected judge is not eligible for the chosen area scope'
+        });
+      }
+
+      const focusMatch = Array.isArray(selectedJudge.areasOfFocus)
+        && selectedJudge.areasOfFocus.some((focus) =>
+          String(focus || '').trim().toLowerCase() === String(areaOfFocus || '').trim().toLowerCase()
+        );
+      if (!focusMatch) {
+        return res.status(400).json({
+          success: false,
+          message: 'Selected judge does not match the chosen area of focus'
+        });
+      }
+    }
+
+    const duplicate = await Submission.findOne({
+      teacherId: teacher._id,
+      areaOfFocus,
+      year: round.year,
+      isDeleted: { $ne: true }
+    }).select('_id');
+    if (duplicate) {
+      return res.status(400).json({
+        success: false,
+        message: 'Teacher already has a submission for this area of focus in this year'
+      });
+    }
+
+    const submissionPayload = {
+      teacherId: teacher._id,
+      teacherName: teacher.name,
+      year: round.year,
+      category,
+      class: classLevel,
+      subject,
+      areaOfFocus,
+      level: round.level,
+      status: 'submitted',
+      region: teacher.region,
+      council: round.level === 'Council' ? teacher.council : null,
+      school: teacher.school || 'N/A',
+      videoLink: videoLink || '',
+      preferredLink: preferredLink || '',
+      lessonPlanFileName: lessonPlanFileName || '',
+      lessonPlanFileUrl: lessonPlanFileUrl || '',
+      videoFileName: videoFileName || '',
+      videoFileUrl: videoFileUrl || '',
+      videoOriginalBytes: Number.isFinite(Number(videoOriginalBytes)) ? Number(videoOriginalBytes) : undefined,
+      notes: notes || ''
+    };
+
+    const submission = await Submission.create(submissionPayload);
+    const attachResult = await addSubmissionToActiveRoundSnapshot(round, submission);
+    if (!attachResult.success) {
+      await Submission.deleteOne({ _id: submission._id });
+      return res.status(attachResult.status || 400).json({
+        success: false,
+        message: attachResult.message || 'Failed to attach submission to round'
+      });
+    }
+
+    let directAssignment = null;
+    if (judgeId) {
+      const directAssignmentResult = await manuallyAssignSubmission(submission._id, judgeId, { roundId: round._id });
+      if (!directAssignmentResult.success) {
+        return res.status(201).json({
+          success: true,
+          message: 'Submission added, but direct judge assignment failed. Default assignment has been kept.',
+          submission,
+          assignment: attachResult.assignments || { assigned: 0, unassigned: 0 },
+          assignmentWarning: directAssignmentResult.error || 'Failed to assign selected judge'
+        });
+      }
+      directAssignment = directAssignmentResult.assignment;
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Submission added to active round successfully',
+      submission,
+      assignment: attachResult.assignments || { assigned: 0, unassigned: 0 },
+      directAssignment
+    });
+  } catch (error) {
+    console.error('Create round submission error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
   }
 });
 

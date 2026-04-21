@@ -252,6 +252,7 @@ const buildActivationSubmissionQuery = (round) => {
   return {
     year: round.year,
     level: round.level,
+    isDeleted: { $ne: true },
     disqualified: { $ne: true },
     status: { $nin: ['eliminated', 'promoted'] }
   };
@@ -276,6 +277,7 @@ const assignRoundSubmissionsToJudges = async (round, submissions) => {
   const judgeQuery = {
     role: 'judge',
     status: 'active',
+    isDeleted: { $ne: true },
     assignedLevel: round.level
   };
   const judges = await User.find(judgeQuery).select('_id assignedRegion assignedCouncil');
@@ -1641,6 +1643,97 @@ const markRoundEndedIfComplete = async (roundId) => {
   return round;
 };
 
+const addSubmissionToActiveRoundSnapshot = async (round, submission) => {
+  if (!round || !submission) {
+    return { success: false, status: 400, message: 'Round and submission are required' };
+  }
+
+  if (round.status !== 'active') {
+    return { success: false, status: 400, message: 'Round is not active' };
+  }
+
+  const submissionId = String(submission._id);
+  const snapshot = await RoundSnapshot.findOne({ roundId: round._id });
+  const existingIds = new Set([
+    ...((round.pendingSubmissionsSnapshot || []).map((id) => String(id))),
+    ...((snapshot?.submissionIds || []).map((id) => String(id)))
+  ]);
+
+  if (existingIds.has(submissionId)) {
+    return { success: true, alreadyExists: true, assignments: { assigned: 0, unassigned: 0 } };
+  }
+
+  const descriptor = getSubmissionAreaDescriptor(round.level, submission);
+  const baseAreas = Array.isArray(snapshot?.activeAreas) && snapshot.activeAreas.length > 0
+    ? snapshot.activeAreas
+    : (round.activeAreas || []);
+  const areaMap = new Map();
+  for (const area of baseAreas) {
+    if (!area?.areaId) continue;
+    areaMap.set(String(area.areaId), {
+      areaType: area.areaType,
+      areaId: area.areaId,
+      region: area.region || null,
+      council: area.council || null,
+      submissionCount: Number(area.submissionCount) || 0
+    });
+  }
+
+  const currentArea = areaMap.get(descriptor.areaId) || {
+    areaType: descriptor.areaType,
+    areaId: descriptor.areaId,
+    region: descriptor.region,
+    council: descriptor.council,
+    submissionCount: 0
+  };
+  currentArea.submissionCount += 1;
+  areaMap.set(descriptor.areaId, currentArea);
+
+  const updatedIds = [...existingIds, submissionId];
+  const snapshotPayload = {
+    roundId: round._id,
+    year: round.year,
+    level: round.level,
+    submissionIds: updatedIds,
+    activeAreas: [...areaMap.values()],
+    totalSubmissions: updatedIds.length,
+    frozenAt: snapshot?.frozenAt || round.snapshotCreatedAt || new Date(),
+    metadata: {
+      ...(snapshot?.metadata || {}),
+      lastManualAdditionAt: new Date(),
+      lastManualSubmissionId: submission._id
+    }
+  };
+
+  const updatedSnapshot = await RoundSnapshot.findOneAndUpdate(
+    { roundId: round._id },
+    snapshotPayload,
+    { upsert: true, new: true, runValidators: true }
+  );
+
+  await Submission.updateOne(
+    { _id: submission._id },
+    { $set: { roundId: round._id } }
+  );
+
+  round.pendingSubmissionsSnapshot = updatedSnapshot.submissionIds || [];
+  round.activeAreas = updatedSnapshot.activeAreas || [];
+  if (!round.activationSnapshotId) {
+    round.activationSnapshotId = updatedSnapshot._id;
+  }
+  if (!round.snapshotCreatedAt) {
+    round.snapshotCreatedAt = new Date();
+  }
+  await round.save();
+
+  const assignments = await assignRoundSubmissionsToJudges(round, [submission]);
+  return {
+    success: true,
+    snapshot: updatedSnapshot,
+    assignments
+  };
+};
+
 module.exports = {
   ROUND_LEVELS,
   getNextLevel,
@@ -1668,5 +1761,6 @@ module.exports = {
   markRoundEndedIfComplete,
   rebuildAreaLeaderboard,
   updateAreaStateByCompletion,
-  checkAreaJudgeCompletion
+  checkAreaJudgeCompletion,
+  addSubmissionToActiveRoundSnapshot
 };

@@ -48,7 +48,7 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
     const parsedYear = (typeof year !== 'undefined' && year !== null && Number.isFinite(Number(year)))
       ? Number(year)
       : null;
-    const query = {};
+    const query = { isDeleted: false };
     const andClauses = [];
 
     let responseMessage = null;
@@ -235,12 +235,90 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
   }
 });
 
+// @route   GET /api/submissions/deleted
+// @desc    Get soft-deleted submissions
+// @access  Private (Admin/Superadmin)
+router.get('/deleted', authorize('admin', 'superadmin'), async (req, res) => {
+  try {
+    const {
+      level,
+      status,
+      year,
+      category,
+      class: classLevel,
+      subject,
+      search,
+      page = 1,
+      limit = 20
+    } = req.query;
+
+    const parsedYear = (typeof year !== 'undefined' && year !== null && Number.isFinite(Number(year)))
+      ? Number(year)
+      : null;
+    const query = { isDeleted: true };
+    const andClauses = [];
+
+    if (req.user.role === 'admin') {
+      Object.assign(query, buildSubmissionQueryForAdmin(req.user));
+    }
+
+    if (level) query.level = level;
+    if (status) query.status = status;
+    if (parsedYear) query.year = parsedYear;
+    if (category) query.category = category;
+    if (classLevel) query.class = classLevel;
+    if (subject) query.subject = subject;
+
+    if (search) {
+      andClauses.push({
+        $or: [
+          { teacherName: { $regex: search, $options: 'i' } },
+          { school: { $regex: search, $options: 'i' } },
+          { category: { $regex: search, $options: 'i' } },
+          { subject: { $regex: search, $options: 'i' } }
+        ]
+      });
+    }
+
+    if (andClauses.length > 0) {
+      query.$and = andClauses;
+    }
+
+    const pageNum = parseInt(page, 10) || 1;
+    const limitNum = parseInt(limit, 10) || 20;
+    const skip = (pageNum - 1) * limitNum;
+
+    const total = await Submission.countDocuments(query);
+    const submissions = await Submission.find(query)
+      .populate('teacherId', 'name email username')
+      .sort({ deletedAt: -1, createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum);
+
+    res.json({
+      success: true,
+      count: submissions.length,
+      total,
+      page: pageNum,
+      pages: Math.ceil(total / limitNum),
+      limit: limitNum,
+      submissions
+    });
+  } catch (error) {
+    console.error('Get deleted submissions error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
 // @route   GET /api/submissions/:id
 // @desc    Get single submission
 // @access  Private
 router.get('/:id', async (req, res) => {
   try {
-    const submission = await Submission.findById(req.params.id)
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: false })
       .populate('teacherId', 'name email username school');
 
     if (!submission) {
@@ -387,7 +465,8 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnC
     const existingSubmission = await Submission.findOne({
       teacherId: submissionData.teacherId,
       areaOfFocus: submissionData.areaOfFocus,
-      year: submissionData.year
+      year: submissionData.year,
+      isDeleted: false
     });
 
     if (existingSubmission) {
@@ -474,7 +553,7 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnC
 // @access  Private (Teacher owns it, or Admin/Superadmin)
 router.put('/:id', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnChange('cache:/api/submissions*'), async (req, res) => {
   try {
-    const submission = await Submission.findById(req.params.id);
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: false });
 
     if (!submission) {
       return res.status(404).json({
@@ -499,8 +578,8 @@ router.put('/:id', authorize('teacher', 'admin', 'superadmin'), invalidateCacheO
       });
     }
 
-    const updatedSubmission = await Submission.findByIdAndUpdate(
-      req.params.id,
+    const updatedSubmission = await Submission.findOneAndUpdate(
+      { _id: req.params.id, isDeleted: false },
       req.body,
       { new: true, runValidators: true }
     ).populate('teacherId', 'name email username');
@@ -569,11 +648,11 @@ router.put('/:id', authorize('teacher', 'admin', 'superadmin'), invalidateCacheO
 });
 
 // @route   DELETE /api/submissions/:id
-// @desc    Delete submission
+// @desc    Soft delete submission
 // @access  Private (Admin/Superadmin only)
 router.delete('/:id', authorize('admin', 'superadmin'), invalidateCacheOnChange('cache:/api/submissions*'), async (req, res) => {
   try {
-    const submission = await Submission.findById(req.params.id);
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: false });
 
     if (!submission) {
       return res.status(404).json({
@@ -590,7 +669,7 @@ router.delete('/:id', authorize('admin', 'superadmin'), invalidateCacheOnChange(
       });
     }
 
-    // Log submission deletion before deleting
+    // Log submission deletion before soft deleting
     await logger.logAdminAction(
       'Admin deleted submission',
       req.user._id,
@@ -607,7 +686,10 @@ router.delete('/:id', authorize('admin', 'superadmin'), invalidateCacheOnChange(
       'delete'
     );
 
-    await submission.deleteOne();
+    submission.isDeleted = true;
+    submission.deletedAt = new Date();
+    submission.deletedBy = req.user._id;
+    await submission.save();
 
     res.json({
       success: true,
@@ -615,6 +697,59 @@ router.delete('/:id', authorize('admin', 'superadmin'), invalidateCacheOnChange(
     });
   } catch (error) {
     console.error('Delete submission error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/submissions/:id/restore
+// @desc    Restore soft-deleted submission
+// @access  Private (Admin/Superadmin only)
+router.post('/:id/restore', authorize('admin', 'superadmin'), invalidateCacheOnChange('cache:/api/submissions*'), async (req, res) => {
+  try {
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: true });
+    if (!submission) {
+      return res.status(404).json({
+        success: false,
+        message: 'Deleted submission not found'
+      });
+    }
+
+    if (req.user.role === 'admin' && !canAdminAccessSubmission(req.user, submission)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to restore this submission'
+      });
+    }
+
+    submission.isDeleted = false;
+    submission.deletedAt = null;
+    submission.deletedBy = null;
+    await submission.save();
+
+    await logger.logAdminAction(
+      'Admin restored submission',
+      req.user._id,
+      req,
+      {
+        submissionId: submission._id.toString(),
+        teacherId: submission.teacherId?.toString(),
+        teacherName: submission.teacherName,
+        level: submission.level
+      },
+      'success',
+      'update'
+    );
+
+    res.json({
+      success: true,
+      message: 'Submission restored successfully',
+      submission
+    });
+  } catch (error) {
+    console.error('Restore submission error:', error);
     res.status(500).json({
       success: false,
       message: 'Server error'
@@ -642,6 +777,7 @@ router.get('/leaderboard/council', authorize('admin', 'superadmin'), async (req,
     // Build query for council level submissions
     const query = {
       level: 'Council',
+      isDeleted: false,
       status: { $in: ['evaluated', 'promoted', 'eliminated'] }
     };
 
@@ -723,6 +859,7 @@ router.get('/leaderboard/regional', authorize('admin', 'superadmin'), async (req
 
     const query = {
       level: 'Regional',
+      isDeleted: false,
       status: { $in: ['evaluated', 'promoted', 'eliminated'] }
     };
 
@@ -792,6 +929,7 @@ router.get('/leaderboard/national', authorize('admin', 'superadmin'), async (req
 
     const query = {
       level: 'National',
+      isDeleted: false,
       status: { $in: ['evaluated', 'promoted', 'eliminated'] }
     };
 
@@ -855,7 +993,7 @@ router.get('/leaderboard/national', authorize('admin', 'superadmin'), async (req
 // @access  Private (Admin, Superadmin)
 router.get('/:id/eligible-judges', authorize('admin', 'superadmin'), async (req, res) => {
   try {
-    const submission = await Submission.findById(req.params.id);
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: false });
     if (!submission) {
       return res.status(404).json({
         success: false,
@@ -897,7 +1035,7 @@ router.get('/:id/eligible-judges', authorize('admin', 'superadmin'), async (req,
 // @access  Private (Admin, Superadmin)
 router.get('/:id/assigned-judge', authorize('admin', 'superadmin'), async (req, res) => {
   try {
-    const submission = await Submission.findById(req.params.id);
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: false });
     
     if (!submission) {
       return res.status(404).json({
@@ -981,7 +1119,7 @@ router.post('/:id/assign-judge', authorize('admin', 'superadmin'), async (req, r
       });
     }
 
-    const submission = await Submission.findById(req.params.id);
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: false });
     if (!submission) {
       return res.status(404).json({
         success: false,

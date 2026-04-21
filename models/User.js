@@ -119,6 +119,19 @@ const userSchema = new mongoose.Schema({
   permissions: {
     type: [String],
     default: []
+  },
+  isDeleted: {
+    type: Boolean,
+    default: false
+  },
+  deletedAt: {
+    type: Date,
+    default: null
+  },
+  deletedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
   }
 }, {
   timestamps: true
@@ -187,6 +200,7 @@ userSchema.methods.toJSON = function() {
 // Indexes for better query performance
 // Note: email index is automatically created by unique: true constraint
 userSchema.index({ role: 1, status: 1 });
+userSchema.index({ isDeleted: 1, deletedAt: -1 });
 userSchema.index({ role: 1, assignedLevel: 1, assignedRegion: 1, assignedCouncil: 1 }); // For judge queries
 // Indexes for stakeholder teacher region queries
 userSchema.index({ role: 1, status: 1, region: 1 });
