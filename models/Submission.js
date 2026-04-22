@@ -146,6 +146,40 @@ const submissionSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     default: null
+  },
+  reuploadRequest: {
+    requested: {
+      type: Boolean,
+      default: false
+    },
+    requestedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null
+    },
+    requestedAt: {
+      type: Date,
+      default: null
+    },
+    part: {
+      type: String,
+      enum: ['lessonPlan', 'video', null],
+      default: null
+    },
+    note: {
+      type: String,
+      trim: true,
+      default: ''
+    },
+    status: {
+      type: String,
+      enum: ['pending', 'completed', 'cancelled', null],
+      default: null
+    },
+    resolvedAt: {
+      type: Date,
+      default: null
+    }
   }
 }, {
   timestamps: true
