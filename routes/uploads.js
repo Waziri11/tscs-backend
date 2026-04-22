@@ -247,7 +247,7 @@ router.post('/lesson-plan', protect, uploadLimiter, upload.single('file'), async
       file: {
         filename: req.file.filename,
         originalName: req.file.originalname,
-        url: `/api/uploads/files/${req.file.filename}`
+        url: `/api/uploads/watch/${encodeURIComponent(req.file.filename)}/stream`
       }
     });
   } catch (error) {
