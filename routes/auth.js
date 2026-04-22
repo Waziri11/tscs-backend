@@ -53,7 +53,7 @@ router.post('/login', failedLoginLockout, async (req, res) => {
     }
 
     // Find user by email
-    const user = await User.findOne({ email: email.toLowerCase(), isDeleted: false });
+    const user = await User.findOne({ email: email.toLowerCase(), isDeleted: { $ne: true } });
 
     if (!user) {
       // Log failed login attempt (non-blocking)
@@ -287,7 +287,7 @@ router.post('/register', async (req, res) => {
     // Check if user already exists
     const existingUser = await User.findOne({
       email: email.toLowerCase(),
-      isDeleted: false
+      isDeleted: { $ne: true }
     });
 
     if (existingUser) {
@@ -466,7 +466,7 @@ router.post('/verify-otp-and-login', otpVerifyLimiter, async (req, res) => {
     }
 
     // Find user
-    const user = await User.findOne({ email: email.toLowerCase(), isDeleted: false });
+    const user = await User.findOne({ email: email.toLowerCase(), isDeleted: { $ne: true } });
 
     if (!user) {
       return res.status(404).json({
@@ -582,7 +582,7 @@ router.post('/resend-otp', otpLimiter, async (req, res) => {
     }
 
     // Send OTP email (non-blocking)
-    const user = await User.findOne({ email: email.toLowerCase(), isDeleted: false });
+    const user = await User.findOne({ email: email.toLowerCase(), isDeleted: { $ne: true } });
     if (user) {
       emailService.sendOTPVerification(user.email, resendResult.otp, user.name, user.phone)
         .catch(error => {
@@ -632,7 +632,7 @@ router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
     }
 
     // Find user by email
-    const user = await User.findOne({ email: email.toLowerCase(), isDeleted: false });
+    const user = await User.findOne({ email: email.toLowerCase(), isDeleted: { $ne: true } });
     if (!user) {
       // Don't reveal if email exists for security
       return res.json({

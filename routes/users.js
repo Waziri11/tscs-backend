@@ -23,7 +23,7 @@ router.get('/', async (req, res) => {
   try {
     const { role, status, search } = req.query;
     
-    let query = { isDeleted: false };
+    let query = { isDeleted: { $ne: true } };
 
     // Admin scope: filter users by level/region/council
     if (req.user.role === 'admin') {
@@ -142,7 +142,7 @@ router.get('/deleted', async (req, res) => {
 // @access  Private (Admin/Superadmin)
 router.get('/:id', async (req, res) => {
   try {
-    const user = await User.findOne({ _id: req.params.id, isDeleted: false }).select('-password');
+    const user = await User.findOne({ _id: req.params.id, isDeleted: { $ne: true } }).select('-password');
 
     if (!user) {
       return res.status(404).json({
@@ -325,7 +325,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     // Get original user data before update for logging
-    const originalUser = await User.findOne({ _id: req.params.id, isDeleted: false }).select('-password');
+    const originalUser = await User.findOne({ _id: req.params.id, isDeleted: { $ne: true } }).select('-password');
     
     if (!originalUser) {
       return res.status(404).json({
@@ -375,7 +375,7 @@ router.put('/:id', async (req, res) => {
     }
 
     const user = await User.findOneAndUpdate(
-      { _id: req.params.id, isDeleted: false },
+      { _id: req.params.id, isDeleted: { $ne: true } },
       updateData,
       { new: true, runValidators: true }
     ).select('-password');
@@ -417,7 +417,7 @@ router.put('/:id', async (req, res) => {
 // @access  Private (Admin/Superadmin)
 router.delete('/:id', authorize('admin', 'superadmin'), async (req, res) => {
   try {
-    const user = await User.findOne({ _id: req.params.id, isDeleted: false });
+    const user = await User.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
 
     if (!user) {
       return res.status(404).json({

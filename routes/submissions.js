@@ -48,7 +48,7 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
     const parsedYear = (typeof year !== 'undefined' && year !== null && Number.isFinite(Number(year)))
       ? Number(year)
       : null;
-    const query = { isDeleted: false };
+    const query = { isDeleted: { $ne: true } };
     const andClauses = [];
 
     let responseMessage = null;
@@ -318,7 +318,7 @@ router.get('/deleted', authorize('admin', 'superadmin'), async (req, res) => {
 // @access  Private
 router.get('/:id', async (req, res) => {
   try {
-    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: false })
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: { $ne: true } })
       .populate('teacherId', 'name email username school');
 
     if (!submission) {
@@ -466,7 +466,7 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnC
       teacherId: submissionData.teacherId,
       areaOfFocus: submissionData.areaOfFocus,
       year: submissionData.year,
-      isDeleted: false
+      isDeleted: { $ne: true }
     });
 
     if (existingSubmission) {
@@ -553,7 +553,7 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnC
 // @access  Private (Teacher owns it, or Admin/Superadmin)
 router.put('/:id', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnChange('cache:/api/submissions*'), async (req, res) => {
   try {
-    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: false });
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
 
     if (!submission) {
       return res.status(404).json({
@@ -579,7 +579,7 @@ router.put('/:id', authorize('teacher', 'admin', 'superadmin'), invalidateCacheO
     }
 
     const updatedSubmission = await Submission.findOneAndUpdate(
-      { _id: req.params.id, isDeleted: false },
+      { _id: req.params.id, isDeleted: { $ne: true } },
       req.body,
       { new: true, runValidators: true }
     ).populate('teacherId', 'name email username');
@@ -652,7 +652,7 @@ router.put('/:id', authorize('teacher', 'admin', 'superadmin'), invalidateCacheO
 // @access  Private (Admin/Superadmin only)
 router.delete('/:id', authorize('admin', 'superadmin'), invalidateCacheOnChange('cache:/api/submissions*'), async (req, res) => {
   try {
-    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: false });
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
 
     if (!submission) {
       return res.status(404).json({
@@ -777,7 +777,7 @@ router.get('/leaderboard/council', authorize('admin', 'superadmin'), async (req,
     // Build query for council level submissions
     const query = {
       level: 'Council',
-      isDeleted: false,
+      isDeleted: { $ne: true },
       status: { $in: ['evaluated', 'promoted', 'eliminated'] }
     };
 
@@ -859,7 +859,7 @@ router.get('/leaderboard/regional', authorize('admin', 'superadmin'), async (req
 
     const query = {
       level: 'Regional',
-      isDeleted: false,
+      isDeleted: { $ne: true },
       status: { $in: ['evaluated', 'promoted', 'eliminated'] }
     };
 
@@ -929,7 +929,7 @@ router.get('/leaderboard/national', authorize('admin', 'superadmin'), async (req
 
     const query = {
       level: 'National',
-      isDeleted: false,
+      isDeleted: { $ne: true },
       status: { $in: ['evaluated', 'promoted', 'eliminated'] }
     };
 
@@ -993,7 +993,7 @@ router.get('/leaderboard/national', authorize('admin', 'superadmin'), async (req
 // @access  Private (Admin, Superadmin)
 router.get('/:id/eligible-judges', authorize('admin', 'superadmin'), async (req, res) => {
   try {
-    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: false });
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
     if (!submission) {
       return res.status(404).json({
         success: false,
@@ -1035,7 +1035,7 @@ router.get('/:id/eligible-judges', authorize('admin', 'superadmin'), async (req,
 // @access  Private (Admin, Superadmin)
 router.get('/:id/assigned-judge', authorize('admin', 'superadmin'), async (req, res) => {
   try {
-    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: false });
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
     
     if (!submission) {
       return res.status(404).json({
@@ -1119,7 +1119,7 @@ router.post('/:id/assign-judge', authorize('admin', 'superadmin'), async (req, r
       });
     }
 
-    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: false });
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
     if (!submission) {
       return res.status(404).json({
         success: false,
