@@ -252,6 +252,7 @@ const buildActivationSubmissionQuery = (round) => {
   return {
     year: round.year,
     level: round.level,
+    isDeleted: { $ne: true },
     disqualified: { $ne: true },
     status: { $nin: ['eliminated', 'promoted'] }
   };
@@ -276,6 +277,7 @@ const assignRoundSubmissionsToJudges = async (round, submissions) => {
   const judgeQuery = {
     role: 'judge',
     status: 'active',
+    isDeleted: { $ne: true },
     assignedLevel: round.level
   };
   const judges = await User.find(judgeQuery).select('_id assignedRegion assignedCouncil');
@@ -719,7 +721,27 @@ const getRoundBySubmissionForEvaluation = async (submission) => {
 };
 
 const recalculateSubmissionAverageForRound = async (submissionId, roundId) => {
+  const submission = await Submission.findById(submissionId).select('disqualified status');
   const evaluations = await Evaluation.find({ submissionId, roundId }).select('averageScore');
+
+  const isDisqualified = Boolean(
+    submission && (submission.disqualified === true || submission.status === 'disqualified')
+  );
+
+  if (isDisqualified) {
+    const totalAverage = evaluations.reduce((sum, evaluation) => sum + (evaluation.averageScore || 0), 0);
+    const averageScore = evaluations.length > 0
+      ? Math.round((totalAverage / evaluations.length) * 100) / 100
+      : 0;
+
+    await Submission.findByIdAndUpdate(submissionId, {
+      averageScore,
+      status: 'disqualified',
+      disqualified: true
+    });
+    return { averageScore, totalEvaluations: evaluations.length };
+  }
+
   if (evaluations.length === 0) {
     await Submission.findByIdAndUpdate(submissionId, {
       averageScore: 0,
@@ -936,6 +958,14 @@ const checkAreaJudgeCompletion = async (roundId, areaId) => {
     };
   }
 
+  const disqualifiedSubmissions = await Submission.find({
+    _id: { $in: submissionIds },
+    $or: [{ disqualified: true }, { status: 'disqualified' }]
+  }).select('_id');
+  const disqualifiedSubmissionIds = new Set(
+    disqualifiedSubmissions.map((submission) => String(submission._id))
+  );
+
   const evaluationGroups = await Evaluation.aggregate([
     {
       $match: {
@@ -971,6 +1001,9 @@ const checkAreaJudgeCompletion = async (roundId, areaId) => {
 
     for (const submissionId of submissionIds) {
       const submissionKey = String(submissionId);
+      if (disqualifiedSubmissionIds.has(submissionKey)) {
+        continue;
+      }
       const assignedJudgeId = assignmentMap.get(submissionKey);
       if (!assignedJudgeId) {
         pendingCount += 1;
@@ -1011,7 +1044,11 @@ const checkAreaJudgeCompletion = async (roundId, areaId) => {
   }
 
   for (const submissionId of submissionIds) {
-    const evaluatedJudgeIds = evaluationMap.get(String(submissionId)) || new Set();
+    const submissionKey = String(submissionId);
+    if (disqualifiedSubmissionIds.has(submissionKey)) {
+      continue;
+    }
+    const evaluatedJudgeIds = evaluationMap.get(submissionKey) || new Set();
     const allJudgesDone = judgeIds.every((judgeId) => evaluatedJudgeIds.has(judgeId));
     if (!allJudgesDone) {
       pendingCount += 1;
@@ -1387,7 +1424,6 @@ const listAreaLeaderboards = async ({ filters = {}, user }) => {
   }
 
   if (user.role === 'admin') {
-    query.state = 'published';
     const scope = getAdminScope(user);
     if (!scope || scope.level === 'None') {
       query._id = { $in: [] };
@@ -1449,6 +1485,115 @@ const listAreaLeaderboards = async ({ filters = {}, user }) => {
   }
 
   return leaderboards;
+};
+
+const listCouncilAreaLeaderboards = async ({ filters = {}, user }) => {
+  const normalizedFilters = {
+    ...filters,
+    level: 'Council',
+    areaType: 'council'
+  };
+
+  if (filters.region && filters.council && !filters.areaId) {
+    normalizedFilters.areaId = buildAreaId('Council', filters.region, filters.council);
+  }
+
+  const areaLeaderboards = await listAreaLeaderboards({
+    filters: normalizedFilters,
+    user
+  });
+  const scopedAreaLeaderboards = areaLeaderboards.filter((leaderboard) => {
+    if (filters.region && leaderboard.region !== filters.region) return false;
+    if (filters.council && leaderboard.council !== filters.council) return false;
+    return true;
+  });
+
+  const groupedLeaderboards = [];
+  const regionSet = new Set();
+  const councilKeySet = new Set();
+  const competitionAreaSet = new Set();
+
+  for (const leaderboard of scopedAreaLeaderboards) {
+    const plainLeaderboard = leaderboard.toObject ? leaderboard.toObject() : leaderboard;
+    const baseEntries = Array.isArray(plainLeaderboard.entries) ? plainLeaderboard.entries : [];
+
+    if (plainLeaderboard.region) regionSet.add(plainLeaderboard.region);
+    if (plainLeaderboard.region && plainLeaderboard.council) {
+      councilKeySet.add(`${plainLeaderboard.region}::${plainLeaderboard.council}`);
+    }
+
+    const areaMap = new Map();
+    for (const entry of baseEntries) {
+      const competitionArea = String(entry.areaOfFocus || '').trim();
+      if (!competitionArea) continue;
+      competitionAreaSet.add(competitionArea);
+      if (!areaMap.has(competitionArea)) {
+        areaMap.set(competitionArea, []);
+      }
+      areaMap.get(competitionArea).push(entry);
+    }
+
+    for (const [competitionArea, entries] of areaMap.entries()) {
+      if (filters.areaOfFocus && competitionArea !== filters.areaOfFocus) continue;
+
+      const rankedEntries = rankEntriesDeterministically(
+        entries.map((entry) => (entry && typeof entry.toObject === 'function' ? entry.toObject() : { ...entry }))
+      );
+
+      groupedLeaderboards.push({
+        id: `${plainLeaderboard._id.toString()}::${competitionArea}`,
+        sourceLeaderboardId: plainLeaderboard._id.toString(),
+        roundId: plainLeaderboard.roundId?.toString?.() || String(plainLeaderboard.roundId),
+        year: plainLeaderboard.year,
+        level: plainLeaderboard.level,
+        areaType: plainLeaderboard.areaType,
+        areaId: plainLeaderboard.areaId,
+        region: plainLeaderboard.region || null,
+        council: plainLeaderboard.council || null,
+        competitionArea,
+        state: plainLeaderboard.state,
+        isFinalized: ['finalized', 'published'].includes(plainLeaderboard.state),
+        quota: plainLeaderboard.quota || 0,
+        totalSubmissions: rankedEntries.length,
+        totalEvaluations: rankedEntries.reduce((sum, entry) => sum + (entry.totalEvaluations || 0), 0),
+        entries: rankedEntries,
+        lastUpdated: plainLeaderboard.lastUpdated || plainLeaderboard.updatedAt || null
+      });
+    }
+  }
+
+  groupedLeaderboards.sort((left, right) => {
+    if ((left.region || '') !== (right.region || '')) {
+      return (left.region || '').localeCompare(right.region || '');
+    }
+    if ((left.council || '') !== (right.council || '')) {
+      return (left.council || '').localeCompare(right.council || '');
+    }
+    return (left.competitionArea || '').localeCompare(right.competitionArea || '');
+  });
+
+  return {
+    leaderboards: groupedLeaderboards,
+    filters: {
+      regions: [...regionSet].sort((a, b) => a.localeCompare(b)),
+      councils: [...councilKeySet]
+        .map((value) => {
+          const [region, council] = String(value || '').split('::');
+          return {
+            value,
+            region: region || null,
+            council: council || null
+          };
+        })
+        .sort((a, b) => {
+          if ((a.region || '') !== (b.region || '')) {
+            return (a.region || '').localeCompare(b.region || '');
+          }
+          return (a.council || '').localeCompare(b.council || '');
+        }),
+      competitionAreas: [...competitionAreaSet].sort((a, b) => a.localeCompare(b))
+    }
+  };
 };
 
 const listAvailableLocations = async ({ year, level, areaOfFocus, user }) => {
@@ -1533,6 +1678,97 @@ const markRoundEndedIfComplete = async (roundId) => {
   return round;
 };
 
+const addSubmissionToActiveRoundSnapshot = async (round, submission) => {
+  if (!round || !submission) {
+    return { success: false, status: 400, message: 'Round and submission are required' };
+  }
+
+  if (round.status !== 'active') {
+    return { success: false, status: 400, message: 'Round is not active' };
+  }
+
+  const submissionId = String(submission._id);
+  const snapshot = await RoundSnapshot.findOne({ roundId: round._id });
+  const existingIds = new Set([
+    ...((round.pendingSubmissionsSnapshot || []).map((id) => String(id))),
+    ...((snapshot?.submissionIds || []).map((id) => String(id)))
+  ]);
+
+  if (existingIds.has(submissionId)) {
+    return { success: true, alreadyExists: true, assignments: { assigned: 0, unassigned: 0 } };
+  }
+
+  const descriptor = getSubmissionAreaDescriptor(round.level, submission);
+  const baseAreas = Array.isArray(snapshot?.activeAreas) && snapshot.activeAreas.length > 0
+    ? snapshot.activeAreas
+    : (round.activeAreas || []);
+  const areaMap = new Map();
+  for (const area of baseAreas) {
+    if (!area?.areaId) continue;
+    areaMap.set(String(area.areaId), {
+      areaType: area.areaType,
+      areaId: area.areaId,
+      region: area.region || null,
+      council: area.council || null,
+      submissionCount: Number(area.submissionCount) || 0
+    });
+  }
+
+  const currentArea = areaMap.get(descriptor.areaId) || {
+    areaType: descriptor.areaType,
+    areaId: descriptor.areaId,
+    region: descriptor.region,
+    council: descriptor.council,
+    submissionCount: 0
+  };
+  currentArea.submissionCount += 1;
+  areaMap.set(descriptor.areaId, currentArea);
+
+  const updatedIds = [...existingIds, submissionId];
+  const snapshotPayload = {
+    roundId: round._id,
+    year: round.year,
+    level: round.level,
+    submissionIds: updatedIds,
+    activeAreas: [...areaMap.values()],
+    totalSubmissions: updatedIds.length,
+    frozenAt: snapshot?.frozenAt || round.snapshotCreatedAt || new Date(),
+    metadata: {
+      ...(snapshot?.metadata || {}),
+      lastManualAdditionAt: new Date(),
+      lastManualSubmissionId: submission._id
+    }
+  };
+
+  const updatedSnapshot = await RoundSnapshot.findOneAndUpdate(
+    { roundId: round._id },
+    snapshotPayload,
+    { upsert: true, new: true, runValidators: true }
+  );
+
+  await Submission.updateOne(
+    { _id: submission._id },
+    { $set: { roundId: round._id } }
+  );
+
+  round.pendingSubmissionsSnapshot = updatedSnapshot.submissionIds || [];
+  round.activeAreas = updatedSnapshot.activeAreas || [];
+  if (!round.activationSnapshotId) {
+    round.activationSnapshotId = updatedSnapshot._id;
+  }
+  if (!round.snapshotCreatedAt) {
+    round.snapshotCreatedAt = new Date();
+  }
+  await round.save();
+
+  const assignments = await assignRoundSubmissionsToJudges(round, [submission]);
+  return {
+    success: true,
+    snapshot: updatedSnapshot,
+    assignments
+  };
+};
+
 module.exports = {
   ROUND_LEVELS,
   getNextLevel,
@@ -1553,11 +1789,13 @@ module.exports = {
   publishAreaLeaderboard,
   reopenAreaLeaderboard,
   listAreaLeaderboards,
+  listCouncilAreaLeaderboards,
   listAvailableLocations,
   findAreaLeaderboardById,
   getAreaIdFromSubmission,
   markRoundEndedIfComplete,
   rebuildAreaLeaderboard,
   updateAreaStateByCompletion,
-  checkAreaJudgeCompletion
+  checkAreaJudgeCompletion,
+  addSubmissionToActiveRoundSnapshot
 };

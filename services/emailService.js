@@ -253,6 +253,31 @@ class EmailService {
   }
 
   /**
+   * Send disqualification email (Teacher)
+   * @param {string} email - Recipient email
+   * @param {string} userName - User name
+   * @param {Object} metadata - Disqualification metadata
+   * @returns {Promise<boolean>} Success status
+   */
+  async sendSubmissionDisqualifiedEmail(email, userName, metadata, phone = null) {
+    const { roundName, reason, subject, category, areaOfFocus } = metadata;
+    const subjectLine = `Submission Disqualified - ${roundName || 'Current Round'}`;
+    const html = this.generateSubmissionDisqualifiedHTML(userName, metadata);
+    const text = this.generateSubmissionDisqualifiedText(userName, metadata);
+
+    return await this.sendEmail({
+      to: email,
+      subject: subjectLine,
+      html,
+      text,
+      type: 'submission_disqualified',
+      metadata: { roundName, reason, subject, category, areaOfFocus },
+      phone,
+      smsText: `TSCS: Your submission has been disqualified. Reason: ${reason || 'Not provided'}.`
+    });
+  }
+
+  /**
    * Send evaluation reminder email (Judge)
    * @param {string} email - Recipient email
    * @param {string} userName - User name
@@ -757,6 +782,105 @@ ${isPromoted
 ---
 Teacher Submission Competition System (TSCS)
 ${isPromoted ? 'Congratulations on your success!' : 'Thank you for your participation!'}
+    `.trim();
+  }
+
+  /**
+   * Generate submission disqualified HTML template
+   * @param {string} userName - User name
+   * @param {Object} metadata - Disqualification metadata
+   * @returns {string} HTML content
+   */
+  generateSubmissionDisqualifiedHTML(userName, metadata) {
+    const {
+      roundName = 'Current Round',
+      reason = 'No reason was provided.',
+      subject = 'N/A',
+      category = 'N/A',
+      areaOfFocus = 'N/A'
+    } = metadata || {};
+
+    return `
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Submission Disqualified - TSCS</title>
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 20px; background-color: #f4f4f4; }
+          .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+          .header { text-align: center; margin-bottom: 30px; }
+          .warning-icon { font-size: 48px; color: #ff4d4f; margin-bottom: 16px; }
+          .content { background: #fff1f0; border: 1px solid #ffccc7; padding: 20px; border-radius: 8px; margin: 20px 0; }
+          .reason-box { background: #fff; border-left: 4px solid #ff4d4f; padding: 12px; margin-top: 12px; }
+          .meta { font-size: 14px; color: #595959; margin-top: 8px; }
+          .footer { margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; text-align: center; color: #666; font-size: 14px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <div class="warning-icon">⚠️</div>
+            <h1>Submission Disqualified</h1>
+            <p>Hello ${userName},</p>
+          </div>
+
+          <div class="content">
+            <p>Your submission has been marked as <strong>disqualified</strong> in <strong>${roundName}</strong>.</p>
+            <div class="meta">
+              <div><strong>Subject:</strong> ${subject}</div>
+              <div><strong>Category:</strong> ${category}</div>
+              <div><strong>Area of Focus:</strong> ${areaOfFocus}</div>
+            </div>
+            <div class="reason-box">
+              <strong>Reason provided by judge:</strong><br />
+              ${reason}
+            </div>
+          </div>
+
+          <div class="footer">
+            <p><strong>Teacher Submission Competition System (TSCS)</strong></p>
+            <p>If you need clarification, please contact your competition administrator.</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+  }
+
+  /**
+   * Generate submission disqualified text template
+   * @param {string} userName - User name
+   * @param {Object} metadata - Disqualification metadata
+   * @returns {string} Text content
+   */
+  generateSubmissionDisqualifiedText(userName, metadata) {
+    const {
+      roundName = 'Current Round',
+      reason = 'No reason was provided.',
+      subject = 'N/A',
+      category = 'N/A',
+      areaOfFocus = 'N/A'
+    } = metadata || {};
+
+    return `
+TSCS - Submission Disqualified
+
+Hello ${userName},
+
+Your submission has been marked as disqualified in ${roundName}.
+
+Subject: ${subject}
+Category: ${category}
+Area of Focus: ${areaOfFocus}
+
+Reason provided by judge:
+${reason}
+
+---
+Teacher Submission Competition System (TSCS)
+If you need clarification, please contact your competition administrator.
     `.trim();
   }
 

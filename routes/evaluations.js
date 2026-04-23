@@ -4,8 +4,9 @@ const Submission = require('../models/Submission');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
 const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
-const { resolveJudgeEvaluationAuthorization } = require('../utils/judgeAssignment');
+const { resolveJudgeEvaluationAuthorization, isJudgeAssigned } = require('../utils/judgeAssignment');
 const { invalidateCacheOnChange, cacheMiddleware } = require('../middleware/cache');
+const notificationService = require('../services/notificationService');
 const {
   getRoundBySubmissionForEvaluation,
   refreshSubmissionAndAreaLeaderboard,
@@ -428,7 +429,14 @@ router.get('/submission/:submissionId', async (req, res) => {
 router.post('/:submissionId/disqualify', authorize('judge'), async (req, res) => {
   try {
     const { submissionId } = req.params;
-    const { reason } = req.body;
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+
+    if (!reason) {
+      return res.status(400).json({
+        success: false,
+        message: 'Disqualification reason is required'
+      });
+    }
 
     const submission = await Submission.findById(submissionId);
     if (!submission) {
@@ -462,13 +470,29 @@ router.post('/:submissionId/disqualify', authorize('judge'), async (req, res) =>
     }
 
     submission.disqualified = true;
-    submission.disqualificationReason = reason || 'Disqualified by judge';
+    submission.status = 'disqualified';
+    submission.disqualificationReason = reason;
     submission.disqualifiedBy = req.user._id;
     submission.disqualifiedAt = new Date();
     await submission.save();
 
     const areaId = getAreaIdFromSubmission(submission);
     await refreshSubmissionAndAreaLeaderboard({ submissionId, roundId: round._id });
+    await markRoundEndedIfComplete(round._id);
+
+    if (submission.teacherId) {
+      notificationService.emit('SUBMISSION_DISQUALIFIED', {
+        userId: submission.teacherId,
+        submissionId: submission._id,
+        roundName: `${round.level} ${round.year}`,
+        reason,
+        subject: submission.subject,
+        category: submission.category,
+        areaOfFocus: submission.areaOfFocus
+      }).catch((notifyError) => {
+        console.error('Failed to send disqualification notification/email:', notifyError);
+      });
+    }
 
     await logger.logUserActivity(
       'Judge disqualified submission',
@@ -478,7 +502,7 @@ router.post('/:submissionId/disqualify', authorize('judge'), async (req, res) =>
         roundId: round._id.toString(),
         submissionId: submissionId.toString(),
         areaId,
-        reason: reason || 'No reason provided',
+        reason,
         level: submission.level
       },
       'update'

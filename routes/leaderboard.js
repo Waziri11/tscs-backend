@@ -5,6 +5,7 @@ const CompetitionRound = require('../models/CompetitionRound');
 const AreaLeaderboard = require('../models/AreaLeaderboard');
 const {
   listAreaLeaderboards,
+  listCouncilAreaLeaderboards,
   listAvailableLocations,
   findAreaLeaderboardById,
   approveAreaLeaderboardAndPromote,
@@ -56,6 +57,68 @@ router.get('/available-locations', cacheMiddleware(60), async (req, res) => {
     });
   } catch (error) {
     console.error('Get available locations error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   GET /api/leaderboard/council-area
+// @desc    Get council leaderboards grouped by competition area
+// @access  Private
+router.get('/council-area', cacheMiddleware(30), async (req, res) => {
+  try {
+    const {
+      roundId,
+      year,
+      state,
+      region,
+      council,
+      areaOfFocus,
+      isFinalized
+    } = req.query;
+
+    const filters = {
+      level: 'Council'
+    };
+
+    if (roundId) filters.roundId = roundId;
+    if (year) filters.year = parseInt(year, 10);
+    if (areaOfFocus) filters.areaOfFocus = decodeURIComponent(areaOfFocus);
+    if (region) filters.region = region;
+    if (council) filters.council = council;
+
+    if (!state && typeof isFinalized !== 'undefined') {
+      filters.state = isFinalized === 'true' ? 'finalized' : 'provisional';
+    } else if (state) {
+      filters.state = state;
+    }
+
+    const result = await listCouncilAreaLeaderboards({ filters, user: req.user });
+
+    if (logger) {
+      logger.logUserActivity(
+        `${req.user.role} viewed council area leaderboards`,
+        req.user._id,
+        req,
+        {
+          filters,
+          count: result.leaderboards.length
+        },
+        'read'
+      ).catch(() => {});
+    }
+
+    return res.json({
+      success: true,
+      level: 'Council',
+      leaderboards: result.leaderboards,
+      filters: result.filters,
+      count: result.leaderboards.length
+    });
+  } catch (error) {
+    console.error('Get council area leaderboards error:', error);
     return res.status(500).json({
       success: false,
       message: error.message || 'Server error'

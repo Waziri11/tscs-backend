@@ -16,8 +16,10 @@ const {
   getAreaReadiness,
   approveAreaLeaderboardAndPromote,
   rebuildAreaLeaderboard,
-  ensureChunkAreasDoNotOverlap
+  ensureChunkAreasDoNotOverlap,
+  addSubmissionToActiveRoundSnapshot
 } = require('../utils/roundJudgementService');
+const { manuallyAssignSubmission } = require('../utils/judgeAssignment');
 
 // Safely import logger
 let logger = null;
@@ -219,13 +221,12 @@ const syncRoundChunks = async (round, userId, chunks = []) => {
 // All routes require authentication
 router.use(protect);
 
-// Public route for judges to get active rounds
+// Public route for judges/stakeholders to get active rounds
 router.get('/active', cacheMiddleware(60), async (req, res) => {
   try {
     const user = req.user;
-    
-    // Only judges can use this endpoint
-    if (!user || user.role !== 'judge' || !user.assignedLevel) {
+
+    if (!user) {
       return res.json({
         success: true,
         count: 0,
@@ -233,17 +234,24 @@ router.get('/active', cacheMiddleware(60), async (req, res) => {
       });
     }
 
-    // National single timeline per level:
-    // Judges should see the latest active round for their level,
-    // or latest ended round as fallback while finishing pending tasks.
-    const levelRounds = await CompetitionRound.find({
-      level: user.assignedLevel,
-      status: { $in: ['active', 'ended'] }
-    }).sort({ createdAt: -1 });
+    let rounds = [];
 
-    const activeRound = levelRounds.find((round) => round.status === 'active') || null;
-    const endedRound = levelRounds.find((round) => round.status === 'ended') || null;
-    const rounds = activeRound ? [activeRound] : endedRound ? [endedRound] : [];
+    if (user.role === 'judge' && user.assignedLevel) {
+      // Judges should see the latest active round for their level,
+      // or latest ended round as fallback while finishing pending tasks.
+      const levelRounds = await CompetitionRound.find({
+        level: user.assignedLevel,
+        status: { $in: ['active', 'ended'] }
+      }).sort({ createdAt: -1 });
+
+      const activeRound = levelRounds.find((round) => round.status === 'active') || null;
+      const endedRound = levelRounds.find((round) => round.status === 'ended') || null;
+      rounds = activeRound ? [activeRound] : endedRound ? [endedRound] : [];
+    } else if (user.role === 'stakeholder') {
+      const latestActiveRound = await CompetitionRound.findOne({ status: 'active' })
+        .sort({ updatedAt: -1, createdAt: -1 });
+      rounds = latestActiveRound ? [latestActiveRound] : [];
+    }
 
     res.json({
       success: true,
@@ -260,8 +268,19 @@ router.get('/active', cacheMiddleware(60), async (req, res) => {
 });
 
 // All other routes require superadmin or national admin (only national admin can manage rounds)
-router.use(authorize('superadmin', 'admin'));
-router.use(authorizeNationalAdminOrSuperadmin);
+const isJudgeProgressReadRoute = (req) => (
+  req.method === 'GET' && /^\/[^/]+\/judge-progress$/.test(req.path)
+);
+
+router.use((req, res, next) => {
+  if (isJudgeProgressReadRoute(req)) return next();
+  return authorize('superadmin', 'admin')(req, res, next);
+});
+
+router.use((req, res, next) => {
+  if (isJudgeProgressReadRoute(req)) return next();
+  return authorizeNationalAdminOrSuperadmin(req, res, next);
+});
 
 // @route   GET /api/competition-rounds
 // @desc    Get all competition rounds
@@ -1226,6 +1245,350 @@ router.patch('/:id/leaderboard-visibility', async (req, res) => {
   }
 });
 
+// @route   GET /api/competition-rounds/:id/submission-areas
+// @desc    Get available area scopes for superadmin manual submission
+// @access  Private (Superadmin)
+router.get('/:id/submission-areas', authorize('superadmin'), async (req, res) => {
+  try {
+    const round = await CompetitionRound.findById(req.params.id).select('_id year level status');
+    if (!round) {
+      return res.status(404).json({ success: false, message: 'Competition round not found' });
+    }
+    if (round.status !== 'active') {
+      return res.status(400).json({ success: false, message: 'Round must be active' });
+    }
+    if (!['Council', 'Regional'].includes(round.level)) {
+      return res.status(400).json({ success: false, message: 'Manual additions are only supported for Council and Regional rounds' });
+    }
+
+    const teacherQuery = {
+      role: 'teacher',
+      status: 'active',
+      isDeleted: { $ne: true }
+    };
+
+    const teachers = await User.find(teacherQuery).select('region council');
+    const areaMap = new Map();
+    for (const teacher of teachers) {
+      if (round.level === 'Council') {
+        if (!teacher.region || !teacher.council) continue;
+        const areaId = `${teacher.region}::${teacher.council}`;
+        if (!areaMap.has(areaId)) {
+          areaMap.set(areaId, {
+            areaId,
+            region: teacher.region,
+            council: teacher.council
+          });
+        }
+      } else if (round.level === 'Regional') {
+        if (!teacher.region) continue;
+        const areaId = teacher.region;
+        if (!areaMap.has(areaId)) {
+          areaMap.set(areaId, {
+            areaId,
+            region: teacher.region,
+            council: null
+          });
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      scopeType: round.level === 'Council' ? 'council' : 'region',
+      areas: [...areaMap.values()].sort((a, b) => a.areaId.localeCompare(b.areaId))
+    });
+  } catch (error) {
+    console.error('Get round submission areas error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   GET /api/competition-rounds/:id/teachers
+// @desc    Get teachers in selected area scope for superadmin round submission
+// @access  Private (Superadmin)
+router.get('/:id/teachers', authorize('superadmin'), async (req, res) => {
+  try {
+    const { areaId } = req.query;
+    if (!areaId) {
+      return res.status(400).json({ success: false, message: 'areaId is required' });
+    }
+
+    const round = await CompetitionRound.findById(req.params.id).select('_id year level status');
+    if (!round) {
+      return res.status(404).json({ success: false, message: 'Competition round not found' });
+    }
+    if (round.status !== 'active') {
+      return res.status(400).json({ success: false, message: 'Round must be active' });
+    }
+    if (!['Council', 'Regional'].includes(round.level)) {
+      return res.status(400).json({ success: false, message: 'Manual additions are only supported for Council and Regional rounds' });
+    }
+
+    const query = { role: 'teacher', status: 'active', isDeleted: { $ne: true } };
+    if (round.level === 'Council') {
+      const [region, council] = String(areaId).split('::').map((token) => String(token || '').trim());
+      if (!region || !council) {
+        return res.status(400).json({ success: false, message: 'Invalid areaId for Council round. Expected "Region::Council".' });
+      }
+      query.region = region;
+      query.council = council;
+    } else {
+      query.region = String(areaId).trim();
+      if (!query.region) {
+        return res.status(400).json({ success: false, message: 'Invalid areaId for Regional round' });
+      }
+    }
+
+    const teachers = await User.find(query)
+      .select('_id name email username school region council subject')
+      .sort({ name: 1 });
+
+    res.json({
+      success: true,
+      count: teachers.length,
+      teachers
+    });
+  } catch (error) {
+    console.error('Get round teachers error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   GET /api/competition-rounds/:id/judges
+// @desc    Get eligible judges in selected area/focus for superadmin round submission
+// @access  Private (Superadmin)
+router.get('/:id/judges', authorize('superadmin'), async (req, res) => {
+  try {
+    const { areaId, areaOfFocus } = req.query;
+    if (!areaId) {
+      return res.status(400).json({ success: false, message: 'areaId is required' });
+    }
+
+    const round = await CompetitionRound.findById(req.params.id).select('_id year level status');
+    if (!round) {
+      return res.status(404).json({ success: false, message: 'Competition round not found' });
+    }
+    if (round.status !== 'active') {
+      return res.status(400).json({ success: false, message: 'Round must be active' });
+    }
+    if (!['Council', 'Regional'].includes(round.level)) {
+      return res.status(400).json({ success: false, message: 'Judge filtering is only supported for Council and Regional rounds' });
+    }
+
+    const query = {
+      role: 'judge',
+      status: 'active',
+      isDeleted: { $ne: true },
+      assignedLevel: round.level
+    };
+
+    if (round.level === 'Council') {
+      const [region, council] = String(areaId).split('::').map((token) => String(token || '').trim());
+      if (!region || !council) {
+        return res.status(400).json({ success: false, message: 'Invalid areaId for Council round. Expected "Region::Council".' });
+      }
+      query.assignedRegion = region;
+      query.assignedCouncil = council;
+    } else {
+      const region = String(areaId || '').trim();
+      if (!region) {
+        return res.status(400).json({ success: false, message: 'Invalid areaId for Regional round' });
+      }
+      query.assignedRegion = region;
+    }
+
+    let judges = await User.find(query)
+      .select('_id name email username assignedLevel assignedRegion assignedCouncil areasOfFocus')
+      .sort({ name: 1 });
+
+    const normalizedAreaOfFocus = typeof areaOfFocus === 'string' ? areaOfFocus.trim().toLowerCase() : '';
+    if (normalizedAreaOfFocus) {
+      judges = judges.filter((judge) =>
+        Array.isArray(judge.areasOfFocus)
+          && judge.areasOfFocus.some((focus) => String(focus || '').trim().toLowerCase() === normalizedAreaOfFocus)
+      );
+    }
+
+    res.json({
+      success: true,
+      count: judges.length,
+      judges
+    });
+  } catch (error) {
+    console.error('Get round judges error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   POST /api/competition-rounds/:id/submissions
+// @desc    Create submission for teacher and attach to active round
+// @access  Private (Superadmin)
+router.post('/:id/submissions', authorize('superadmin'), invalidateCacheOnChange(['cache:/api/submissions*', 'cache:/api/competition-rounds*']), async (req, res) => {
+  try {
+    const round = await CompetitionRound.findById(req.params.id).select('_id year level status');
+    if (!round) {
+      return res.status(404).json({ success: false, message: 'Competition round not found' });
+    }
+    if (round.status !== 'active') {
+      return res.status(400).json({ success: false, message: 'Round must be active' });
+    }
+    if (!['Council', 'Regional'].includes(round.level)) {
+      return res.status(400).json({ success: false, message: 'Manual additions are only supported for Council and Regional rounds' });
+    }
+
+    const {
+      teacherId,
+      judgeId,
+      category,
+      class: classLevel,
+      subject,
+      areaOfFocus,
+      videoLink,
+      preferredLink,
+      lessonPlanFileName,
+      lessonPlanFileUrl,
+      videoFileName,
+      videoFileUrl,
+      videoOriginalBytes,
+      notes
+    } = req.body || {};
+
+    if (!teacherId || !category || !classLevel || !subject || !areaOfFocus) {
+      return res.status(400).json({
+        success: false,
+        message: 'teacherId, category, class, subject, and areaOfFocus are required'
+      });
+    }
+
+    const teacher = await User.findOne({
+      _id: teacherId,
+      role: 'teacher',
+      status: 'active',
+      isDeleted: { $ne: true }
+    }).select('_id name school region council');
+
+    if (!teacher) {
+      return res.status(404).json({ success: false, message: 'Teacher not found or inactive' });
+    }
+
+    if (round.level === 'Council' && (!teacher.region || !teacher.council)) {
+      return res.status(400).json({ success: false, message: 'Teacher must have both region and council for Council round' });
+    }
+    if (round.level === 'Regional' && !teacher.region) {
+      return res.status(400).json({ success: false, message: 'Teacher must have region for Regional round' });
+    }
+
+    let selectedJudge = null;
+    if (judgeId) {
+      const judgeQuery = {
+        _id: judgeId,
+        role: 'judge',
+        status: 'active',
+        isDeleted: { $ne: true },
+        assignedLevel: round.level
+      };
+      if (round.level === 'Council') {
+        judgeQuery.assignedRegion = teacher.region;
+        judgeQuery.assignedCouncil = teacher.council;
+      } else {
+        judgeQuery.assignedRegion = teacher.region;
+      }
+
+      selectedJudge = await User.findOne(judgeQuery).select('_id areasOfFocus');
+      if (!selectedJudge) {
+        return res.status(400).json({
+          success: false,
+          message: 'Selected judge is not eligible for the chosen area scope'
+        });
+      }
+
+      const focusMatch = Array.isArray(selectedJudge.areasOfFocus)
+        && selectedJudge.areasOfFocus.some((focus) =>
+          String(focus || '').trim().toLowerCase() === String(areaOfFocus || '').trim().toLowerCase()
+        );
+      if (!focusMatch) {
+        return res.status(400).json({
+          success: false,
+          message: 'Selected judge does not match the chosen area of focus'
+        });
+      }
+    }
+
+    const duplicate = await Submission.findOne({
+      teacherId: teacher._id,
+      areaOfFocus,
+      year: round.year,
+      isDeleted: { $ne: true }
+    }).select('_id');
+    if (duplicate) {
+      return res.status(400).json({
+        success: false,
+        message: 'Teacher already has a submission for this area of focus in this year'
+      });
+    }
+
+    const submissionPayload = {
+      teacherId: teacher._id,
+      teacherName: teacher.name,
+      year: round.year,
+      category,
+      class: classLevel,
+      subject,
+      areaOfFocus,
+      level: round.level,
+      status: 'submitted',
+      region: teacher.region,
+      council: round.level === 'Council' ? teacher.council : null,
+      school: teacher.school || 'N/A',
+      videoLink: videoLink || '',
+      preferredLink: preferredLink || '',
+      lessonPlanFileName: lessonPlanFileName || '',
+      lessonPlanFileUrl: lessonPlanFileUrl || '',
+      videoFileName: videoFileName || '',
+      videoFileUrl: videoFileUrl || '',
+      videoOriginalBytes: Number.isFinite(Number(videoOriginalBytes)) ? Number(videoOriginalBytes) : undefined,
+      notes: notes || ''
+    };
+
+    const submission = await Submission.create(submissionPayload);
+    const attachResult = await addSubmissionToActiveRoundSnapshot(round, submission);
+    if (!attachResult.success) {
+      await Submission.deleteOne({ _id: submission._id });
+      return res.status(attachResult.status || 400).json({
+        success: false,
+        message: attachResult.message || 'Failed to attach submission to round'
+      });
+    }
+
+    let directAssignment = null;
+    if (judgeId) {
+      const directAssignmentResult = await manuallyAssignSubmission(submission._id, judgeId, { roundId: round._id });
+      if (!directAssignmentResult.success) {
+        return res.status(201).json({
+          success: true,
+          message: 'Submission added, but direct judge assignment failed. Default assignment has been kept.',
+          submission,
+          assignment: attachResult.assignments || { assigned: 0, unassigned: 0 },
+          assignmentWarning: directAssignmentResult.error || 'Failed to assign selected judge'
+        });
+      }
+      directAssignment = directAssignmentResult.assignment;
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Submission added to active round successfully',
+      submission,
+      assignment: attachResult.assignments || { assigned: 0, unassigned: 0 },
+      directAssignment
+    });
+  } catch (error) {
+    console.error('Create round submission error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+});
+
 // @route   GET /api/competition-rounds/:id/leaderboard
 // @desc    Get area leaderboards for a competition round
 // @access  Private (Superadmin)
@@ -1282,6 +1645,18 @@ router.get('/:id/leaderboard', async (req, res) => {
 // @access  Private (Superadmin)
 router.get('/:id/judge-progress', async (req, res) => {
   try {
+    const isSuperadmin = req.user?.role === 'superadmin';
+    const isNationalAdmin = req.user?.role === 'admin' && req.user?.adminLevel === 'National';
+    const isStakeholder = req.user?.role === 'stakeholder';
+    const canAccessJudgeProgress = isSuperadmin || isNationalAdmin || isStakeholder;
+
+    if (!canAccessJudgeProgress) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to view judge progress'
+      });
+    }
+
     const round = await CompetitionRound.findById(req.params.id);
 
     if (!round) {
@@ -1291,23 +1666,38 @@ router.get('/:id/judge-progress', async (req, res) => {
       });
     }
 
-    // Get round start time (when round was activated)
-    // For countdown rounds, startTime is set when activated
-    // For fixed_time rounds, use createdAt (rounds are typically activated soon after creation)
-    // This ensures we only count evaluations that happened during this round
+    if (isStakeholder) {
+      const latestActiveRound = await CompetitionRound.findOne({ status: 'active' })
+        .sort({ updatedAt: -1, createdAt: -1 })
+        .select('_id status');
+
+      if (!latestActiveRound || String(latestActiveRound._id) !== String(round._id)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Stakeholders can only view judge progress for the current active round'
+        });
+      }
+    }
+
+    const buildAreaKey = (level, submissionOrAssignment) => {
+      if (level === 'Council') {
+        const region = submissionOrAssignment?.region ? String(submissionOrAssignment.region).trim() : '';
+        const council = submissionOrAssignment?.council ? String(submissionOrAssignment.council).trim() : '';
+        return region && council ? `${region}::${council}` : null;
+      }
+      if (level === 'Regional') {
+        const region = submissionOrAssignment?.region ? String(submissionOrAssignment.region).trim() : '';
+        return region ? region : null;
+      }
+      return level === 'National' ? 'national' : null;
+    };
+
     const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const normalize = (value) => (value ? value.toString().trim() : '');
     const toExactRegex = (value) => {
       const normalized = normalize(value);
       return normalized ? new RegExp(`^${escapeRegExp(normalized)}$`, 'i') : null;
     };
-
-    const startTimeRaw = round.startTime || round.createdAt;
-    let roundStartTime = new Date(startTimeRaw);
-    const now = new Date();
-    if (Number.isNaN(roundStartTime.getTime()) || roundStartTime > now) {
-      roundStartTime = new Date(round.createdAt);
-    }
     
     let snapshotSubmissionIds = Array.isArray(round.pendingSubmissionsSnapshot)
       ? round.pendingSubmissionsSnapshot
@@ -1348,6 +1738,42 @@ router.get('/:id/judge-progress', async (req, res) => {
     // Get full judge details (including name, email, username) for both progress calculation and export
     const judges = await User.find(judgeQuery).select('_id name email username assignedLevel assignedRegion assignedCouncil areasOfFocus');
 
+    // Area stats for charts: total vs assigned per area (to detect unassigned submissions).
+    const areaTotalsMap = new Map();
+    for (const submission of allSubmissions) {
+      const key = buildAreaKey(round.level, submission);
+      if (!key) continue;
+      areaTotalsMap.set(key, (areaTotalsMap.get(key) || 0) + 1);
+    }
+
+    const assignmentDocsForAreaStats = (round.level === 'Council' || round.level === 'Regional')
+      ? await SubmissionAssignment.find({
+          roundId: round._id,
+          level: round.level,
+          ...(round.level === 'Council' && regionRegex && councilRegex ? {
+            region: regionRegex,
+            council: councilRegex
+          } : round.level === 'Regional' && regionRegex ? {
+            region: regionRegex
+          } : {})
+        }).select('submissionId region council')
+      : [];
+
+    const areaAssignedMap = new Map();
+    for (const assignment of assignmentDocsForAreaStats) {
+      const key = buildAreaKey(round.level, assignment);
+      if (!key) continue;
+      areaAssignedMap.set(key, (areaAssignedMap.get(key) || 0) + 1);
+    }
+
+    const areaStats = [...new Set([...areaTotalsMap.keys(), ...areaAssignedMap.keys()])]
+      .map((areaId) => ({
+        areaId,
+        totalSubmissions: areaTotalsMap.get(areaId) || 0,
+        assignedSubmissions: areaAssignedMap.get(areaId) || 0
+      }))
+      .sort((a, b) => b.totalSubmissions - a.totalSubmissions);
+
     // Get all submissions for this round (used for overall stats)
     let submissions;
     if (round.level === 'Council' || round.level === 'Regional') {
@@ -1375,11 +1801,9 @@ router.get('/:id/judge-progress', async (req, res) => {
     // Calculate progress for each judge
     const submissionIds = submissions.map(sub => sub._id);
     const judgeProgress = await Promise.all(judges.map(async (judge) => {
-      // Only get evaluations created AFTER the round started
       const evaluationQuery = { 
         roundId: round._id,
-        judgeId: judge._id,
-        createdAt: { $gte: roundStartTime }
+        judgeId: judge._id
       };
       if (submissionIds.length > 0) {
         evaluationQuery.submissionId = { $in: submissionIds };
@@ -1411,7 +1835,7 @@ router.get('/:id/judge-progress', async (req, res) => {
         assignedSubmissions = submissions;
       }
 
-      // Count completed: submissions evaluated by this judge AFTER round started
+      // Count completed using evaluations explicitly tied to this round.
       const completed = assignedSubmissions.filter(sub => 
         evaluatedSubmissionIds.includes(sub._id.toString())
       ).length;
@@ -1439,13 +1863,11 @@ router.get('/:id/judge-progress', async (req, res) => {
     }));
 
     // Calculate overall statistics
-    // Only count evaluations created AFTER the round started
     const totalSubmissions = submissions.length;
     const totalJudges = judges.length;
     const totalEvaluations = await Evaluation.countDocuments({
       roundId: round._id,
-      submissionId: { $in: submissions.map(s => s._id) },
-      createdAt: { $gte: roundStartTime }
+      submissionId: { $in: submissions.map(s => s._id) }
     });
     const averageProgress = judgeProgress.length > 0
       ? Math.round(judgeProgress.reduce((sum, j) => sum + j.percentage, 0) / judgeProgress.length)
@@ -1480,7 +1902,8 @@ router.get('/:id/judge-progress', async (req, res) => {
         totalEvaluations,
         averageProgress
       },
-      judgeProgress
+      judgeProgress,
+      areaStats
     });
   } catch (error) {
     console.error('Get judge progress error:', error);
@@ -1505,9 +1928,6 @@ router.get('/:id/judge-progress/export', async (req, res) => {
       });
     }
 
-    // Get round start time
-    const roundStartTime = round.startTime || round.createdAt;
-    
     let snapshotSubmissionIds = Array.isArray(round.pendingSubmissionsSnapshot)
       ? round.pendingSubmissionsSnapshot
       : [];
@@ -1518,7 +1938,7 @@ router.get('/:id/judge-progress/export', async (req, res) => {
     }
     const hasSnapshotContext = Boolean(round.activationSnapshotId || snapshotDoc);
 
-    const submissions = hasSnapshotContext
+    const allSubmissions = hasSnapshotContext
       ? await Submission.find({ _id: { $in: snapshotSubmissionIds } })
       : await Submission.find({ year: round.year, level: round.level });
 
@@ -1533,26 +1953,39 @@ router.get('/:id/judge-progress/export', async (req, res) => {
 
     const judges = await User.find(judgeQuery).select('name email username assignedLevel assignedRegion assignedCouncil areasOfFocus');
 
+    let submissions;
+    if (round.level === 'Council' || round.level === 'Regional') {
+      const assignments = await SubmissionAssignment.find({
+        roundId: round._id,
+        level: round.level
+      }).select('submissionId');
+
+      const assignedSubmissionIds = assignments.map((assignment) => String(assignment.submissionId));
+      submissions = allSubmissions.filter((submission) => assignedSubmissionIds.includes(String(submission._id)));
+    } else {
+      submissions = allSubmissions;
+    }
+
     // Calculate progress for each judge
     const judgeProgress = await Promise.all(judges.map(async (judge) => {
       const evaluations = await Evaluation.find({ 
         roundId: round._id,
-        judgeId: judge._id,
-        createdAt: { $gte: roundStartTime }
+        judgeId: judge._id
       });
       const evaluatedSubmissionIds = evaluations.map(e => e.submissionId.toString());
       
-      const assignedSubmissions = submissions.filter(sub => {
-        // Check if judge is assigned to this submission's location
-        // Judges see ALL submissions in their location (not filtered by areaOfFocus)
-        if (round.level === 'Council') {
-          return sub.region === judge.assignedRegion && sub.council === judge.assignedCouncil;
-        } else if (round.level === 'Regional') {
-          return sub.region === judge.assignedRegion;
-        } else {
-          return true; // National level - see all submissions
-        }
-      });
+      let assignedSubmissions;
+      if (round.level === 'Council' || round.level === 'Regional') {
+        const assignments = await SubmissionAssignment.find({
+          roundId: round._id,
+          judgeId: judge._id,
+          level: round.level
+        }).select('submissionId');
+        const assignedIds = assignments.map((assignment) => String(assignment.submissionId));
+        assignedSubmissions = submissions.filter((submission) => assignedIds.includes(String(submission._id)));
+      } else {
+        assignedSubmissions = submissions;
+      }
 
       const completed = assignedSubmissions.filter(sub => 
         evaluatedSubmissionIds.includes(sub._id.toString())

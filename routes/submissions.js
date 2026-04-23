@@ -24,6 +24,30 @@ const parseBooleanParam = (value) => {
   return ['true', '1', 'yes'].includes(value.toLowerCase());
 };
 
+const isMissingMediaValue = (value) => (
+  typeof value === 'undefined' ||
+  value === null ||
+  (typeof value === 'string' && value.trim() === '')
+);
+
+const getMissingSubmissionParts = (submission) => {
+  const missingParts = [];
+  if (isMissingMediaValue(submission.lessonPlanFileUrl)) missingParts.push('lessonPlan');
+  if (isMissingMediaValue(submission.videoFileUrl)) missingParts.push('video');
+  return missingParts;
+};
+
+const buildMissingMediaQuery = () => ({
+  $or: [
+    { lessonPlanFileUrl: { $exists: false } },
+    { lessonPlanFileUrl: null },
+    { lessonPlanFileUrl: '' },
+    { videoFileUrl: { $exists: false } },
+    { videoFileUrl: null },
+    { videoFileUrl: '' },
+  ]
+});
+
 // All routes require authentication
 router.use(protect);
 
@@ -49,7 +73,7 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
     const parsedYear = (typeof year !== 'undefined' && year !== null && Number.isFinite(Number(year)))
       ? Number(year)
       : null;
-    const query = {};
+    const query = { isDeleted: { $ne: true } };
     const andClauses = [];
 
     let responseMessage = null;
@@ -311,12 +335,396 @@ router.delete(
   }
 );
 
+// @route   GET /api/submissions/deleted
+// @desc    Get soft-deleted submissions
+// @access  Private (Admin/Superadmin)
+router.get('/deleted', authorize('admin', 'superadmin'), async (req, res) => {
+  try {
+    const {
+      level,
+      status,
+      year,
+      category,
+      class: classLevel,
+      subject,
+      search,
+      page = 1,
+      limit = 20
+    } = req.query;
+
+    const parsedYear = (typeof year !== 'undefined' && year !== null && Number.isFinite(Number(year)))
+      ? Number(year)
+      : null;
+    const query = { isDeleted: true };
+    const andClauses = [];
+
+    if (req.user.role === 'admin') {
+      Object.assign(query, buildSubmissionQueryForAdmin(req.user));
+    }
+
+    if (level) query.level = level;
+    if (status) query.status = status;
+    if (parsedYear) query.year = parsedYear;
+    if (category) query.category = category;
+    if (classLevel) query.class = classLevel;
+    if (subject) query.subject = subject;
+
+    if (search) {
+      andClauses.push({
+        $or: [
+          { teacherName: { $regex: search, $options: 'i' } },
+          { school: { $regex: search, $options: 'i' } },
+          { category: { $regex: search, $options: 'i' } },
+          { subject: { $regex: search, $options: 'i' } }
+        ]
+      });
+    }
+
+    if (andClauses.length > 0) {
+      query.$and = andClauses;
+    }
+
+    const pageNum = parseInt(page, 10) || 1;
+    const limitNum = parseInt(limit, 10) || 20;
+    const skip = (pageNum - 1) * limitNum;
+
+    const total = await Submission.countDocuments(query);
+    const submissions = await Submission.find(query)
+      .populate('teacherId', 'name email username')
+      .sort({ deletedAt: -1, createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum);
+
+    res.json({
+      success: true,
+      count: submissions.length,
+      total,
+      page: pageNum,
+      pages: Math.ceil(total / limitNum),
+      limit: limitNum,
+      submissions
+    });
+  } catch (error) {
+    console.error('Get deleted submissions error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   GET /api/submissions/faulty
+// @desc    Get submissions missing lesson plan and/or video media
+// @access  Private (Admin/Superadmin)
+router.get('/faulty', authorize('admin', 'superadmin'), async (req, res) => {
+  try {
+    const {
+      level,
+      year,
+      category,
+      class: classLevel,
+      subject,
+      search,
+      page = 1,
+      limit = 20
+    } = req.query;
+
+    const parsedYear = (typeof year !== 'undefined' && year !== null && Number.isFinite(Number(year)))
+      ? Number(year)
+      : null;
+
+    const query = {
+      isDeleted: { $ne: true },
+      ...buildMissingMediaQuery()
+    };
+
+    if (req.user.role === 'admin') {
+      Object.assign(query, buildSubmissionQueryForAdmin(req.user));
+    }
+
+    if (level) query.level = level;
+    if (parsedYear) query.year = parsedYear;
+    if (category) query.category = category;
+    if (classLevel) query.class = classLevel;
+    if (subject) query.subject = subject;
+
+    if (search) {
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { teacherName: { $regex: search, $options: 'i' } },
+          { school: { $regex: search, $options: 'i' } },
+          { areaOfFocus: { $regex: search, $options: 'i' } },
+          { category: { $regex: search, $options: 'i' } },
+          { subject: { $regex: search, $options: 'i' } }
+        ]
+      });
+    }
+
+    const pageNum = parseInt(page, 10) || 1;
+    const limitNum = parseInt(limit, 10) || 20;
+    const skip = (pageNum - 1) * limitNum;
+
+    const total = await Submission.countDocuments(query);
+    const submissions = await Submission.find(query)
+      .populate('teacherId', 'name email username')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum)
+      .lean();
+
+    const faultySubmissions = submissions.map((submission) => ({
+      ...submission,
+      missingParts: getMissingSubmissionParts(submission)
+    }));
+
+    res.json({
+      success: true,
+      count: faultySubmissions.length,
+      total,
+      page: pageNum,
+      pages: Math.ceil(total / limitNum),
+      limit: limitNum,
+      submissions: faultySubmissions
+    });
+  } catch (error) {
+    console.error('Get faulty submissions error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   PATCH /api/submissions/:id/faulty-fix
+// @desc    Admin/Superadmin directly uploads missing media part
+// @access  Private (Admin/Superadmin)
+router.patch('/:id/faulty-fix', authorize('admin', 'superadmin'), invalidateCacheOnChange('cache:/api/submissions*'), async (req, res) => {
+  try {
+    const { part, lessonPlanFileName, lessonPlanFileUrl, videoFileName, videoFileUrl, videoOriginalBytes } = req.body;
+    if (!part || !['lessonPlan', 'video'].includes(part)) {
+      return res.status(400).json({ success: false, message: 'Part must be lessonPlan or video' });
+    }
+
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
+    if (!submission) {
+      return res.status(404).json({ success: false, message: 'Submission not found' });
+    }
+    if (req.user.role === 'admin' && !canAdminAccessSubmission(req.user, submission)) {
+      return res.status(403).json({ success: false, message: 'Not authorized to update this submission' });
+    }
+
+    const missingParts = getMissingSubmissionParts(submission);
+    if (!missingParts.includes(part)) {
+      return res.status(400).json({
+        success: false,
+        message: `Submission is not missing ${part === 'lessonPlan' ? 'lesson plan' : 'video'}`
+      });
+    }
+
+    if (part === 'lessonPlan') {
+      if (!lessonPlanFileUrl || typeof lessonPlanFileUrl !== 'string') {
+        return res.status(400).json({ success: false, message: 'lessonPlanFileUrl is required for lessonPlan fix' });
+      }
+      submission.lessonPlanFileUrl = lessonPlanFileUrl;
+      if (lessonPlanFileName) submission.lessonPlanFileName = lessonPlanFileName;
+    } else {
+      if (!videoFileUrl || typeof videoFileUrl !== 'string') {
+        return res.status(400).json({ success: false, message: 'videoFileUrl is required for video fix' });
+      }
+      submission.videoFileUrl = videoFileUrl;
+      if (videoFileName) submission.videoFileName = videoFileName;
+      if (typeof videoOriginalBytes !== 'undefined') {
+        submission.videoOriginalBytes = Number(videoOriginalBytes);
+      }
+    }
+
+    if (submission.reuploadRequest?.requested && submission.reuploadRequest?.part === part) {
+      submission.reuploadRequest.requested = false;
+      submission.reuploadRequest.status = 'completed';
+      submission.reuploadRequest.resolvedAt = new Date();
+    }
+
+    await submission.save();
+
+    await logger.logAdminAction(
+      'Admin fixed faulty submission media',
+      req.user._id,
+      req,
+      {
+        submissionId: submission._id.toString(),
+        part,
+        teacherId: submission.teacherId?.toString()
+      },
+      'success',
+      'update'
+    );
+
+    res.json({
+      success: true,
+      message: `${part === 'lessonPlan' ? 'Lesson plan' : 'Video'} fixed successfully`,
+      submission
+    });
+  } catch (error) {
+    console.error('Faulty fix error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   POST /api/submissions/:id/request-reupload
+// @desc    Request teacher to reupload missing media part
+// @access  Private (Admin/Superadmin)
+router.post('/:id/request-reupload', authorize('admin', 'superadmin'), invalidateCacheOnChange('cache:/api/submissions*'), async (req, res) => {
+  try {
+    const { part, note } = req.body;
+    if (!part || !['lessonPlan', 'video'].includes(part)) {
+      return res.status(400).json({ success: false, message: 'Part must be lessonPlan or video' });
+    }
+
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
+    if (!submission) {
+      return res.status(404).json({ success: false, message: 'Submission not found' });
+    }
+    if (req.user.role === 'admin' && !canAdminAccessSubmission(req.user, submission)) {
+      return res.status(403).json({ success: false, message: 'Not authorized to request reupload for this submission' });
+    }
+
+    const missingParts = getMissingSubmissionParts(submission);
+    if (!missingParts.includes(part)) {
+      return res.status(400).json({
+        success: false,
+        message: `Submission is not missing ${part === 'lessonPlan' ? 'lesson plan' : 'video'}`
+      });
+    }
+
+    submission.reuploadRequest = {
+      requested: true,
+      requestedBy: req.user._id,
+      requestedAt: new Date(),
+      part,
+      note: typeof note === 'string' ? note.trim() : '',
+      status: 'pending',
+      resolvedAt: null
+    };
+    await submission.save();
+
+    await logger.logAdminAction(
+      'Admin requested teacher reupload',
+      req.user._id,
+      req,
+      {
+        submissionId: submission._id.toString(),
+        teacherId: submission.teacherId?.toString(),
+        part
+      },
+      'warning',
+      'update'
+    );
+
+    await notificationService.emit('SYSTEM_NOTIFICATION', {
+      userId: submission.teacherId,
+      title: 'Submission reupload required',
+      message: `Please reupload your missing ${part === 'lessonPlan' ? 'lesson plan PDF' : 'video file'} for submission "${submission.areaOfFocus || submission.subject}".`,
+      metadata: {
+        event: 'submission_reupload_requested',
+        submissionId: submission._id.toString(),
+        part,
+        note: submission.reuploadRequest.note || undefined
+      },
+      sendEmail: true
+    });
+
+    res.json({
+      success: true,
+      message: 'Teacher reupload request sent successfully',
+      submission
+    });
+  } catch (error) {
+    console.error('Request reupload error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   PATCH /api/submissions/:id/teacher-reupload
+// @desc    Teacher uploads only requested media part
+// @access  Private (Teacher)
+router.patch('/:id/teacher-reupload', authorize('teacher'), invalidateCacheOnChange('cache:/api/submissions*'), async (req, res) => {
+  try {
+    const { part, lessonPlanFileName, lessonPlanFileUrl, videoFileName, videoFileUrl, videoOriginalBytes } = req.body;
+    if (!part || !['lessonPlan', 'video'].includes(part)) {
+      return res.status(400).json({ success: false, message: 'Part must be lessonPlan or video' });
+    }
+
+    const submission = await Submission.findOne({
+      _id: req.params.id,
+      isDeleted: { $ne: true },
+      teacherId: req.user._id
+    });
+    if (!submission) {
+      return res.status(404).json({ success: false, message: 'Submission not found' });
+    }
+
+    if (!submission.reuploadRequest?.requested || submission.reuploadRequest?.status !== 'pending') {
+      return res.status(400).json({ success: false, message: 'No pending reupload request for this submission' });
+    }
+    if (submission.reuploadRequest.part !== part) {
+      return res.status(400).json({
+        success: false,
+        message: `Only ${submission.reuploadRequest.part === 'lessonPlan' ? 'lesson plan' : 'video'} reupload is currently allowed`
+      });
+    }
+
+    if (part === 'lessonPlan') {
+      if (!lessonPlanFileUrl || typeof lessonPlanFileUrl !== 'string') {
+        return res.status(400).json({ success: false, message: 'lessonPlanFileUrl is required for lessonPlan reupload' });
+      }
+      submission.lessonPlanFileUrl = lessonPlanFileUrl;
+      if (lessonPlanFileName) submission.lessonPlanFileName = lessonPlanFileName;
+    } else {
+      if (!videoFileUrl || typeof videoFileUrl !== 'string') {
+        return res.status(400).json({ success: false, message: 'videoFileUrl is required for video reupload' });
+      }
+      submission.videoFileUrl = videoFileUrl;
+      if (videoFileName) submission.videoFileName = videoFileName;
+      if (typeof videoOriginalBytes !== 'undefined') {
+        submission.videoOriginalBytes = Number(videoOriginalBytes);
+      }
+    }
+
+    submission.reuploadRequest.requested = false;
+    submission.reuploadRequest.status = 'completed';
+    submission.reuploadRequest.resolvedAt = new Date();
+
+    await submission.save();
+
+    await logger.logUserActivity(
+      'Teacher completed requested media reupload',
+      req.user._id,
+      req,
+      {
+        submissionId: submission._id.toString(),
+        part
+      },
+      'update'
+    );
+
+    res.json({
+      success: true,
+      message: `${part === 'lessonPlan' ? 'Lesson plan' : 'Video'} reuploaded successfully`,
+      submission
+    });
+  } catch (error) {
+    console.error('Teacher reupload error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // @route   GET /api/submissions/:id
 // @desc    Get single submission
 // @access  Private
 router.get('/:id', async (req, res) => {
   try {
-    const submission = await Submission.findById(req.params.id)
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: { $ne: true } })
       .populate('teacherId', 'name email username school');
 
     if (!submission) {
@@ -463,7 +871,8 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnC
     const existingSubmission = await Submission.findOne({
       teacherId: submissionData.teacherId,
       areaOfFocus: submissionData.areaOfFocus,
-      year: submissionData.year
+      year: submissionData.year,
+      isDeleted: { $ne: true }
     });
 
     if (existingSubmission) {
@@ -550,7 +959,7 @@ router.post('/', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnC
 // @access  Private (Teacher owns it, or Admin/Superadmin)
 router.put('/:id', authorize('teacher', 'admin', 'superadmin'), invalidateCacheOnChange('cache:/api/submissions*'), async (req, res) => {
   try {
-    const submission = await Submission.findById(req.params.id);
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
 
     if (!submission) {
       return res.status(404).json({
@@ -575,8 +984,8 @@ router.put('/:id', authorize('teacher', 'admin', 'superadmin'), invalidateCacheO
       });
     }
 
-    const updatedSubmission = await Submission.findByIdAndUpdate(
-      req.params.id,
+    const updatedSubmission = await Submission.findOneAndUpdate(
+      { _id: req.params.id, isDeleted: { $ne: true } },
       req.body,
       { new: true, runValidators: true }
     ).populate('teacherId', 'name email username');
@@ -645,11 +1054,11 @@ router.put('/:id', authorize('teacher', 'admin', 'superadmin'), invalidateCacheO
 });
 
 // @route   DELETE /api/submissions/:id
-// @desc    Delete submission
+// @desc    Soft delete submission
 // @access  Private (Admin/Superadmin only)
 router.delete('/:id', authorize('admin', 'superadmin'), invalidateCacheOnChange('cache:/api/submissions*'), async (req, res) => {
   try {
-    const submission = await Submission.findById(req.params.id);
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
 
     if (!submission) {
       return res.status(404).json({
@@ -666,7 +1075,7 @@ router.delete('/:id', authorize('admin', 'superadmin'), invalidateCacheOnChange(
       });
     }
 
-    // Log submission deletion before deleting
+    // Log submission deletion before soft deleting
     await logger.logAdminAction(
       'Admin deleted submission',
       req.user._id,
@@ -683,7 +1092,10 @@ router.delete('/:id', authorize('admin', 'superadmin'), invalidateCacheOnChange(
       'delete'
     );
 
-    await submission.deleteOne();
+    submission.isDeleted = true;
+    submission.deletedAt = new Date();
+    submission.deletedBy = req.user._id;
+    await submission.save();
 
     res.json({
       success: true,
@@ -691,6 +1103,117 @@ router.delete('/:id', authorize('admin', 'superadmin'), invalidateCacheOnChange(
     });
   } catch (error) {
     console.error('Delete submission error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/submissions/:id/restore
+// @desc    Restore soft-deleted submission
+// @access  Private (Admin/Superadmin only)
+router.post('/:id/restore', authorize('admin', 'superadmin'), invalidateCacheOnChange('cache:/api/submissions*'), async (req, res) => {
+  try {
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: true });
+    if (!submission) {
+      return res.status(404).json({
+        success: false,
+        message: 'Deleted submission not found'
+      });
+    }
+
+    if (req.user.role === 'admin' && !canAdminAccessSubmission(req.user, submission)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to restore this submission'
+      });
+    }
+
+    submission.isDeleted = false;
+    submission.deletedAt = null;
+    submission.deletedBy = null;
+    await submission.save();
+
+    await logger.logAdminAction(
+      'Admin restored submission',
+      req.user._id,
+      req,
+      {
+        submissionId: submission._id.toString(),
+        teacherId: submission.teacherId?.toString(),
+        teacherName: submission.teacherName,
+        level: submission.level
+      },
+      'success',
+      'update'
+    );
+
+    res.json({
+      success: true,
+      message: 'Submission restored successfully',
+      submission
+    });
+  } catch (error) {
+    console.error('Restore submission error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   DELETE /api/submissions/:id/permanent
+// @desc    Permanently delete a soft-deleted submission
+// @access  Private (Admin/Superadmin only)
+router.delete('/:id/permanent', authorize('admin', 'superadmin'), invalidateCacheOnChange('cache:/api/submissions*'), async (req, res) => {
+  try {
+    const submission = await Submission.findById(req.params.id);
+    if (!submission) {
+      return res.status(404).json({
+        success: false,
+        message: 'Submission not found'
+      });
+    }
+
+    if (req.user.role === 'admin' && !canAdminAccessSubmission(req.user, submission)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to permanently delete this submission'
+      });
+    }
+
+    if (!submission.isDeleted) {
+      return res.status(400).json({
+        success: false,
+        message: 'Only soft-deleted submissions can be permanently deleted'
+      });
+    }
+
+    await Submission.deleteOne({ _id: submission._id });
+
+    await logger.logAdminAction(
+      'Admin permanently deleted submission',
+      req.user._id,
+      req,
+      {
+        submissionId: submission._id.toString(),
+        teacherId: submission.teacherId?.toString(),
+        teacherName: submission.teacherName,
+        level: submission.level,
+        category: submission.category,
+        subject: submission.subject
+      },
+      'error',
+      'delete'
+    );
+
+    res.json({
+      success: true,
+      message: 'Submission permanently deleted successfully'
+    });
+  } catch (error) {
+    console.error('Permanent delete submission error:', error);
     res.status(500).json({
       success: false,
       message: 'Server error'
@@ -718,6 +1241,7 @@ router.get('/leaderboard/council', authorize('admin', 'superadmin'), async (req,
     // Build query for council level submissions
     const query = {
       level: 'Council',
+      isDeleted: { $ne: true },
       status: { $in: ['evaluated', 'promoted', 'eliminated'] }
     };
 
@@ -799,6 +1323,7 @@ router.get('/leaderboard/regional', authorize('admin', 'superadmin'), async (req
 
     const query = {
       level: 'Regional',
+      isDeleted: { $ne: true },
       status: { $in: ['evaluated', 'promoted', 'eliminated'] }
     };
 
@@ -868,6 +1393,7 @@ router.get('/leaderboard/national', authorize('admin', 'superadmin'), async (req
 
     const query = {
       level: 'National',
+      isDeleted: { $ne: true },
       status: { $in: ['evaluated', 'promoted', 'eliminated'] }
     };
 
@@ -931,7 +1457,7 @@ router.get('/leaderboard/national', authorize('admin', 'superadmin'), async (req
 // @access  Private (Admin, Superadmin)
 router.get('/:id/eligible-judges', authorize('admin', 'superadmin'), async (req, res) => {
   try {
-    const submission = await Submission.findById(req.params.id);
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
     if (!submission) {
       return res.status(404).json({
         success: false,
@@ -973,7 +1499,7 @@ router.get('/:id/eligible-judges', authorize('admin', 'superadmin'), async (req,
 // @access  Private (Admin, Superadmin)
 router.get('/:id/assigned-judge', authorize('admin', 'superadmin'), async (req, res) => {
   try {
-    const submission = await Submission.findById(req.params.id);
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
     
     if (!submission) {
       return res.status(404).json({
@@ -1058,7 +1584,7 @@ router.post('/:id/assign-judge', authorize('admin', 'superadmin'), async (req, r
       });
     }
 
-    const submission = await Submission.findById(req.params.id);
+    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
     if (!submission) {
       return res.status(404).json({
         success: false,

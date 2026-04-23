@@ -123,7 +123,7 @@ router.get('/', async (req, res) => {
   try {
     const { role, status, search } = req.query;
     
-    let query = {};
+    let query = { isDeleted: { $ne: true } };
 
     // Admin scope: filter users by level/region/council
     if (req.user.role === 'admin') {
@@ -319,12 +319,63 @@ router.get('/:id/summary', async (req, res) => {
   }
 });
 
+// @route   GET /api/users/deleted
+// @desc    Get soft-deleted users
+// @access  Private (Admin/Superadmin)
+router.get('/deleted', async (req, res) => {
+  try {
+    const { role, search } = req.query;
+    const query = { isDeleted: true };
+
+    if (req.user.role === 'admin') {
+      const scopeQuery = buildUserQueryForAdmin(req.user);
+      if (Object.keys(scopeQuery).length > 0) {
+        query.$and = query.$and || [];
+        query.$and.push(scopeQuery);
+      }
+    }
+
+    if (role) {
+      query.role = role;
+    }
+
+    if (search) {
+      const searchClause = {
+        $or: [
+          { name: { $regex: search, $options: 'i' } },
+          { username: { $regex: search, $options: 'i' } },
+          { email: { $regex: search, $options: 'i' } }
+        ]
+      };
+      if (query.$and) {
+        query.$and.push(searchClause);
+      } else {
+        query.$or = searchClause.$or;
+      }
+    }
+
+    const users = await User.find(query).select('-password').sort({ deletedAt: -1, createdAt: -1 });
+
+    res.json({
+      success: true,
+      count: users.length,
+      users
+    });
+  } catch (error) {
+    console.error('Get deleted users error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
 // @route   GET /api/users/:id
 // @desc    Get single user
 // @access  Private (Admin/Superadmin)
 router.get('/:id', async (req, res) => {
   try {
-    const user = await User.findById(req.params.id).select('-password');
+    const user = await User.findOne({ _id: req.params.id, isDeleted: { $ne: true } }).select('-password');
 
     if (!user) {
       return res.status(404).json({
@@ -425,6 +476,7 @@ router.post('/', async (req, res) => {
 
     // Check if user already exists
     const existingUser = await User.findOne({
+      isDeleted: { $ne: true },
       $or: [
         { username: userData.username?.toLowerCase() },
         { email: userData.email?.toLowerCase() }
@@ -507,7 +559,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     // Get original user data before update for logging
-    const originalUser = await User.findById(req.params.id).select('-password');
+    const originalUser = await User.findOne({ _id: req.params.id, isDeleted: { $ne: true } }).select('-password');
     
     if (!originalUser) {
       return res.status(404).json({
@@ -556,8 +608,8 @@ router.put('/:id', async (req, res) => {
       }
     }
 
-    const user = await User.findByIdAndUpdate(
-      req.params.id,
+    const user = await User.findOneAndUpdate(
+      { _id: req.params.id, isDeleted: { $ne: true } },
       updateData,
       { new: true, runValidators: true }
     ).select('-password');
@@ -595,11 +647,11 @@ router.put('/:id', async (req, res) => {
 });
 
 // @route   DELETE /api/users/:id
-// @desc    Delete user
-// @access  Private (Superadmin only)
-router.delete('/:id', authorize('superadmin'), async (req, res) => {
+// @desc    Soft delete user
+// @access  Private (Admin/Superadmin)
+router.delete('/:id', authorize('admin', 'superadmin'), async (req, res) => {
   try {
-    const user = await User.findById(req.params.id);
+    const user = await User.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
 
     if (!user) {
       return res.status(404).json({
@@ -608,9 +660,16 @@ router.delete('/:id', authorize('superadmin'), async (req, res) => {
       });
     }
 
-    // Log user deletion before deleting
+    if (req.user.role === 'admin' && !canAdminAccessUser(req.user, user)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to delete this user'
+      });
+    }
+
+    // Log user deletion before soft deleting
     await logger.logAdminAction(
-      'Superadmin deleted user account',
+      'Admin soft deleted user account',
       req.user._id,
       req,
       {
@@ -623,7 +682,10 @@ router.delete('/:id', authorize('superadmin'), async (req, res) => {
       'delete'
     );
 
-    await user.deleteOne();
+    user.isDeleted = true;
+    user.deletedAt = new Date();
+    user.deletedBy = req.user._id;
+    await user.save();
 
     res.json({
       success: true,
@@ -631,6 +693,116 @@ router.delete('/:id', authorize('superadmin'), async (req, res) => {
     });
   } catch (error) {
     console.error('Delete user error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/users/:id/restore
+// @desc    Restore soft-deleted user
+// @access  Private (Admin/Superadmin)
+router.post('/:id/restore', authorize('admin', 'superadmin'), async (req, res) => {
+  try {
+    const user = await User.findOne({ _id: req.params.id, isDeleted: true }).select('-password');
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Deleted user not found'
+      });
+    }
+
+    if (req.user.role === 'admin' && !canAdminAccessUser(req.user, user)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to restore this user'
+      });
+    }
+
+    user.isDeleted = false;
+    user.deletedAt = null;
+    user.deletedBy = null;
+    await user.save();
+
+    await logger.logAdminAction(
+      'Admin restored user account',
+      req.user._id,
+      req,
+      {
+        targetUserId: user._id.toString(),
+        targetUserRole: user.role,
+        targetUserEmail: user.email
+      },
+      'success',
+      'update'
+    );
+
+    res.json({
+      success: true,
+      message: 'User restored successfully',
+      user
+    });
+  } catch (error) {
+    console.error('Restore user error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   DELETE /api/users/:id/permanent
+// @desc    Permanently delete a soft-deleted user
+// @access  Private (Admin/Superadmin)
+router.delete('/:id/permanent', authorize('admin', 'superadmin'), async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('-password');
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    if (req.user.role === 'admin' && !canAdminAccessUser(req.user, user)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to permanently delete this user'
+      });
+    }
+
+    if (!user.isDeleted) {
+      return res.status(400).json({
+        success: false,
+        message: 'Only soft-deleted users can be permanently deleted'
+      });
+    }
+
+    await User.deleteOne({ _id: user._id });
+
+    await logger.logAdminAction(
+      'Admin permanently deleted user account',
+      req.user._id,
+      req,
+      {
+        targetUserId: user._id.toString(),
+        targetUserRole: user.role,
+        targetUserEmail: user.email,
+        targetUserName: user.name
+      },
+      'error',
+      'delete'
+    );
+
+    res.json({
+      success: true,
+      message: 'User permanently deleted successfully'
+    });
+  } catch (error) {
+    console.error('Permanent delete user error:', error);
     res.status(500).json({
       success: false,
       message: 'Server error'

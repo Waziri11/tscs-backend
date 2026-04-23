@@ -35,6 +35,7 @@ class NotificationService {
     this.on('SUBMISSION_SUCCESSFUL', this.handleSubmissionSuccessful.bind(this));
     this.on('SUBMISSION_PROMOTED', this.handleSubmissionPromoted.bind(this));
     this.on('SUBMISSION_ELIMINATED', this.handleSubmissionEliminated.bind(this));
+    this.on('SUBMISSION_DISQUALIFIED', this.handleSubmissionDisqualified.bind(this));
 
     // Evaluation events (Email enabled for judges)
     this.on('EVALUATION_REMINDER', this.handleEvaluationReminder.bind(this));
@@ -327,6 +328,32 @@ class NotificationService {
     });
 
     // Send email notification
+    await this.sendEmailNotification(userId, notification);
+  }
+
+  /**
+   * Handle submission disqualified (Email enabled for teachers)
+   * @param {Object} data - Disqualification data
+   */
+  async handleSubmissionDisqualified(data) {
+    const {
+      userId,
+      submissionId,
+      roundName,
+      reason,
+      subject,
+      category,
+      areaOfFocus
+    } = data;
+
+    const notification = await this.createNotification({
+      userId,
+      type: 'submission_disqualified',
+      title: 'Submission Disqualified',
+      message: `Your submission has been disqualified.${reason ? ` Reason: ${reason}` : ''}`,
+      metadata: { submissionId, roundName, reason, subject, category, areaOfFocus }
+    });
+
     await this.sendEmailNotification(userId, notification);
   }
 
@@ -631,6 +658,15 @@ class NotificationService {
             user.email,
             user.name,
             'eliminated',
+            notification.metadata,
+            user.phone
+          );
+          break;
+
+        case 'submission_disqualified':
+          await emailService.sendSubmissionDisqualifiedEmail(
+            user.email,
+            user.name,
             notification.metadata,
             user.phone
           );
