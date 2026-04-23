@@ -17,6 +17,12 @@ const {
 } = require('../utils/roundContext');
 
 const router = express.Router();
+let RoundSnapshot = null;
+try {
+  RoundSnapshot = require('../models/RoundSnapshot');
+} catch (_error) {
+  RoundSnapshot = null;
+}
 
 const parseBooleanParam = (value) => {
   if (typeof value === 'boolean') return value;
@@ -341,6 +347,7 @@ router.delete(
 router.get('/unassigned', authorize('admin', 'superadmin', 'stakeholder'), cacheMiddleware(30), async (req, res) => {
   try {
     const {
+      roundId,
       level,
       status,
       year,
@@ -360,6 +367,144 @@ router.get('/unassigned', authorize('admin', 'superadmin', 'stakeholder'), cache
     const pageNum = parseInt(page, 10) || 1;
     const limitNum = parseInt(limit, 10) || 20;
     const skip = (pageNum - 1) * limitNum;
+
+    const normalize = (value) => (value ? value.toString().trim() : '');
+    const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const toExactRegex = (value) => {
+      const normalized = normalize(value);
+      return normalized ? new RegExp(`^${escapeRegExp(normalized)}$`, 'i') : null;
+    };
+
+    if (roundId) {
+      if (!mongoose.Types.ObjectId.isValid(roundId)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid roundId'
+        });
+      }
+
+      const round = await CompetitionRound.findById(roundId);
+      if (!round) {
+        return res.status(404).json({
+          success: false,
+          message: 'Competition round not found'
+        });
+      }
+
+      if (req.user.role === 'stakeholder') {
+        const latestActiveRound = await CompetitionRound.findOne({ status: 'active' })
+          .sort({ updatedAt: -1, createdAt: -1 })
+          .select('_id status');
+
+        if (!latestActiveRound || String(latestActiveRound._id) !== String(round._id)) {
+          return res.status(403).json({
+            success: false,
+            message: 'Stakeholders can only view unassigned submissions for the current active round'
+          });
+        }
+      }
+
+      if (round.level !== 'Council' && round.level !== 'Regional') {
+        return res.status(400).json({
+          success: false,
+          message: 'Unassigned submissions are only available for Council and Regional rounds'
+        });
+      }
+
+      if (level && level !== round.level) {
+        return res.status(400).json({
+          success: false,
+          message: `Provided level does not match round level (${round.level})`
+        });
+      }
+
+      const scopedRegion = normalize(region) || normalize(round.region);
+      const scopedCouncil = normalize(council) || normalize(round.council);
+      const scopeRegionRegex = toExactRegex(scopedRegion);
+      const scopeCouncilRegex = toExactRegex(scopedCouncil);
+
+      let snapshotSubmissionIds = Array.isArray(round.pendingSubmissionsSnapshot)
+        ? round.pendingSubmissionsSnapshot
+        : [];
+      let snapshotDoc = null;
+      if (snapshotSubmissionIds.length === 0 && RoundSnapshot) {
+        snapshotDoc = await RoundSnapshot.findOne({ roundId: round._id }).select('submissionIds');
+        snapshotSubmissionIds = snapshotDoc?.submissionIds || [];
+      }
+      const hasSnapshotContext = Boolean(round.activationSnapshotId || snapshotDoc);
+
+      const submissionQuery = hasSnapshotContext
+        ? { _id: { $in: snapshotSubmissionIds }, isDeleted: { $ne: true } }
+        : {
+            year: round.year,
+            level: round.level,
+            status: { $nin: ['promoted', 'eliminated'] },
+            isDeleted: { $ne: true }
+          };
+
+      if (req.user.role === 'admin') {
+        Object.assign(submissionQuery, buildSubmissionQueryForAdmin(req.user));
+      }
+      if (status) submissionQuery.status = status;
+      if (category) submissionQuery.category = category;
+      if (classLevel) submissionQuery.class = classLevel;
+      if (subject) submissionQuery.subject = subject;
+      if (scopeRegionRegex) submissionQuery.region = scopeRegionRegex;
+      if (scopeCouncilRegex) submissionQuery.council = scopeCouncilRegex;
+      if (search) {
+        submissionQuery.$or = [
+          { teacherName: { $regex: search, $options: 'i' } },
+          { school: { $regex: search, $options: 'i' } },
+          { category: { $regex: search, $options: 'i' } },
+          { subject: { $regex: search, $options: 'i' } }
+        ];
+      }
+
+      const allScopedSubmissions = await Submission.find(submissionQuery)
+        .sort({ createdAt: -1 });
+      const submissionIds = allScopedSubmissions.map((sub) => sub._id);
+
+      const assignmentQuery = {
+        roundId: round._id,
+        level: round.level,
+        submissionId: { $in: submissionIds },
+        ...(scopeRegionRegex ? { region: scopeRegionRegex } : {}),
+        ...(scopeCouncilRegex ? { council: scopeCouncilRegex } : {})
+      };
+      const assignmentDocs = submissionIds.length
+        ? await SubmissionAssignment.find(assignmentQuery).select('submissionId')
+        : [];
+      const assignedSubmissionIdSet = new Set(
+        assignmentDocs.map((doc) => doc.submissionId.toString())
+      );
+
+      const unassignedSubmissions = allScopedSubmissions.filter(
+        (submission) => !assignedSubmissionIdSet.has(submission._id.toString())
+      );
+      const total = unassignedSubmissions.length;
+      const submissions = unassignedSubmissions.slice(skip, skip + limitNum);
+
+      return res.json({
+        success: true,
+        count: submissions.length,
+        total,
+        page: pageNum,
+        pages: Math.ceil(total / limitNum),
+        limit: limitNum,
+        filters: {
+          roundId,
+          level: round.level,
+          status,
+          year: round.year,
+          category,
+          subject,
+          region: scopedRegion || null,
+          council: scopedCouncil || null,
+          search
+        },
+        submissions
+      });
+    }
 
     const matchQuery = {
       isDeleted: { $ne: true },
@@ -437,7 +582,7 @@ router.get('/unassigned', authorize('admin', 'superadmin', 'stakeholder'), cache
       page: pageNum,
       pages: Math.ceil(total / limitNum),
       limit: limitNum,
-      filters: { level, status, year, category, subject, region, council, search },
+      filters: { roundId: null, level, status, year, category, subject, region, council, search },
       submissions
     });
   } catch (error) {
