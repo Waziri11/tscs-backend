@@ -335,6 +335,120 @@ router.delete(
   }
 );
 
+// @route   GET /api/submissions/unassigned
+// @desc    Get submissions that currently have no judge assignment
+// @access  Private (Admin/Superadmin/Stakeholder)
+router.get('/unassigned', authorize('admin', 'superadmin', 'stakeholder'), cacheMiddleware(30), async (req, res) => {
+  try {
+    const {
+      level,
+      status,
+      year,
+      category,
+      class: classLevel,
+      subject,
+      region,
+      council,
+      search,
+      page = 1,
+      limit = 20
+    } = req.query;
+
+    const parsedYear = (typeof year !== 'undefined' && year !== null && Number.isFinite(Number(year)))
+      ? Number(year)
+      : null;
+    const pageNum = parseInt(page, 10) || 1;
+    const limitNum = parseInt(limit, 10) || 20;
+    const skip = (pageNum - 1) * limitNum;
+
+    const matchQuery = {
+      isDeleted: { $ne: true },
+      level: { $in: ['Council', 'Regional'] }
+    };
+
+    if (req.user.role === 'admin') {
+      Object.assign(matchQuery, buildSubmissionQueryForAdmin(req.user));
+    }
+
+    if (level) {
+      if (level === 'Council' || level === 'Regional') {
+        matchQuery.level = level;
+      } else {
+        return res.status(400).json({
+          success: false,
+          message: 'Unassigned submissions are only available for Council and Regional levels'
+        });
+      }
+    }
+
+    if (status) matchQuery.status = status;
+    if (parsedYear) matchQuery.year = parsedYear;
+    if (category) matchQuery.category = category;
+    if (classLevel) matchQuery.class = classLevel;
+    if (subject) matchQuery.subject = subject;
+    if (region) matchQuery.region = region;
+    if (council) matchQuery.council = council;
+
+    if (search) {
+      matchQuery.$or = [
+        { teacherName: { $regex: search, $options: 'i' } },
+        { school: { $regex: search, $options: 'i' } },
+        { category: { $regex: search, $options: 'i' } },
+        { subject: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    const aggregationResult = await Submission.aggregate([
+      { $match: matchQuery },
+      {
+        $lookup: {
+          from: 'submissionassignments',
+          localField: '_id',
+          foreignField: 'submissionId',
+          as: 'assignments'
+        }
+      },
+      {
+        $match: {
+          $expr: { $eq: [{ $size: '$assignments' }, 0] }
+        }
+      },
+      { $sort: { createdAt: -1 } },
+      {
+        $facet: {
+          metadata: [{ $count: 'total' }],
+          data: [
+            { $skip: skip },
+            { $limit: limitNum },
+            { $project: { assignments: 0 } }
+          ]
+        }
+      }
+    ]).option({ maxTimeMS: 30000, allowDiskUse: true });
+
+    const aggregatePayload = aggregationResult[0] || { metadata: [], data: [] };
+    const total = aggregatePayload.metadata[0]?.total || 0;
+    const submissions = aggregatePayload.data || [];
+
+    res.json({
+      success: true,
+      count: submissions.length,
+      total,
+      page: pageNum,
+      pages: Math.ceil(total / limitNum),
+      limit: limitNum,
+      filters: { level, status, year, category, subject, region, council, search },
+      submissions
+    });
+  } catch (error) {
+    console.error('Get unassigned submissions error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
 // @route   GET /api/submissions/deleted
 // @desc    Get soft-deleted submissions
 // @access  Private (Admin/Superadmin)
