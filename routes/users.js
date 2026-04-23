@@ -1,10 +1,15 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const User = require('../models/User');
+const Competition = require('../models/Competition');
+const Submission = require('../models/Submission');
+const SubmissionAssignment = require('../models/SubmissionAssignment');
 const { protect, authorize } = require('../middleware/auth');
 const { logger } = require('../utils/logger');
 const { assignUnassignedSubmissionsToJudge } = require('../utils/judgeAssignment');
 const {
   buildUserQueryForAdmin,
+  canAdminAccessSubmission,
   canAdminAccessUser,
   adminCanRegisterStakeholder,
   getAdminScope
@@ -15,6 +20,101 @@ const router = express.Router();
 // All routes require authentication and admin/superadmin role
 router.use(protect);
 router.use(authorize('admin', 'superadmin'));
+
+const serializeAssignment = (assignment) => ({
+  assignmentId: assignment._id,
+  id: assignment._id,
+  submissionId: assignment.submissionId?._id || assignment.submissionId,
+  judge: assignment.judgeId ? {
+    id: assignment.judgeId._id || assignment.judgeId,
+    name: assignment.judgeId.name,
+    email: assignment.judgeId.email,
+    username: assignment.judgeId.username,
+    assignedLevel: assignment.judgeId.assignedLevel,
+    assignedRegion: assignment.judgeId.assignedRegion,
+    assignedCouncil: assignment.judgeId.assignedCouncil
+  } : null,
+  round: assignment.roundId ? {
+    id: assignment.roundId._id || assignment.roundId,
+    year: assignment.roundId.year,
+    level: assignment.roundId.level,
+    status: assignment.roundId.status,
+    region: assignment.roundId.region,
+    council: assignment.roundId.council,
+    endTime: assignment.roundId.endTime
+  } : null,
+  level: assignment.level,
+  region: assignment.region,
+  council: assignment.council,
+  assignedAt: assignment.assignedAt,
+  judgeNotified: assignment.judgeNotified,
+  createdAt: assignment.createdAt,
+  updatedAt: assignment.updatedAt
+});
+
+const sortByYearDesc = (a, b) => {
+  if (a.year === null) return 1;
+  if (b.year === null) return -1;
+  return b.year - a.year;
+};
+
+const groupSubmissionsByYear = (submissions) => {
+  const groups = new Map();
+
+  for (const submission of submissions) {
+    const yearKey = String(submission.year || 'Unknown');
+    if (!groups.has(yearKey)) {
+      groups.set(yearKey, {
+        year: submission.year || null,
+        count: 0,
+        submissions: []
+      });
+    }
+
+    const yearGroup = groups.get(yearKey);
+    yearGroup.count += 1;
+    yearGroup.submissions.push(submission);
+  }
+
+  return [...groups.values()].sort(sortByYearDesc);
+};
+
+const buildCompetitionSummaries = async (submissions) => {
+  const years = [...new Set(
+    submissions
+      .map((submission) => submission.year)
+      .filter((year) => Number.isFinite(Number(year)))
+      .map((year) => Number(year))
+  )].sort((a, b) => b - a);
+
+  if (years.length === 0) {
+    return [];
+  }
+
+  const competitionDocs = await Competition.find({ year: { $in: years } })
+    .sort({ year: -1 })
+    .lean();
+
+  const competitionMap = new Map(competitionDocs.map((competition) => [competition.year, competition]));
+
+  return years.map((year) => {
+    const matchingSubmissions = submissions.filter((submission) => Number(submission.year) === year);
+    const competition = competitionMap.get(year);
+
+    return {
+      year,
+      competitionId: competition?._id || null,
+      isActive: typeof competition?.isActive === 'boolean' ? competition.isActive : null,
+      existsInCompetitionConfig: !!competition,
+      submissionCount: matchingSubmissions.length,
+      levels: [...new Set(matchingSubmissions.map((submission) => submission.level).filter(Boolean))].sort(),
+      categories: [...new Set(matchingSubmissions.map((submission) => submission.category).filter(Boolean))].sort(),
+      classes: [...new Set(matchingSubmissions.map((submission) => submission.class).filter(Boolean))].sort(),
+      subjects: [...new Set(matchingSubmissions.map((submission) => submission.subject).filter(Boolean))].sort(),
+      areasOfFocus: [...new Set(matchingSubmissions.map((submission) => submission.areaOfFocus).filter(Boolean))].sort()
+    };
+  }).sort(sortByYearDesc);
+};
 
 // @route   GET /api/users
 // @desc    Get all users (with filters)
@@ -79,6 +179,139 @@ router.get('/', async (req, res) => {
     });
   } catch (error) {
     console.error('Get users error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   GET /api/users/:id/summary
+// @desc    Get user summary with submissions grouped by competition year and assignment details
+// @access  Private (Admin/Superadmin)
+router.get('/:id/summary', async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid user ID'
+      });
+    }
+
+    const user = await User.findById(req.params.id).select('-password').lean();
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    if (req.user.role === 'admin' && !canAdminAccessUser(req.user, user)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to view this user'
+      });
+    }
+
+    const ownedSubmissions = await Submission.find({ teacherId: user._id })
+      .populate('teacherId', 'name email username school region council')
+      .sort({ year: -1, createdAt: -1 })
+      .lean();
+
+    const scopedOwnedSubmissions = req.user.role === 'admin'
+      ? ownedSubmissions.filter((submission) => canAdminAccessSubmission(req.user, submission))
+      : ownedSubmissions;
+
+    const ownedSubmissionIds = scopedOwnedSubmissions.map((submission) => submission._id);
+    const ownedAssignments = ownedSubmissionIds.length > 0
+      ? await SubmissionAssignment.find({ submissionId: { $in: ownedSubmissionIds } })
+        .populate('judgeId', 'name email username assignedLevel assignedRegion assignedCouncil')
+        .populate('roundId', 'year level status region council endTime')
+        .sort({ assignedAt: -1, createdAt: -1 })
+        .lean()
+      : [];
+
+    const assignmentsBySubmission = new Map();
+    for (const assignment of ownedAssignments) {
+      const submissionId = String(assignment.submissionId?._id || assignment.submissionId);
+      if (!assignmentsBySubmission.has(submissionId)) {
+        assignmentsBySubmission.set(submissionId, []);
+      }
+      assignmentsBySubmission.get(submissionId).push(serializeAssignment(assignment));
+    }
+
+    const submissionsWithAssignments = scopedOwnedSubmissions.map((submission) => ({
+      ...submission,
+      assignmentDetails: assignmentsBySubmission.get(String(submission._id)) || []
+    }));
+
+    const competitionYears = groupSubmissionsByYear(submissionsWithAssignments);
+    const competitions = await buildCompetitionSummaries(scopedOwnedSubmissions);
+    const submissionAssignmentDetails = ownedAssignments.map(serializeAssignment);
+    let judgeAssignmentDetails = [];
+    let assignedSubmissionsByCompetitionYear = [];
+
+    if (user.role === 'judge') {
+      const judgeAssignments = await SubmissionAssignment.find({ judgeId: user._id })
+        .populate('submissionId')
+        .populate('judgeId', 'name email username assignedLevel assignedRegion assignedCouncil')
+        .populate('roundId', 'year level status region council endTime')
+        .sort({ assignedAt: -1, createdAt: -1 })
+        .lean();
+
+      const scopedJudgeAssignments = req.user.role === 'admin'
+        ? judgeAssignments.filter((assignment) => (
+          assignment.submissionId && canAdminAccessSubmission(req.user, assignment.submissionId)
+        ))
+        : judgeAssignments;
+
+      judgeAssignmentDetails = scopedJudgeAssignments.map(serializeAssignment);
+
+      const assignedSubmissionSummaries = scopedJudgeAssignments
+        .filter((assignment) => assignment.submissionId)
+        .map((assignment) => ({
+          ...assignment.submissionId,
+          assignmentDetails: [serializeAssignment(assignment)]
+        }));
+
+      assignedSubmissionsByCompetitionYear = groupSubmissionsByYear(assignedSubmissionSummaries);
+    }
+
+    await logger.logAdminAction(
+      'Admin viewed user summary details',
+      req.user._id,
+      req,
+      {
+        targetUserId: user._id.toString(),
+        targetUserRole: user.role,
+        ownedSubmissionCount: scopedOwnedSubmissions.length,
+        ownedAssignmentCount: ownedAssignments.length,
+        competitionCount: competitions.length,
+        judgeAssignmentCount: judgeAssignmentDetails.length
+      },
+      undefined,
+      'read'
+    );
+
+    res.json({
+      success: true,
+      userInfo: user,
+      competitions,
+      competitionYears,
+      submissionAssignmentDetails,
+      assignedSubmissionsByCompetitionYear,
+      judgeSubmissionAssignmentDetails: judgeAssignmentDetails,
+      summary: {
+        totalCompetitions: competitions.length,
+        totalOwnedSubmissions: scopedOwnedSubmissions.length,
+        totalOwnedSubmissionAssignments: ownedAssignments.length,
+        totalJudgeAssignments: judgeAssignmentDetails.length,
+        competitionYearCount: competitionYears.length
+      }
+    });
+  } catch (error) {
+    console.error('Get user summary error:', error);
     res.status(500).json({
       success: false,
       message: 'Server error'
@@ -406,4 +639,3 @@ router.delete('/:id', authorize('superadmin'), async (req, res) => {
 });
 
 module.exports = router;
-

@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const Submission = require('../models/Submission');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
 const CompetitionRound = require('../models/CompetitionRound');
@@ -234,6 +235,81 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
     });
   }
 });
+
+// @route   DELETE /api/submissions/assignments/:assignmentId
+// @desc    Delete a submission assignment by ID
+// @access  Private (Admin/Superadmin only)
+router.delete(
+  '/assignments/:assignmentId',
+  authorize('admin', 'superadmin'),
+  invalidateCacheOnChange(['cache:/api/submissions*', 'cache:/api/users*']),
+  async (req, res) => {
+    try {
+      if (!mongoose.Types.ObjectId.isValid(req.params.assignmentId)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid submission assignment ID'
+        });
+      }
+
+      const assignment = await SubmissionAssignment.findById(req.params.assignmentId)
+        .populate('submissionId')
+        .populate('judgeId', 'name email username assignedLevel assignedRegion assignedCouncil')
+        .populate('roundId', 'year level status region council endTime');
+
+      if (!assignment) {
+        return res.status(404).json({
+          success: false,
+          message: 'Submission assignment not found'
+        });
+      }
+
+      if (!assignment.submissionId) {
+        return res.status(404).json({
+          success: false,
+          message: 'Submission linked to this assignment was not found'
+        });
+      }
+
+      if (req.user.role === 'admin' && !canAdminAccessSubmission(req.user, assignment.submissionId)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Not authorized to delete this submission assignment'
+        });
+      }
+
+      await logger.logAdminAction(
+        'Admin deleted submission assignment',
+        req.user._id,
+        req,
+        {
+          assignmentId: assignment._id.toString(),
+          submissionId: assignment.submissionId._id.toString(),
+          judgeId: assignment.judgeId?._id?.toString() || assignment.judgeId?.toString(),
+          roundId: assignment.roundId?._id?.toString() || assignment.roundId?.toString(),
+          level: assignment.level,
+          region: assignment.region,
+          council: assignment.council
+        },
+        'warning',
+        'delete'
+      );
+
+      await assignment.deleteOne();
+
+      res.json({
+        success: true,
+        message: 'Submission assignment deleted successfully'
+      });
+    } catch (error) {
+      console.error('Delete submission assignment error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Server error'
+      });
+    }
+  }
+);
 
 // @route   GET /api/submissions/:id
 // @desc    Get single submission
@@ -941,6 +1017,7 @@ router.get('/:id/assigned-judge', authorize('admin', 'superadmin'), async (req, 
     res.json({
       success: true,
       assignment: assignment ? {
+        assignmentId: assignment._id,
         judgeId: assignment.judgeId._id,
         judgeName: assignment.judgeId.name,
         judgeEmail: assignment.judgeId.email,
