@@ -243,6 +243,7 @@ router.post('/', async (req, res) => {
 
     // Check if user already exists
     const existingUser = await User.findOne({
+      isDeleted: { $ne: true },
       $or: [
         { username: userData.username?.toLowerCase() },
         { email: userData.email?.toLowerCase() }
@@ -512,6 +513,63 @@ router.post('/:id/restore', authorize('admin', 'superadmin'), async (req, res) =
     });
   } catch (error) {
     console.error('Restore user error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   DELETE /api/users/:id/permanent
+// @desc    Permanently delete a soft-deleted user
+// @access  Private (Admin/Superadmin)
+router.delete('/:id/permanent', authorize('admin', 'superadmin'), async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('-password');
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    if (req.user.role === 'admin' && !canAdminAccessUser(req.user, user)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to permanently delete this user'
+      });
+    }
+
+    if (!user.isDeleted) {
+      return res.status(400).json({
+        success: false,
+        message: 'Only soft-deleted users can be permanently deleted'
+      });
+    }
+
+    await User.deleteOne({ _id: user._id });
+
+    await logger.logAdminAction(
+      'Admin permanently deleted user account',
+      req.user._id,
+      req,
+      {
+        targetUserId: user._id.toString(),
+        targetUserRole: user.role,
+        targetUserEmail: user.email,
+        targetUserName: user.name
+      },
+      'error',
+      'delete'
+    );
+
+    res.json({
+      success: true,
+      message: 'User permanently deleted successfully'
+    });
+  } catch (error) {
+    console.error('Permanent delete user error:', error);
     res.status(500).json({
       success: false,
       message: 'Server error'

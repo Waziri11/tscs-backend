@@ -1087,6 +1087,64 @@ router.post('/:id/restore', authorize('admin', 'superadmin'), invalidateCacheOnC
   }
 });
 
+// @route   DELETE /api/submissions/:id/permanent
+// @desc    Permanently delete a soft-deleted submission
+// @access  Private (Admin/Superadmin only)
+router.delete('/:id/permanent', authorize('admin', 'superadmin'), invalidateCacheOnChange('cache:/api/submissions*'), async (req, res) => {
+  try {
+    const submission = await Submission.findById(req.params.id);
+    if (!submission) {
+      return res.status(404).json({
+        success: false,
+        message: 'Submission not found'
+      });
+    }
+
+    if (req.user.role === 'admin' && !canAdminAccessSubmission(req.user, submission)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to permanently delete this submission'
+      });
+    }
+
+    if (!submission.isDeleted) {
+      return res.status(400).json({
+        success: false,
+        message: 'Only soft-deleted submissions can be permanently deleted'
+      });
+    }
+
+    await Submission.deleteOne({ _id: submission._id });
+
+    await logger.logAdminAction(
+      'Admin permanently deleted submission',
+      req.user._id,
+      req,
+      {
+        submissionId: submission._id.toString(),
+        teacherId: submission.teacherId?.toString(),
+        teacherName: submission.teacherName,
+        level: submission.level,
+        category: submission.category,
+        subject: submission.subject
+      },
+      'error',
+      'delete'
+    );
+
+    res.json({
+      success: true,
+      message: 'Submission permanently deleted successfully'
+    });
+  } catch (error) {
+    console.error('Permanent delete submission error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
 // @route   GET /api/submissions/leaderboard/council
 // @desc    Get council level leaderboard (per area of focus and overall)
 // @access  Private (Admin, Superadmin, Judge)

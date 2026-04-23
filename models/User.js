@@ -5,7 +5,6 @@ const userSchema = new mongoose.Schema({
   username: {
     type: String,
     required: true,
-    unique: true,
     trim: true,
     lowercase: true
   },
@@ -22,7 +21,6 @@ const userSchema = new mongoose.Schema({
   email: {
     type: String,
     required: true,
-    unique: true,
     trim: true,
     lowercase: true
   },
@@ -198,7 +196,15 @@ userSchema.methods.toJSON = function() {
 };
 
 // Indexes for better query performance
-// Note: email index is automatically created by unique: true constraint
+// Enforce uniqueness only for active users so deleted records can be re-created.
+userSchema.index(
+  { email: 1 },
+  { unique: true, partialFilterExpression: { isDeleted: false } }
+);
+userSchema.index(
+  { username: 1 },
+  { unique: true, partialFilterExpression: { isDeleted: false } }
+);
 userSchema.index({ role: 1, status: 1 });
 userSchema.index({ isDeleted: 1, deletedAt: -1 });
 userSchema.index({ role: 1, assignedLevel: 1, assignedRegion: 1, assignedCouncil: 1 }); // For judge queries
