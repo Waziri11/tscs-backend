@@ -269,7 +269,7 @@ router.get('/active', cacheMiddleware(60), async (req, res) => {
 
 // All other routes require superadmin or national admin (only national admin can manage rounds)
 const isJudgeProgressReadRoute = (req) => (
-  req.method === 'GET' && /^\/[^/]+\/judge-progress$/.test(req.path)
+  req.method === 'GET' && /^\/[^/]+\/(judge-progress|unassigned-dashboard)$/.test(req.path)
 );
 
 router.use((req, res, next) => {
@@ -1922,6 +1922,270 @@ router.get('/:id/judge-progress', async (req, res) => {
   } catch (error) {
     console.error('Get judge progress error:', error);
     res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   GET /api/competition-rounds/:id/unassigned-dashboard
+// @desc    Get unassigned dashboard distribution, children, and drilldown rows
+// @access  Private (Superadmin/National Admin/Stakeholder)
+router.get('/:id/unassigned-dashboard', async (req, res) => {
+  try {
+    const isSuperadmin = req.user?.role === 'superadmin';
+    const isNationalAdmin = req.user?.role === 'admin' && req.user?.adminLevel === 'National';
+    const isStakeholder = req.user?.role === 'stakeholder';
+    const canAccessDashboard = isSuperadmin || isNationalAdmin || isStakeholder;
+
+    if (!canAccessDashboard) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to view unassigned dashboard'
+      });
+    }
+
+    const round = await CompetitionRound.findById(req.params.id);
+    if (!round) {
+      return res.status(404).json({
+        success: false,
+        message: 'Competition round not found'
+      });
+    }
+
+    if (isStakeholder) {
+      const latestActiveRound = await CompetitionRound.findOne({ status: 'active' })
+        .sort({ updatedAt: -1, createdAt: -1 })
+        .select('_id status');
+
+      if (!latestActiveRound || String(latestActiveRound._id) !== String(round._id)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Stakeholders can only view unassigned dashboard for the current active round'
+        });
+      }
+    }
+
+    const normalize = (value) => (value ? value.toString().trim() : '');
+    const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const toExactRegex = (value) => {
+      const normalized = normalize(value);
+      return normalized ? new RegExp(`^${escapeRegExp(normalized)}$`, 'i') : null;
+    };
+    const parsePositiveInt = (value, fallback) => {
+      const parsed = parseInt(value, 10);
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+    };
+
+    const requestedRegion = normalize(req.query.region);
+    const requestedCouncil = normalize(req.query.council);
+    const requestedGroupBy = normalize(req.query.groupBy).toLowerCase();
+    const page = parsePositiveInt(req.query.page, 1);
+    const limit = parsePositiveInt(req.query.limit, 20);
+
+    if (requestedCouncil && !requestedRegion) {
+      return res.status(400).json({
+        success: false,
+        message: 'Council filter requires a region filter'
+      });
+    }
+
+    const scopedRegion = requestedRegion || normalize(round.region);
+    const scopedCouncil = requestedCouncil || normalize(round.council);
+    const scopeRegionRegex = toExactRegex(scopedRegion);
+    const scopeCouncilRegex = toExactRegex(scopedCouncil);
+    const groupBy = ['regions', 'councils'].includes(requestedGroupBy)
+      ? requestedGroupBy
+      : (scopedCouncil || scopedRegion ? 'councils' : 'regions');
+
+    const buildAreaKey = (record, targetGrouping = groupBy) => {
+      const region = record?.region ? String(record.region).trim() : '';
+      const council = record?.council ? String(record.council).trim() : '';
+      if (targetGrouping === 'councils') {
+        return region && council ? `${region}::${council}` : null;
+      }
+      return region || null;
+    };
+
+    let snapshotSubmissionIds = Array.isArray(round.pendingSubmissionsSnapshot)
+      ? round.pendingSubmissionsSnapshot
+      : [];
+    let snapshotDoc = null;
+    if (snapshotSubmissionIds.length === 0) {
+      snapshotDoc = await RoundSnapshot.findOne({ roundId: round._id }).select('submissionIds');
+      snapshotSubmissionIds = snapshotDoc?.submissionIds || [];
+    }
+    const hasSnapshotContext = Boolean(round.activationSnapshotId || snapshotDoc);
+
+    const submissionQuery = hasSnapshotContext
+      ? { _id: { $in: snapshotSubmissionIds }, isDeleted: { $ne: true } }
+      : {
+          year: round.year,
+          level: round.level,
+          status: { $nin: ['promoted', 'eliminated'] },
+          isDeleted: { $ne: true }
+        };
+    if (scopeRegionRegex) submissionQuery.region = scopeRegionRegex;
+    if (scopeCouncilRegex) submissionQuery.council = scopeCouncilRegex;
+
+    const allSubmissions = await Submission.find(submissionQuery).sort({ createdAt: -1 });
+    const allSubmissionIds = allSubmissions.map((submission) => submission._id);
+
+    const assignmentDocs = (round.level === 'Council' || round.level === 'Regional')
+      ? await SubmissionAssignment.find({
+          roundId: round._id,
+          level: round.level,
+          submissionId: { $in: allSubmissionIds },
+          ...(scopeRegionRegex ? { region: scopeRegionRegex } : {}),
+          ...(scopeCouncilRegex ? { council: scopeCouncilRegex } : {})
+        }).select('submissionId region council')
+      : [];
+
+    const assignedSubmissionIdSet = new Set(
+      assignmentDocs.map((assignment) => String(assignment.submissionId))
+    );
+    const unassignedSubmissions = allSubmissions.filter(
+      (submission) => !assignedSubmissionIdSet.has(String(submission._id))
+    );
+
+    const distributionMap = new Map();
+    for (const submission of unassignedSubmissions) {
+      const key = buildAreaKey(submission, groupBy);
+      if (!key) continue;
+      const current = distributionMap.get(key) || {
+        areaId: key,
+        areaLabel: groupBy === 'councils' ? (String(key).split('::')[1] || key) : key,
+        unassignedSubmissions: 0
+      };
+      current.unassignedSubmissions += 1;
+      distributionMap.set(key, current);
+    }
+    const distribution = [...distributionMap.values()]
+      .sort((a, b) => b.unassignedSubmissions - a.unassignedSubmissions);
+
+    const councilTotalsMap = new Map();
+    for (const submission of allSubmissions) {
+      const key = buildAreaKey(submission, 'councils');
+      if (!key) continue;
+      const current = councilTotalsMap.get(key) || 0;
+      councilTotalsMap.set(key, current + 1);
+    }
+
+    const councilAssignedSetMap = new Map();
+    for (const assignment of assignmentDocs) {
+      const key = buildAreaKey(assignment, 'councils');
+      if (!key) continue;
+      if (!councilAssignedSetMap.has(key)) {
+        councilAssignedSetMap.set(key, new Set());
+      }
+      councilAssignedSetMap.get(key).add(String(assignment.submissionId));
+    }
+
+    const councilUnassignedMap = new Map();
+    for (const submission of unassignedSubmissions) {
+      const key = buildAreaKey(submission, 'councils');
+      if (!key) continue;
+      const current = councilUnassignedMap.get(key) || 0;
+      councilUnassignedMap.set(key, current + 1);
+    }
+
+    const councilKeys = [...new Set([
+      ...councilTotalsMap.keys(),
+      ...councilAssignedSetMap.keys(),
+      ...councilUnassignedMap.keys()
+    ])];
+
+    const councilAdminMap = new Map();
+    if (councilKeys.length > 0) {
+      const adminScopeClauses = councilKeys.map((key) => {
+        const [region, council] = String(key).split('::');
+        return { adminRegion: region, adminCouncil: council };
+      });
+      const councilAdmins = await User.find({
+        role: 'admin',
+        adminLevel: 'Council',
+        $or: adminScopeClauses
+      }).select('name adminRegion adminCouncil');
+
+      for (const admin of councilAdmins) {
+        const key = `${String(admin.adminRegion || '').trim()}::${String(admin.adminCouncil || '').trim()}`.toLowerCase();
+        if (!councilAdminMap.has(key)) {
+          councilAdminMap.set(key, admin.name || null);
+        }
+      }
+    }
+
+    const children = councilKeys
+      .map((key) => {
+        const [region, council] = String(key).split('::');
+        const assignedEvaluationCount = councilAssignedSetMap.get(key)?.size || 0;
+        const unassignedCount = councilUnassignedMap.get(key) || 0;
+        const totalCount = councilTotalsMap.get(key) || (assignedEvaluationCount + unassignedCount);
+        const adminName = councilAdminMap.get(String(key).toLowerCase()) || null;
+        return {
+          areaId: key,
+          areaLabel: `${region} - ${council}`,
+          region,
+          council,
+          totalSubmissions: totalCount,
+          assignedEvaluationCount,
+          unassignedSubmissions: unassignedCount,
+          adminName
+        };
+      })
+      .sort((a, b) => b.unassignedSubmissions - a.unassignedSubmissions);
+
+    const submissionsTotal = unassignedSubmissions.length;
+    const submissionsStart = (page - 1) * limit;
+    const paginatedSubmissions = scopedCouncil
+      ? unassignedSubmissions.slice(submissionsStart, submissionsStart + limit)
+      : [];
+
+    const submissionRows = paginatedSubmissions.map((submission) => ({
+      _id: submission._id,
+      teacherName: submission.teacherName || null,
+      teacherEmail: submission.teacherEmail || null,
+      school: submission.school || null,
+      region: submission.region || null,
+      council: submission.council || null,
+      areaOfFocus: submission.category || null,
+      subject: submission.subject || null,
+      status: submission.status || null,
+      submittedAt: submission.submittedAt || submission.updatedAt || submission.createdAt || null,
+      createdAt: submission.createdAt || null
+    }));
+
+    return res.json({
+      success: true,
+      round: {
+        id: round._id.toString(),
+        year: round.year,
+        level: round.level,
+        status: round.status
+      },
+      locationContext: {
+        groupBy,
+        region: scopedRegion || null,
+        council: scopedCouncil || null
+      },
+      summary: {
+        totalSubmissions: allSubmissions.length,
+        assignedEvaluationCount: assignedSubmissionIdSet.size,
+        totalUnassignedSubmissions: unassignedSubmissions.length
+      },
+      distribution,
+      children,
+      submissions: submissionRows,
+      submissionsPagination: {
+        page,
+        limit,
+        total: submissionsTotal,
+        pages: Math.ceil(submissionsTotal / limit)
+      }
+    });
+  } catch (error) {
+    console.error('Get unassigned dashboard error:', error);
+    return res.status(500).json({
       success: false,
       message: error.message || 'Server error'
     });
