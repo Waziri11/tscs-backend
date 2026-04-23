@@ -1679,24 +1679,40 @@ router.get('/:id/judge-progress', async (req, res) => {
       }
     }
 
-    const buildAreaKey = (level, submissionOrAssignment) => {
-      if (level === 'Council') {
-        const region = submissionOrAssignment?.region ? String(submissionOrAssignment.region).trim() : '';
-        const council = submissionOrAssignment?.council ? String(submissionOrAssignment.council).trim() : '';
-        return region && council ? `${region}::${council}` : null;
-      }
-      if (level === 'Regional') {
-        const region = submissionOrAssignment?.region ? String(submissionOrAssignment.region).trim() : '';
-        return region ? region : null;
-      }
-      return level === 'National' ? 'national' : null;
-    };
-
     const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const normalize = (value) => (value ? value.toString().trim() : '');
     const toExactRegex = (value) => {
       const normalized = normalize(value);
       return normalized ? new RegExp(`^${escapeRegExp(normalized)}$`, 'i') : null;
+    };
+
+    const requestedRegion = normalize(req.query.region);
+    const requestedCouncil = normalize(req.query.council);
+    const requestedGroupBy = normalize(req.query.groupBy).toLowerCase();
+
+    if (requestedCouncil && !requestedRegion) {
+      return res.status(400).json({
+        success: false,
+        message: 'Council filter requires a region filter'
+      });
+    }
+
+    const scopedRegion = requestedRegion || normalize(round.region);
+    const scopedCouncil = requestedCouncil || normalize(round.council);
+    const scopeRegionRegex = toExactRegex(scopedRegion);
+    const scopeCouncilRegex = toExactRegex(scopedCouncil);
+
+    const groupBy = ['regions', 'councils'].includes(requestedGroupBy)
+      ? requestedGroupBy
+      : (scopedCouncil || scopedRegion ? 'councils' : 'regions');
+
+    const buildAreaKey = (submissionOrAssignment) => {
+      const region = submissionOrAssignment?.region ? String(submissionOrAssignment.region).trim() : '';
+      const council = submissionOrAssignment?.council ? String(submissionOrAssignment.council).trim() : '';
+      if (groupBy === 'councils') {
+        return region && council ? `${region}::${council}` : null;
+      }
+      return region || null;
     };
     
     let snapshotSubmissionIds = Array.isArray(round.pendingSubmissionsSnapshot)
@@ -1709,9 +1725,6 @@ router.get('/:id/judge-progress', async (req, res) => {
     }
     const hasSnapshotContext = Boolean(round.activationSnapshotId || snapshotDoc);
 
-    const regionRegex = toExactRegex(round.region);
-    const councilRegex = toExactRegex(round.council);
-
     const submissionQuery = hasSnapshotContext
       ? { _id: { $in: snapshotSubmissionIds } }
       : {
@@ -1719,20 +1732,18 @@ router.get('/:id/judge-progress', async (req, res) => {
           level: round.level,
           status: { $nin: ['promoted', 'eliminated'] }
         };
-    if (!hasSnapshotContext) {
-      if (regionRegex) submissionQuery.region = regionRegex;
-      if (councilRegex) submissionQuery.council = councilRegex;
-    }
+    if (scopeRegionRegex) submissionQuery.region = scopeRegionRegex;
+    if (scopeCouncilRegex) submissionQuery.council = scopeCouncilRegex;
 
     const allSubmissions = await Submission.find(submissionQuery);
 
     // Get all judges assigned to this round's level and location
     const judgeQuery = { role: 'judge', assignedLevel: round.level, status: 'active' };
-    if (round.level === 'Council' && regionRegex && councilRegex) {
-      judgeQuery.assignedRegion = regionRegex;
-      judgeQuery.assignedCouncil = councilRegex;
-    } else if (round.level === 'Regional' && regionRegex) {
-      judgeQuery.assignedRegion = regionRegex;
+    if (scopeCouncilRegex && scopeRegionRegex) {
+      judgeQuery.assignedRegion = scopeRegionRegex;
+      judgeQuery.assignedCouncil = scopeCouncilRegex;
+    } else if (scopeRegionRegex) {
+      judgeQuery.assignedRegion = scopeRegionRegex;
     }
 
     // Get full judge details (including name, email, username) for both progress calculation and export
@@ -1741,7 +1752,7 @@ router.get('/:id/judge-progress', async (req, res) => {
     // Area stats for charts: total vs assigned per area (to detect unassigned submissions).
     const areaTotalsMap = new Map();
     for (const submission of allSubmissions) {
-      const key = buildAreaKey(round.level, submission);
+      const key = buildAreaKey(submission);
       if (!key) continue;
       areaTotalsMap.set(key, (areaTotalsMap.get(key) || 0) + 1);
     }
@@ -1750,18 +1761,14 @@ router.get('/:id/judge-progress', async (req, res) => {
       ? await SubmissionAssignment.find({
           roundId: round._id,
           level: round.level,
-          ...(round.level === 'Council' && regionRegex && councilRegex ? {
-            region: regionRegex,
-            council: councilRegex
-          } : round.level === 'Regional' && regionRegex ? {
-            region: regionRegex
-          } : {})
+          ...(scopeRegionRegex ? { region: scopeRegionRegex } : {}),
+          ...(scopeCouncilRegex ? { council: scopeCouncilRegex } : {})
         }).select('submissionId region council')
       : [];
 
     const areaAssignedMap = new Map();
     for (const assignment of assignmentDocsForAreaStats) {
-      const key = buildAreaKey(round.level, assignment);
+      const key = buildAreaKey(assignment);
       if (!key) continue;
       areaAssignedMap.set(key, (areaAssignedMap.get(key) || 0) + 1);
     }
@@ -1770,7 +1777,8 @@ router.get('/:id/judge-progress', async (req, res) => {
       .map((areaId) => ({
         areaId,
         totalSubmissions: areaTotalsMap.get(areaId) || 0,
-        assignedSubmissions: areaAssignedMap.get(areaId) || 0
+        assignedSubmissions: areaAssignedMap.get(areaId) || 0,
+        unassignedSubmissions: Math.max((areaTotalsMap.get(areaId) || 0) - (areaAssignedMap.get(areaId) || 0), 0)
       }))
       .sort((a, b) => b.totalSubmissions - a.totalSubmissions);
 
@@ -1781,12 +1789,8 @@ router.get('/:id/judge-progress', async (req, res) => {
       const assignments = await SubmissionAssignment.find({
         roundId: round._id,
         level: round.level,
-        ...(round.level === 'Council' && regionRegex && councilRegex ? {
-          region: regionRegex,
-          council: councilRegex
-        } : round.level === 'Regional' && regionRegex ? {
-          region: regionRegex
-        } : {})
+        ...(scopeRegionRegex ? { region: scopeRegionRegex } : {}),
+        ...(scopeCouncilRegex ? { council: scopeCouncilRegex } : {})
       }).select('submissionId');
       
       const assignedSubmissionIds = assignments.map(a => a.submissionId);
@@ -1818,12 +1822,8 @@ router.get('/:id/judge-progress', async (req, res) => {
           roundId: round._id,
           judgeId: judge._id,
           level: round.level,
-          ...(round.level === 'Council' && regionRegex && councilRegex ? {
-            region: regionRegex,
-            council: councilRegex
-          } : round.level === 'Regional' && regionRegex ? {
-            region: regionRegex
-          } : {})
+          ...(scopeRegionRegex ? { region: scopeRegionRegex } : {}),
+          ...(scopeCouncilRegex ? { council: scopeCouncilRegex } : {})
         }).select('submissionId');
         
         const assignedIds = assignments.map(a => a.submissionId.toString());
@@ -1863,15 +1863,17 @@ router.get('/:id/judge-progress', async (req, res) => {
     }));
 
     // Calculate overall statistics
-    const totalSubmissions = submissions.length;
+    const totalSubmissions = allSubmissions.length;
     const totalJudges = judges.length;
     const totalEvaluations = await Evaluation.countDocuments({
       roundId: round._id,
-      submissionId: { $in: submissions.map(s => s._id) }
+      submissionId: { $in: allSubmissions.map(s => s._id) }
     });
     const averageProgress = judgeProgress.length > 0
       ? Math.round(judgeProgress.reduce((sum, j) => sum + j.percentage, 0) / judgeProgress.length)
       : 0;
+    const totalAssignedSubmissions = areaStats.reduce((sum, area) => sum + (Number(area.assignedSubmissions) || 0), 0);
+    const totalUnassignedSubmissions = areaStats.reduce((sum, area) => sum + (Number(area.unassignedSubmissions) || 0), 0);
 
     // Calculate actual end time for time remaining
     const getActualEndTime = () => {
@@ -1900,10 +1902,22 @@ router.get('/:id/judge-progress', async (req, res) => {
         totalSubmissions,
         totalJudges,
         totalEvaluations,
-        averageProgress
+        averageProgress,
+        totalAssignedSubmissions,
+        totalUnassignedSubmissions
       },
       judgeProgress,
-      areaStats
+      areaStats,
+      assignmentSummary: {
+        totalSubmissions,
+        assignedSubmissions: totalAssignedSubmissions,
+        unassignedSubmissions: totalUnassignedSubmissions
+      },
+      locationContext: {
+        groupBy,
+        region: scopedRegion || null,
+        council: scopedCouncil || null
+      }
     });
   } catch (error) {
     console.error('Get judge progress error:', error);
