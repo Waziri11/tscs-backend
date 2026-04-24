@@ -61,7 +61,7 @@ const areaLeaderboardEntrySchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pending', 'evaluated', 'promoted', 'eliminated'],
+    enum: ['pending', 'evaluated', 'promoted', 'eliminated', 'disqualified'],
     default: 'pending'
   },
   tieBreakCreatedAt: {

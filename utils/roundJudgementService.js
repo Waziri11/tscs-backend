@@ -253,7 +253,6 @@ const buildActivationSubmissionQuery = (round) => {
     year: round.year,
     level: round.level,
     isDeleted: { $ne: true },
-    disqualified: { $ne: true },
     status: { $nin: ['eliminated', 'promoted'] }
   };
 };
@@ -271,6 +270,14 @@ const getSubmissionAreaDescriptor = (level, submission) => {
 
 const assignRoundSubmissionsToJudges = async (round, submissions) => {
   if (!['Council', 'Regional'].includes(round.level)) {
+    return { assigned: 0, unassigned: 0 };
+  }
+
+  const assignableSubmissions = submissions.filter((submission) => !(
+    submission.disqualified === true || submission.status === 'disqualified'
+  ));
+
+  if (assignableSubmissions.length === 0) {
     return { assigned: 0, unassigned: 0 };
   }
 
@@ -292,7 +299,7 @@ const assignRoundSubmissionsToJudges = async (round, submissions) => {
     judgesByArea.get(judgeAreaId).push(judge);
   }
 
-  const submissionIds = submissions.map((submission) => submission._id);
+  const submissionIds = assignableSubmissions.map((submission) => submission._id);
   const existingAssignments = await SubmissionAssignment.find({
     roundId: round._id,
     submissionId: { $in: submissionIds }
@@ -308,7 +315,7 @@ const assignRoundSubmissionsToJudges = async (round, submissions) => {
   const newAssignments = [];
   let unassigned = 0;
 
-  for (const submission of submissions) {
+  for (const submission of assignableSubmissions) {
     if (assignedSubmissionSet.has(String(submission._id))) {
       continue;
     }
@@ -392,7 +399,7 @@ const activateRoundWithSnapshot = async (roundId, activatedBy) => {
 
   const query = buildActivationSubmissionQuery(round);
   const submissions = await Submission.find(query).select(
-    '_id region council status year level videoFileUrl videoLink preferredLink createdAt'
+    '_id region council status disqualified year level videoFileUrl videoLink preferredLink createdAt'
   );
 
   const hasChunkConfiguration = configuredChunks.length > 0;
@@ -588,7 +595,7 @@ const activateDueChunksForRound = async (roundOrId, options = {}) => {
   const areaSet = buildChunkAreaSet(dueChunks);
   const query = buildActivationSubmissionQuery(round);
   const candidates = await Submission.find(query).select(
-    '_id region council status year level videoFileUrl videoLink preferredLink createdAt'
+    '_id region council status disqualified year level videoFileUrl videoLink preferredLink createdAt'
   );
 
   const snapshot = await RoundSnapshot.findOne({ roundId: round._id });
@@ -830,8 +837,7 @@ const rebuildAreaLeaderboard = async (roundId, areaId, options = {}) => {
   }
 
   const submissions = await Submission.find({
-    _id: { $in: submissionIds },
-    disqualified: { $ne: true }
+    _id: { $in: submissionIds }
   })
     .populate('teacherId', 'name email')
     .lean();
@@ -864,7 +870,7 @@ const rebuildAreaLeaderboard = async (roundId, areaId, options = {}) => {
 
   const entries = submissions.map((submission) => {
     const scoreData = evaluationMap.get(String(submission._id)) || {
-      averageScore: submission.averageScore || 0,
+      averageScore: 0,
       totalEvaluations: 0
     };
     const entry = {
@@ -886,7 +892,9 @@ const rebuildAreaLeaderboard = async (roundId, areaId, options = {}) => {
       tieBreakCreatedAt: submission.createdAt || null
     };
 
-    if (submission.status === 'eliminated') {
+    if (submission.disqualified === true || submission.status === 'disqualified') {
+      entry.status = 'disqualified';
+    } else if (submission.status === 'eliminated') {
       entry.status = 'eliminated';
     } else if (submission.promotedFromRoundId && String(submission.promotedFromRoundId) === String(round._id)) {
       entry.status = 'promoted';
@@ -1128,7 +1136,7 @@ const approveAreaLeaderboardAndPromote = async ({ roundId, areaId, approvedBy, f
 
   const quotaInfo = await resolveQuotaForArea({ round, areaId, areaType });
   const rankedEntries = rankEntriesDeterministically(
-    leaderboard.entries.filter((entry) => entry.status !== 'eliminated')
+    leaderboard.entries.filter((entry) => !['eliminated', 'disqualified'].includes(entry.status))
   );
   const quota = Math.max(0, Math.min(quotaInfo.quota || 0, rankedEntries.length));
   const promotedEntries = rankedEntries.slice(0, quota);
@@ -1420,7 +1428,7 @@ const listAreaLeaderboards = async ({ filters = {}, user }) => {
   }
 
   if (user.role === 'judge' || user.role === 'teacher' || user.role === 'stakeholder') {
-    query.state = 'published';
+    query.state = { $in: ['finalized', 'published'] };
   }
 
   if (user.role === 'admin') {
@@ -1450,12 +1458,10 @@ const listAreaLeaderboards = async ({ filters = {}, user }) => {
       query.areaType = 'national';
       query.areaId = 'national';
     }
-    query.publishedAudiences = { $in: ['judges'] };
   }
 
   if (user.role === 'teacher') {
     query['entries.teacherId'] = user._id;
-    query.publishedAudiences = { $in: ['teachers'] };
   }
 
   let leaderboards = await AreaLeaderboard.find(query).sort({
@@ -1618,13 +1624,13 @@ const findAreaLeaderboardById = async ({ id, user }) => {
   const leaderboard = await AreaLeaderboard.findById(id);
   if (!leaderboard) return null;
 
-  if (['judge', 'teacher', 'stakeholder', 'admin'].includes(user.role) && leaderboard.state !== 'published') {
+  if (
+    ['judge', 'teacher', 'stakeholder', 'admin'].includes(user.role) &&
+    !['finalized', 'published'].includes(leaderboard.state)
+  ) {
     return null;
   }
   if (user.role === 'admin' && !canAdminAccessLeaderboard(user, leaderboard)) {
-    return null;
-  }
-  if (user.role === 'judge' && !leaderboard.publishedAudiences.includes('judges')) {
     return null;
   }
   if (user.role === 'judge') {
@@ -1639,9 +1645,6 @@ const findAreaLeaderboardById = async ({ id, user }) => {
     } else if (user.assignedLevel === 'National') {
       if (leaderboard.areaId !== 'national') return null;
     }
-  }
-  if (user.role === 'teacher' && !leaderboard.publishedAudiences.includes('teachers')) {
-    return null;
   }
   if (user.role === 'teacher') {
     const hasTeacherEntry = leaderboard.entries.some(
