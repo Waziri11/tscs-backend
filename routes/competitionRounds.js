@@ -2183,7 +2183,7 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
       })
       .sort((a, b) => b.unassignedSubmissions - a.unassignedSubmissions);
 
-    const submissionsPool = scopedCouncil ? allSubmissions : [];
+    const submissionsPool = scopedCouncil ? unassignedSubmissions : [];
     const submissionsTotal = submissionsPool.length;
     const submissionsStart = (page - 1) * limit;
     const paginatedSubmissions = submissionsPool.slice(submissionsStart, submissionsStart + limit);
