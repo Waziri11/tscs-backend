@@ -455,19 +455,26 @@ router.get('/unassigned', authorize('admin', 'superadmin', 'stakeholder'), cache
       }
       const hasSnapshotContext = Boolean(round.activationSnapshotId || snapshotDoc);
 
+      const excludedStatuses = ['evaluated', 'promoted', 'eliminated'];
+      const excludedStatusSet = new Set(excludedStatuses);
+      const requestedStatusNormalized = normalize(status).toLowerCase();
+
       const submissionQuery = hasSnapshotContext
         ? { _id: { $in: snapshotSubmissionIds }, isDeleted: { $ne: true } }
         : {
             year: round.year,
             level: round.level,
-            status: { $nin: ['promoted', 'eliminated'] },
             isDeleted: { $ne: true }
           };
 
       if (req.user.role === 'admin') {
         Object.assign(submissionQuery, buildSubmissionQueryForAdmin(req.user));
       }
-      if (status) submissionQuery.status = status;
+      if (status) {
+        submissionQuery.status = status;
+      } else {
+        submissionQuery.status = { $nin: excludedStatuses };
+      }
       if (category) submissionQuery.category = category;
       if (classLevel) submissionQuery.class = classLevel;
       if (subject) submissionQuery.subject = subject;
@@ -486,19 +493,33 @@ router.get('/unassigned', authorize('admin', 'superadmin', 'stakeholder'), cache
         .sort({ createdAt: -1 });
       const submissionIds = allScopedSubmissions.map((sub) => sub._id);
 
-      const assignmentQuery = {
-        roundId: round._id,
-        submissionId: { $in: submissionIds }
-      };
-      const assignmentDocs = submissionIds.length
-        ? await SubmissionAssignment.find(assignmentQuery).select('submissionId')
+      const historicalAssignedSubmissionIds = submissionIds.length
+        ? await SubmissionAssignment.distinct('submissionId', {
+            submissionId: { $in: submissionIds }
+          })
         : [];
-      const assignedSubmissionIdSet = new Set(
-        assignmentDocs.map((doc) => doc.submissionId.toString())
+      const evaluatedSubmissionIds = submissionIds.length
+        ? await Evaluation.distinct('submissionId', {
+            submissionId: { $in: submissionIds }
+          })
+        : [];
+      const historicalAssignedSubmissionIdSet = new Set(
+        historicalAssignedSubmissionIds.map((id) => id.toString())
+      );
+      const evaluatedSubmissionIdSet = new Set(
+        evaluatedSubmissionIds.map((id) => id.toString())
       );
 
       const unassignedSubmissions = allScopedSubmissions.filter(
-        (submission) => !assignedSubmissionIdSet.has(submission._id.toString())
+        (submission) => {
+          const submissionId = submission._id.toString();
+          const submissionStatus = String(submission.status || '').toLowerCase();
+          if (excludedStatusSet.has(requestedStatusNormalized)) return false;
+          if (excludedStatusSet.has(submissionStatus)) return false;
+          if (historicalAssignedSubmissionIdSet.has(submissionId)) return false;
+          if (evaluatedSubmissionIdSet.has(submissionId)) return false;
+          return true;
+        }
       );
       const total = unassignedSubmissions.length;
       const submissions = unassignedSubmissions.slice(skip, skip + limitNum);
