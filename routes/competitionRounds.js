@@ -1725,12 +1725,22 @@ router.get('/:id/judge-progress', async (req, res) => {
     }
     const hasSnapshotContext = Boolean(round.activationSnapshotId || snapshotDoc);
 
+    const activeRoundSubmissionStatusExclusions = ['promoted', 'eliminated', 'disqualified'];
     const submissionQuery = hasSnapshotContext
-      ? { _id: { $in: snapshotSubmissionIds } }
+      ? {
+          _id: { $in: snapshotSubmissionIds },
+          year: round.year,
+          level: round.level,
+          status: { $nin: activeRoundSubmissionStatusExclusions },
+          disqualified: { $ne: true },
+          isDeleted: { $ne: true }
+        }
       : {
           year: round.year,
           level: round.level,
-          status: { $nin: ['promoted', 'eliminated'] }
+          status: { $nin: activeRoundSubmissionStatusExclusions },
+          disqualified: { $ne: true },
+          isDeleted: { $ne: true }
         };
     if (scopeRegionRegex) submissionQuery.region = scopeRegionRegex;
     if (scopeCouncilRegex) submissionQuery.council = scopeCouncilRegex;
