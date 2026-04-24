@@ -1805,12 +1805,62 @@ router.get('/:id/judge-progress', async (req, res) => {
       [...areaAssignedSetMap.entries()].map(([key, submissionSet]) => [key, submissionSet.size])
     );
 
+    const evaluationsForScopedSubmissions = allSubmissionIds.length > 0
+      ? await Evaluation.find({
+          roundId: round._id,
+          submissionId: { $in: allSubmissionIds }
+        })
+          .select('submissionId judgeId')
+          .lean()
+      : [];
+    const evaluatedSubmissionIdSet = new Set(
+      evaluationsForScopedSubmissions.map((evaluation) => String(evaluation.submissionId))
+    );
+    const evaluatedSubmissionJudgePairSet = new Set(
+      evaluationsForScopedSubmissions
+        .filter((evaluation) => evaluation?.judgeId)
+        .map((evaluation) => `${String(evaluation.submissionId)}::${String(evaluation.judgeId)}`)
+    );
+
+    const areaCompletedSetMap = new Map();
+    const areaActiveJudgeSetMap = new Map();
+    for (const submission of allSubmissions) {
+      const areaKey = buildAreaKey(submission);
+      if (!areaKey) continue;
+      const submissionId = String(submission._id);
+
+      if (round.level === 'Council' || round.level === 'Regional') {
+        const latestAssignment = latestAssignmentBySubmissionId.get(submissionId);
+        const latestJudgeId = latestAssignment?.judgeId ? String(latestAssignment.judgeId) : null;
+        if (!latestJudgeId) continue;
+
+        if (!areaActiveJudgeSetMap.has(areaKey)) {
+          areaActiveJudgeSetMap.set(areaKey, new Set());
+        }
+        areaActiveJudgeSetMap.get(areaKey).add(latestJudgeId);
+
+        if (evaluatedSubmissionJudgePairSet.has(`${submissionId}::${latestJudgeId}`)) {
+          if (!areaCompletedSetMap.has(areaKey)) {
+            areaCompletedSetMap.set(areaKey, new Set());
+          }
+          areaCompletedSetMap.get(areaKey).add(submissionId);
+        }
+      } else if (evaluatedSubmissionIdSet.has(submissionId)) {
+        if (!areaCompletedSetMap.has(areaKey)) {
+          areaCompletedSetMap.set(areaKey, new Set());
+        }
+        areaCompletedSetMap.get(areaKey).add(submissionId);
+      }
+    }
+
     const areaStats = [...new Set([...areaTotalsMap.keys(), ...areaAssignedMap.keys()])]
       .map((areaId) => ({
         areaId,
         totalSubmissions: areaTotalsMap.get(areaId) || 0,
         assignedSubmissions: areaAssignedMap.get(areaId) || 0,
-        unassignedSubmissions: Math.max((areaTotalsMap.get(areaId) || 0) - (areaAssignedMap.get(areaId) || 0), 0)
+        unassignedSubmissions: Math.max((areaTotalsMap.get(areaId) || 0) - (areaAssignedMap.get(areaId) || 0), 0),
+        completedSubmissions: areaCompletedSetMap.get(areaId)?.size || 0,
+        activeJudges: areaActiveJudgeSetMap.get(areaId)?.size || 0
       }))
       .sort((a, b) => b.totalSubmissions - a.totalSubmissions);
 
