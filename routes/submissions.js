@@ -375,15 +375,23 @@ router.get('/unassigned', authorize('admin', 'superadmin', 'stakeholder'), cache
       return normalized ? new RegExp(`^${escapeRegExp(normalized)}$`, 'i') : null;
     };
 
-    if (roundId) {
-      if (!mongoose.Types.ObjectId.isValid(roundId)) {
+    let effectiveRoundId = roundId;
+    if (!effectiveRoundId) {
+      const latestActiveRound = await CompetitionRound.findOne({ status: 'active' })
+        .sort({ updatedAt: -1, createdAt: -1 })
+        .select('_id');
+      effectiveRoundId = latestActiveRound?._id?.toString() || null;
+    }
+
+    if (effectiveRoundId) {
+      if (!mongoose.Types.ObjectId.isValid(effectiveRoundId)) {
         return res.status(400).json({
           success: false,
           message: 'Invalid roundId'
         });
       }
 
-      const round = await CompetitionRound.findById(roundId);
+      const round = await CompetitionRound.findById(effectiveRoundId);
       if (!round) {
         return res.status(404).json({
           success: false,
@@ -492,7 +500,7 @@ router.get('/unassigned', authorize('admin', 'superadmin', 'stakeholder'), cache
         pages: Math.ceil(total / limitNum),
         limit: limitNum,
         filters: {
-          roundId,
+          roundId: effectiveRoundId,
           level: round.level,
           status,
           year: round.year,
@@ -505,85 +513,16 @@ router.get('/unassigned', authorize('admin', 'superadmin', 'stakeholder'), cache
         submissions
       });
     }
-
-    const matchQuery = {
-      isDeleted: { $ne: true },
-      level: { $in: ['Council', 'Regional'] }
-    };
-
-    if (req.user.role === 'admin') {
-      Object.assign(matchQuery, buildSubmissionQueryForAdmin(req.user));
-    }
-
-    if (level) {
-      if (level === 'Council' || level === 'Regional') {
-        matchQuery.level = level;
-      } else {
-        return res.status(400).json({
-          success: false,
-          message: 'Unassigned submissions are only available for Council and Regional levels'
-        });
-      }
-    }
-
-    if (status) matchQuery.status = status;
-    if (parsedYear) matchQuery.year = parsedYear;
-    if (category) matchQuery.category = category;
-    if (classLevel) matchQuery.class = classLevel;
-    if (subject) matchQuery.subject = subject;
-    if (region) matchQuery.region = region;
-    if (council) matchQuery.council = council;
-
-    if (search) {
-      matchQuery.$or = [
-        { teacherName: { $regex: search, $options: 'i' } },
-        { school: { $regex: search, $options: 'i' } },
-        { category: { $regex: search, $options: 'i' } },
-        { subject: { $regex: search, $options: 'i' } }
-      ];
-    }
-
-    const aggregationResult = await Submission.aggregate([
-      { $match: matchQuery },
-      {
-        $lookup: {
-          from: 'submissionassignments',
-          localField: '_id',
-          foreignField: 'submissionId',
-          as: 'assignments'
-        }
-      },
-      {
-        $match: {
-          $expr: { $eq: [{ $size: '$assignments' }, 0] }
-        }
-      },
-      { $sort: { createdAt: -1 } },
-      {
-        $facet: {
-          metadata: [{ $count: 'total' }],
-          data: [
-            { $skip: skip },
-            { $limit: limitNum },
-            { $project: { assignments: 0 } }
-          ]
-        }
-      }
-    ]).option({ maxTimeMS: 30000, allowDiskUse: true });
-
-    const aggregatePayload = aggregationResult[0] || { metadata: [], data: [] };
-    const total = aggregatePayload.metadata[0]?.total || 0;
-    const submissions = aggregatePayload.data || [];
-
-    res.json({
+    return res.json({
       success: true,
-      count: submissions.length,
-      total,
+      count: 0,
+      total: 0,
       page: pageNum,
-      pages: Math.ceil(total / limitNum),
+      pages: 0,
       limit: limitNum,
       filters: { roundId: null, level, status, year, category, subject, region, council, search },
-      submissions
+      message: 'No active round found',
+      submissions: []
     });
   } catch (error) {
     console.error('Get unassigned submissions error:', error);
