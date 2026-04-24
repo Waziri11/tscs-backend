@@ -308,6 +308,20 @@ router.delete(
         });
       }
 
+      // Keep "unassigned" strictly equivalent to "currently without judges":
+      // if evaluation already exists for this submission in the assignment's round,
+      // the assignment must remain intact.
+      const evaluationExists = await Evaluation.exists({
+        submissionId: assignment.submissionId._id,
+        roundId: assignment.roundId?._id || assignment.roundId
+      });
+      if (evaluationExists) {
+        return res.status(409).json({
+          success: false,
+          message: 'Cannot remove assignment because this submission has already been evaluated in this round'
+        });
+      }
+
       await logger.logAdminAction(
         'Admin deleted submission assignment',
         req.user._id,
