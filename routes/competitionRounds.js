@@ -1761,12 +1761,24 @@ router.get('/:id/judge-progress', async (req, res) => {
       areaTotalsMap.set(key, (areaTotalsMap.get(key) || 0) + 1);
     }
 
-    const assignmentDocsForAreaStats = (round.level === 'Council' || round.level === 'Regional') && allSubmissionIds.length > 0
+    const assignmentDocsForAreaStatsRaw = (round.level === 'Council' || round.level === 'Regional') && allSubmissionIds.length > 0
       ? await SubmissionAssignment.find({
           roundId: round._id,
           submissionId: { $in: allSubmissionIds }
-        }).select('submissionId judgeId')
+        })
+          .select('submissionId judgeId assignedAt createdAt')
+          .sort({ assignedAt: -1, createdAt: -1, _id: -1 })
+          .lean()
       : [];
+    const assignmentDocsForAreaStats = [];
+    const latestAssignmentBySubmissionId = new Map();
+    for (const assignment of assignmentDocsForAreaStatsRaw) {
+      const submissionId = String(assignment.submissionId);
+      if (!latestAssignmentBySubmissionId.has(submissionId)) {
+        latestAssignmentBySubmissionId.set(submissionId, assignment);
+        assignmentDocsForAreaStats.push(assignment);
+      }
+    }
 
     const areaAssignedSetMap = new Map();
     for (const assignment of assignmentDocsForAreaStats) {
@@ -2263,14 +2275,36 @@ router.get('/:id/judge-progress/export', async (req, res) => {
     const judges = await User.find(judgeQuery).select('name email username assignedLevel assignedRegion assignedCouncil areasOfFocus');
 
     let submissions;
+    let assignedSubmissionIdsByJudge = new Map();
     if (round.level === 'Council' || round.level === 'Regional') {
-      const assignments = await SubmissionAssignment.find({
+      const assignmentsRaw = await SubmissionAssignment.find({
         roundId: round._id,
         level: round.level
-      }).select('submissionId');
+      })
+        .select('submissionId judgeId assignedAt createdAt')
+        .sort({ assignedAt: -1, createdAt: -1, _id: -1 })
+        .lean();
 
-      const assignedSubmissionIds = assignments.map((assignment) => String(assignment.submissionId));
+      const latestAssignments = [];
+      const latestAssignmentBySubmissionId = new Map();
+      for (const assignment of assignmentsRaw) {
+        const submissionId = String(assignment.submissionId);
+        if (!latestAssignmentBySubmissionId.has(submissionId)) {
+          latestAssignmentBySubmissionId.set(submissionId, assignment);
+          latestAssignments.push(assignment);
+        }
+      }
+
+      const assignedSubmissionIds = latestAssignments.map((assignment) => String(assignment.submissionId));
       submissions = allSubmissions.filter((submission) => assignedSubmissionIds.includes(String(submission._id)));
+
+      assignedSubmissionIdsByJudge = latestAssignments.reduce((map, assignment) => {
+        const judgeId = assignment.judgeId ? String(assignment.judgeId) : null;
+        if (!judgeId) return map;
+        if (!map.has(judgeId)) map.set(judgeId, new Set());
+        map.get(judgeId).add(String(assignment.submissionId));
+        return map;
+      }, new Map());
     } else {
       submissions = allSubmissions;
     }
@@ -2285,13 +2319,8 @@ router.get('/:id/judge-progress/export', async (req, res) => {
       
       let assignedSubmissions;
       if (round.level === 'Council' || round.level === 'Regional') {
-        const assignments = await SubmissionAssignment.find({
-          roundId: round._id,
-          judgeId: judge._id,
-          level: round.level
-        }).select('submissionId');
-        const assignedIds = assignments.map((assignment) => String(assignment.submissionId));
-        assignedSubmissions = submissions.filter((submission) => assignedIds.includes(String(submission._id)));
+        const assignedIds = assignedSubmissionIdsByJudge.get(String(judge._id)) || new Set();
+        assignedSubmissions = submissions.filter((submission) => assignedIds.has(String(submission._id)));
       } else {
         assignedSubmissions = submissions;
       }

@@ -148,29 +148,61 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
       });
     }
 
-    // Council/Regional judges: show all submissions assigned to them regardless of round status.
+    // Council/Regional judges: show only submissions where the latest assignment points to this judge.
     if (req.user.role === 'judge' && (req.user.assignedLevel === 'Council' || req.user.assignedLevel === 'Regional')) {
-      let assignmentPairs = [];
-      const assignmentDocs = await SubmissionAssignment.find({
-        judgeId: req.user._id,
-        level: req.user.assignedLevel
-      })
-        .select('submissionId roundId assignedAt createdAt')
-        .sort({ assignedAt: -1, createdAt: -1 })
-        .lean();
-
-      const uniqueSubmissionAssignments = new Map();
-      for (const assignment of assignmentDocs) {
-        const key = String(assignment.submissionId);
-        if (!uniqueSubmissionAssignments.has(key)) {
-          uniqueSubmissionAssignments.set(key, assignment);
+      const latestAssignmentsForJudge = await SubmissionAssignment.aggregate([
+        {
+          $match: {
+            level: req.user.assignedLevel
+          }
+        },
+        {
+          $sort: {
+            assignedAt: -1,
+            createdAt: -1,
+            _id: -1
+          }
+        },
+        {
+          $group: {
+            _id: '$submissionId',
+            latest: { $first: '$$ROOT' }
+          }
+        },
+        {
+          $replaceRoot: {
+            newRoot: '$latest'
+          }
+        },
+        {
+          $match: {
+            judgeId: new mongoose.Types.ObjectId(req.user._id)
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            submissionId: 1,
+            roundId: 1,
+            assignedAt: 1,
+            createdAt: 1
+          }
         }
-      }
+      ]);
 
-      assignmentPairs = [...uniqueSubmissionAssignments.values()].map((assignment) => ({
+      const assignmentPairs = latestAssignmentsForJudge.map((assignment) => ({
         _id: assignment.submissionId
       }));
-      judgeAssignmentMap = uniqueSubmissionAssignments;
+      judgeAssignmentMap = new Map(
+        latestAssignmentsForJudge.map((assignment) => [
+          String(assignment.submissionId),
+          {
+            roundId: assignment.roundId,
+            assignedAt: assignment.assignedAt,
+            createdAt: assignment.createdAt
+          }
+        ])
+      );
       judgeAssignmentsCount = assignmentPairs.length;
 
       if (assignmentPairs.length > 0) {
@@ -991,24 +1023,13 @@ router.get('/:id', async (req, res) => {
       }
 
       if (submission.level === 'Council' || submission.level === 'Regional') {
-        const roundContext = await resolveSubmissionRoundContext(submission, {
-          includeHistorical: true,
-          allowFallbackByYearLevel: true
-        });
+        const latestAssignment = await SubmissionAssignment.findOne({
+          submissionId: submission._id
+        })
+          .sort({ assignedAt: -1, createdAt: -1, _id: -1 })
+          .select('judgeId');
 
-        const preferredRoundId = roundContext.round?._id || submission.roundId || null;
-        const assignment = await SubmissionAssignment.findOne({
-          submissionId: submission._id,
-          judgeId: req.user._id,
-          ...(preferredRoundId ? { roundId: preferredRoundId } : {})
-        }).select('_id');
-
-        const fallbackAssignment = assignment || await SubmissionAssignment.findOne({
-          submissionId: submission._id,
-          judgeId: req.user._id
-        }).select('_id');
-
-        if (!fallbackAssignment) {
+        if (!latestAssignment || String(latestAssignment.judgeId) !== String(req.user._id)) {
           return res.status(403).json({
             success: false,
             message: 'Not authorized to access this submission'

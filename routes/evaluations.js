@@ -257,11 +257,24 @@ router.post('/', authorize('judge'), invalidateCacheOnChange(['cache:/api/leader
     }
 
     if (submission.level === 'Council' || submission.level === 'Regional') {
+      const latestAssignment = await SubmissionAssignment.findOne({
+        submissionId: submission._id
+      })
+        .sort({ assignedAt: -1, createdAt: -1, _id: -1 })
+        .select('judgeId');
+
+      if (!latestAssignment || String(latestAssignment.judgeId) !== String(req.user._id)) {
+        return res.status(403).json({
+          success: false,
+          message: 'You are no longer assigned to evaluate this submission.'
+        });
+      }
+
       const authorization = await resolveJudgeEvaluationAuthorization(
         submissionId,
         req.user._id,
         round._id,
-        { allowVisibleAssignmentFallback: true }
+        { allowVisibleAssignmentFallback: false }
       );
 
       if (!authorization.success) {
