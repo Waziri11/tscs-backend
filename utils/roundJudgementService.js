@@ -1427,7 +1427,7 @@ const listAreaLeaderboards = async ({ filters = {}, user }) => {
     query.chunkIds = new mongoose.Types.ObjectId(filters.chunkId);
   }
 
-  if (user.role === 'judge' || user.role === 'teacher' || user.role === 'stakeholder') {
+  if (user.role === 'admin' || user.role === 'judge' || user.role === 'teacher' || user.role === 'stakeholder') {
     query.state = { $in: ['finalized', 'published'] };
   }
 
