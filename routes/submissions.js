@@ -272,7 +272,7 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
 router.delete(
   '/assignments/:assignmentId',
   authorize('admin', 'superadmin'),
-  invalidateCacheOnChange(['cache:/api/submissions*', 'cache:/api/users*']),
+  invalidateCacheOnChange(['cache:/api/submissions*', 'cache:/api/users*', 'cache:/api/competition-rounds*']),
   async (req, res) => {
     try {
       if (!mongoose.Types.ObjectId.isValid(req.params.assignmentId)) {
@@ -488,10 +488,7 @@ router.get('/unassigned', authorize('admin', 'superadmin', 'stakeholder'), cache
 
       const assignmentQuery = {
         roundId: round._id,
-        level: round.level,
-        submissionId: { $in: submissionIds },
-        ...(scopeRegionRegex ? { region: scopeRegionRegex } : {}),
-        ...(scopeCouncilRegex ? { council: scopeCouncilRegex } : {})
+        submissionId: { $in: submissionIds }
       };
       const assignmentDocs = submissionIds.length
         ? await SubmissionAssignment.find(assignmentQuery).select('submissionId')
@@ -1202,6 +1199,51 @@ router.put('/:id', authorize('teacher', 'admin', 'superadmin'), invalidateCacheO
       { new: true, runValidators: true }
     ).populate('teacherId', 'name email username');
 
+    const assignmentMetadataChanged = updatedSubmission &&
+      (
+        updatedSubmission.level !== submission.level ||
+        String(updatedSubmission.region || '') !== String(submission.region || '') ||
+        String(updatedSubmission.council || '') !== String(submission.council || '')
+      );
+
+    // Keep assignment metadata aligned with current submission location/level for actionable round scopes.
+    if (
+      assignmentMetadataChanged &&
+      ['Council', 'Regional'].includes(updatedSubmission.level) &&
+      updatedSubmission.region
+    ) {
+      const actionableRoundIds = new Set();
+      if (submission.roundId) actionableRoundIds.add(String(submission.roundId));
+      if (updatedSubmission.roundId) actionableRoundIds.add(String(updatedSubmission.roundId));
+
+      if (actionableRoundIds.size === 0 && updatedSubmission.year) {
+        const actionableRounds = await CompetitionRound.find({
+          year: updatedSubmission.year,
+          level: updatedSubmission.level,
+          status: { $in: ['active', 'ended'] }
+        }).select('_id');
+        for (const round of actionableRounds) {
+          actionableRoundIds.add(String(round._id));
+        }
+      }
+
+      if (actionableRoundIds.size > 0) {
+        await SubmissionAssignment.updateMany(
+          {
+            submissionId: updatedSubmission._id,
+            roundId: { $in: [...actionableRoundIds] }
+          },
+          {
+            $set: {
+              level: updatedSubmission.level,
+              region: updatedSubmission.region,
+              council: updatedSubmission.council || null
+            }
+          }
+        );
+      }
+    }
+
     // Determine log action based on what was updated
     const levelChanged = req.body.level && req.body.level !== submission.level;
     const statusChanged = req.body.status && req.body.status !== submission.status;
@@ -1785,102 +1827,107 @@ router.get('/:id/assigned-judge', authorize('admin', 'superadmin'), async (req, 
 // @route   POST /api/submissions/:id/assign-judge
 // @desc    Manually assign or reassign a submission to a judge (Admin/Superadmin only)
 // @access  Private (Admin, Superadmin)
-router.post('/:id/assign-judge', authorize('admin', 'superadmin'), async (req, res) => {
-  try {
-    const { judgeId } = req.body;
+router.post(
+  '/:id/assign-judge',
+  authorize('admin', 'superadmin'),
+  invalidateCacheOnChange(['cache:/api/submissions*', 'cache:/api/competition-rounds*']),
+  async (req, res) => {
+    try {
+      const { judgeId } = req.body;
 
-    if (!judgeId) {
-      return res.status(400).json({
+      if (!judgeId) {
+        return res.status(400).json({
+          success: false,
+          message: 'Judge ID is required'
+        });
+      }
+
+      const submission = await Submission.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
+      if (!submission) {
+        return res.status(404).json({
+          success: false,
+          message: 'Submission not found'
+        });
+      }
+      if (req.user.role === 'admin' && !canAdminAccessSubmission(req.user, submission)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Not authorized to access this submission'
+        });
+      }
+
+      const judge = await User.findById(judgeId);
+      if (!judge) {
+        return res.status(404).json({
+          success: false,
+          message: 'Judge not found'
+        });
+      }
+      if (req.user.role === 'admin' && !canAdminAccessUser(req.user, judge)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Not authorized to assign this judge'
+        });
+      }
+
+      const roundResolution = await resolveSubmissionRoundContext(submission, {
+        explicitRoundId: req.body.roundId || req.query.roundId || null,
+        includeHistorical: false,
+        allowFallbackByYearLevel: true
+      });
+
+      if (!roundResolution.round) {
+        return res.status(400).json({
+          success: false,
+          message: 'No active or ended round found for this submission'
+        });
+      }
+
+      const result = await manuallyAssignSubmission(req.params.id, judgeId, {
+        roundId: roundResolution.round._id
+      });
+
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: result.error
+        });
+      }
+
+      // Log the assignment/reassignment
+      await logger.logAdminAction(
+        result.message.includes('reassigned') ? 'Admin reassigned submission to judge' : 'Admin assigned submission to judge',
+        req.user._id,
+        req,
+        {
+          submissionId: req.params.id,
+          judgeId: judgeId,
+          assignmentId: result.assignment._id.toString()
+        },
+        'success',
+        'update'
+      );
+
+      res.json({
+        success: true,
+        assignment: {
+          id: result.assignment._id,
+          submissionId: result.assignment.submissionId,
+          judgeId: result.assignment.judgeId,
+          assignedAt: result.assignment.assignedAt,
+          roundId: result.assignment.roundId,
+          roundStatus: roundResolution.round.status
+        },
+        message: result.message
+      });
+    } catch (error) {
+      console.error('Assign judge error:', error);
+      res.status(500).json({
         success: false,
-        message: 'Judge ID is required'
+        message: error.message || 'Server error'
       });
     }
-
-    const submission = await Submission.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
-    if (!submission) {
-      return res.status(404).json({
-        success: false,
-        message: 'Submission not found'
-      });
-    }
-    if (req.user.role === 'admin' && !canAdminAccessSubmission(req.user, submission)) {
-      return res.status(403).json({
-        success: false,
-        message: 'Not authorized to access this submission'
-      });
-    }
-
-    const judge = await User.findById(judgeId);
-    if (!judge) {
-      return res.status(404).json({
-        success: false,
-        message: 'Judge not found'
-      });
-    }
-    if (req.user.role === 'admin' && !canAdminAccessUser(req.user, judge)) {
-      return res.status(403).json({
-        success: false,
-        message: 'Not authorized to assign this judge'
-      });
-    }
-
-    const roundResolution = await resolveSubmissionRoundContext(submission, {
-      explicitRoundId: req.body.roundId || req.query.roundId || null,
-      includeHistorical: false,
-      allowFallbackByYearLevel: true
-    });
-
-    if (!roundResolution.round) {
-      return res.status(400).json({
-        success: false,
-        message: 'No active or ended round found for this submission'
-      });
-    }
-
-    const result = await manuallyAssignSubmission(req.params.id, judgeId, {
-      roundId: roundResolution.round._id
-    });
-
-    if (!result.success) {
-      return res.status(400).json({
-        success: false,
-        message: result.error
-      });
-    }
-
-    // Log the assignment/reassignment
-    await logger.logAdminAction(
-      result.message.includes('reassigned') ? 'Admin reassigned submission to judge' : 'Admin assigned submission to judge',
-      req.user._id,
-      req,
-      {
-        submissionId: req.params.id,
-        judgeId: judgeId,
-        assignmentId: result.assignment._id.toString()
-      },
-      'success',
-      'update'
-    );
-
-    res.json({
-      success: true,
-      assignment: {
-        id: result.assignment._id,
-        submissionId: result.assignment.submissionId,
-        judgeId: result.assignment.judgeId,
-        assignedAt: result.assignment.assignedAt,
-        roundId: result.assignment.roundId,
-        roundStatus: roundResolution.round.status
-      },
-      message: result.message
-    });
-  } catch (error) {
-    console.error('Assign judge error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Server error'
-    });
   }
-});
+);
 
 module.exports = router;

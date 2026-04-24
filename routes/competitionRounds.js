@@ -1736,6 +1736,10 @@ router.get('/:id/judge-progress', async (req, res) => {
     if (scopeCouncilRegex) submissionQuery.council = scopeCouncilRegex;
 
     const allSubmissions = await Submission.find(submissionQuery);
+    const allSubmissionIds = allSubmissions.map((submission) => submission._id);
+    const submissionById = new Map(
+      allSubmissions.map((submission) => [String(submission._id), submission])
+    );
 
     // Get all judges assigned to this round's level and location
     const judgeQuery = { role: 'judge', assignedLevel: round.level, status: 'active' };
@@ -1757,21 +1761,27 @@ router.get('/:id/judge-progress', async (req, res) => {
       areaTotalsMap.set(key, (areaTotalsMap.get(key) || 0) + 1);
     }
 
-    const assignmentDocsForAreaStats = (round.level === 'Council' || round.level === 'Regional')
+    const assignmentDocsForAreaStats = (round.level === 'Council' || round.level === 'Regional') && allSubmissionIds.length > 0
       ? await SubmissionAssignment.find({
           roundId: round._id,
-          level: round.level,
-          ...(scopeRegionRegex ? { region: scopeRegionRegex } : {}),
-          ...(scopeCouncilRegex ? { council: scopeCouncilRegex } : {})
-        }).select('submissionId region council')
+          submissionId: { $in: allSubmissionIds }
+        }).select('submissionId judgeId')
       : [];
 
-    const areaAssignedMap = new Map();
+    const areaAssignedSetMap = new Map();
     for (const assignment of assignmentDocsForAreaStats) {
-      const key = buildAreaKey(assignment);
+      const submission = submissionById.get(String(assignment.submissionId));
+      if (!submission) continue;
+      const key = buildAreaKey(submission);
       if (!key) continue;
-      areaAssignedMap.set(key, (areaAssignedMap.get(key) || 0) + 1);
+      if (!areaAssignedSetMap.has(key)) {
+        areaAssignedSetMap.set(key, new Set());
+      }
+      areaAssignedSetMap.get(key).add(String(assignment.submissionId));
     }
+    const areaAssignedMap = new Map(
+      [...areaAssignedSetMap.entries()].map(([key, submissionSet]) => [key, submissionSet.size])
+    );
 
     const areaStats = [...new Set([...areaTotalsMap.keys(), ...areaAssignedMap.keys()])]
       .map((areaId) => ({
@@ -1786,20 +1796,25 @@ router.get('/:id/judge-progress', async (req, res) => {
     let submissions;
     if (round.level === 'Council' || round.level === 'Regional') {
       // For Council/Regional: Get submissions that have assignments
-      const assignments = await SubmissionAssignment.find({
-        roundId: round._id,
-        level: round.level,
-        ...(scopeRegionRegex ? { region: scopeRegionRegex } : {}),
-        ...(scopeCouncilRegex ? { council: scopeCouncilRegex } : {})
-      }).select('submissionId');
-      
-      const assignedSubmissionIds = assignments.map(a => a.submissionId);
+      const assignedSubmissionIds = new Set(
+        assignmentDocsForAreaStats.map((assignment) => String(assignment.submissionId))
+      );
       submissions = allSubmissions.filter(sub => 
-        assignedSubmissionIds.some(id => id.toString() === sub._id.toString())
+        assignedSubmissionIds.has(sub._id.toString())
       );
     } else {
       // National level: Judges see all submissions at National level (not filtered by areaOfFocus)
       submissions = allSubmissions;
+    }
+
+    const assignedSubmissionIdsByJudge = new Map();
+    for (const assignment of assignmentDocsForAreaStats) {
+      const judgeId = assignment.judgeId ? String(assignment.judgeId) : null;
+      if (!judgeId) continue;
+      if (!assignedSubmissionIdsByJudge.has(judgeId)) {
+        assignedSubmissionIdsByJudge.set(judgeId, new Set());
+      }
+      assignedSubmissionIdsByJudge.get(judgeId).add(String(assignment.submissionId));
     }
 
     // Calculate progress for each judge
@@ -1818,17 +1833,9 @@ router.get('/:id/judge-progress', async (req, res) => {
       let assignedSubmissions;
       if (round.level === 'Council' || round.level === 'Regional') {
         // For Council/Regional: Get only submissions assigned to this judge
-        const assignments = await SubmissionAssignment.find({
-          roundId: round._id,
-          judgeId: judge._id,
-          level: round.level,
-          ...(scopeRegionRegex ? { region: scopeRegionRegex } : {}),
-          ...(scopeCouncilRegex ? { council: scopeCouncilRegex } : {})
-        }).select('submissionId');
-        
-        const assignedIds = assignments.map(a => a.submissionId.toString());
+        const assignedIds = assignedSubmissionIdsByJudge.get(String(judge._id)) || new Set();
         assignedSubmissions = submissions.filter(sub => 
-          assignedIds.includes(sub._id.toString())
+          assignedIds.has(sub._id.toString())
         );
       } else {
         // National level: Judges see ALL submissions at National level (not filtered by areaOfFocus)
@@ -2030,15 +2037,15 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
 
     const allSubmissions = await Submission.find(submissionQuery).sort({ createdAt: -1 });
     const allSubmissionIds = allSubmissions.map((submission) => submission._id);
+    const submissionById = new Map(
+      allSubmissions.map((submission) => [String(submission._id), submission])
+    );
 
-    const assignmentDocs = (round.level === 'Council' || round.level === 'Regional')
+    const assignmentDocs = (round.level === 'Council' || round.level === 'Regional') && allSubmissionIds.length > 0
       ? await SubmissionAssignment.find({
           roundId: round._id,
-          level: round.level,
-          submissionId: { $in: allSubmissionIds },
-          ...(scopeRegionRegex ? { region: scopeRegionRegex } : {}),
-          ...(scopeCouncilRegex ? { council: scopeCouncilRegex } : {})
-        }).select('submissionId judgeId region council')
+          submissionId: { $in: allSubmissionIds }
+        }).select('submissionId judgeId')
       : [];
 
     const assignedSubmissionIdSet = new Set(
@@ -2073,7 +2080,9 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
 
     const councilAssignedSetMap = new Map();
     for (const assignment of assignmentDocs) {
-      const key = buildAreaKey(assignment, 'councils');
+      const submission = submissionById.get(String(assignment.submissionId));
+      if (!submission) continue;
+      const key = buildAreaKey(submission, 'councils');
       if (!key) continue;
       if (!councilAssignedSetMap.has(key)) {
         councilAssignedSetMap.set(key, new Set());
