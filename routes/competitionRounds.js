@@ -2038,7 +2038,7 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
           submissionId: { $in: allSubmissionIds },
           ...(scopeRegionRegex ? { region: scopeRegionRegex } : {}),
           ...(scopeCouncilRegex ? { council: scopeCouncilRegex } : {})
-        }).select('submissionId region council')
+        }).select('submissionId judgeId region council')
       : [];
 
     const assignedSubmissionIdSet = new Set(
@@ -2115,6 +2115,54 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
       }
     }
 
+    const assignmentBySubmissionId = new Map();
+    const assignedJudgeIds = new Set();
+    for (const assignment of assignmentDocs) {
+      const submissionId = String(assignment.submissionId);
+      if (!assignmentBySubmissionId.has(submissionId)) {
+        assignmentBySubmissionId.set(submissionId, assignment);
+      }
+      if (assignment.judgeId) {
+        assignedJudgeIds.add(String(assignment.judgeId));
+      }
+    }
+
+    const assignedJudgeMap = new Map();
+    if (assignedJudgeIds.size > 0) {
+      const judges = await User.find({ _id: { $in: [...assignedJudgeIds] } })
+        .select('name email username');
+      for (const judge of judges) {
+        assignedJudgeMap.set(String(judge._id), {
+          judgeId: String(judge._id),
+          judgeName: judge.name || judge.username || null,
+          judgeEmail: judge.email || null
+        });
+      }
+    }
+
+    const regionalAdminMap = new Map();
+    if (round.level === 'Regional') {
+      const regionSet = new Set(
+        allSubmissions
+          .map((submission) => String(submission.region || '').trim())
+          .filter(Boolean)
+      );
+      if (regionSet.size > 0) {
+        const regionalAdmins = await User.find({
+          role: 'admin',
+          adminLevel: 'Regional',
+          adminRegion: { $in: [...regionSet] }
+        }).select('name adminRegion');
+
+        for (const admin of regionalAdmins) {
+          const key = String(admin.adminRegion || '').trim().toLowerCase();
+          if (key && !regionalAdminMap.has(key)) {
+            regionalAdminMap.set(key, admin.name || null);
+          }
+        }
+      }
+    }
+
     const children = councilKeys
       .map((key) => {
         const [region, council] = String(key).split('::');
@@ -2135,13 +2183,15 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
       })
       .sort((a, b) => b.unassignedSubmissions - a.unassignedSubmissions);
 
-    const submissionsTotal = unassignedSubmissions.length;
+    const submissionsPool = scopedCouncil ? allSubmissions : [];
+    const submissionsTotal = submissionsPool.length;
     const submissionsStart = (page - 1) * limit;
-    const paginatedSubmissions = scopedCouncil
-      ? unassignedSubmissions.slice(submissionsStart, submissionsStart + limit)
-      : [];
+    const paginatedSubmissions = submissionsPool.slice(submissionsStart, submissionsStart + limit);
 
     const submissionRows = paginatedSubmissions.map((submission) => ({
+      ...(assignmentBySubmissionId.has(String(submission._id))
+        ? (assignedJudgeMap.get(String(assignmentBySubmissionId.get(String(submission._id)).judgeId)) || {})
+        : {}),
       _id: submission._id,
       teacherName: submission.teacherName || null,
       teacherEmail: submission.teacherEmail || null,
@@ -2151,6 +2201,16 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
       areaOfFocus: submission.category || null,
       subject: submission.subject || null,
       status: submission.status || null,
+      assignmentStatus: assignmentBySubmissionId.has(String(submission._id)) ? 'assigned' : 'unassigned',
+      assignedJudgeName: assignmentBySubmissionId.has(String(submission._id))
+        ? (assignedJudgeMap.get(String(assignmentBySubmissionId.get(String(submission._id)).judgeId))?.judgeName || null)
+        : null,
+      assignedJudgeEmail: assignmentBySubmissionId.has(String(submission._id))
+        ? (assignedJudgeMap.get(String(assignmentBySubmissionId.get(String(submission._id)).judgeId))?.judgeEmail || null)
+        : null,
+      areaAdminName: round.level === 'Council'
+        ? (councilAdminMap.get(`${String(submission.region || '').trim()}::${String(submission.council || '').trim()}`.toLowerCase()) || null)
+        : (regionalAdminMap.get(String(submission.region || '').trim().toLowerCase()) || null),
       submittedAt: submission.submittedAt || submission.updatedAt || submission.createdAt || null,
       createdAt: submission.createdAt || null
     }));
