@@ -2036,17 +2036,19 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
     }
     const hasSnapshotContext = Boolean(round.activationSnapshotId || snapshotDoc);
 
-    const excludedStatuses = ['evaluated', 'promoted', 'eliminated'];
+    const excludedStatuses = ['evaluated', 'promoted', 'eliminated', 'disqualified'];
     const submissionQuery = hasSnapshotContext
       ? {
           _id: { $in: snapshotSubmissionIds },
           status: { $nin: excludedStatuses },
+          disqualified: { $ne: true },
           isDeleted: { $ne: true }
         }
       : {
           year: round.year,
           level: round.level,
           status: { $nin: excludedStatuses },
+          disqualified: { $ne: true },
           isDeleted: { $ne: true }
         };
     if (scopeRegionRegex) submissionQuery.region = scopeRegionRegex;

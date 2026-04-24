@@ -487,7 +487,7 @@ router.get('/unassigned', authorize('admin', 'superadmin', 'stakeholder'), cache
       }
       const hasSnapshotContext = Boolean(round.activationSnapshotId || snapshotDoc);
 
-      const excludedStatuses = ['evaluated', 'promoted', 'eliminated'];
+      const excludedStatuses = ['evaluated', 'promoted', 'eliminated', 'disqualified'];
       const excludedStatusSet = new Set(excludedStatuses);
       const requestedStatusNormalized = normalize(status).toLowerCase();
 
@@ -507,6 +507,7 @@ router.get('/unassigned', authorize('admin', 'superadmin', 'stakeholder'), cache
       } else {
         submissionQuery.status = { $nin: excludedStatuses };
       }
+      submissionQuery.disqualified = { $ne: true };
       if (category) submissionQuery.category = category;
       if (classLevel) submissionQuery.class = classLevel;
       if (subject) submissionQuery.subject = subject;
@@ -548,6 +549,7 @@ router.get('/unassigned', authorize('admin', 'superadmin', 'stakeholder'), cache
           const submissionStatus = String(submission.status || '').toLowerCase();
           if (excludedStatusSet.has(requestedStatusNormalized)) return false;
           if (excludedStatusSet.has(submissionStatus)) return false;
+          if (submission.disqualified === true) return false;
           if (historicalAssignedSubmissionIdSet.has(submissionId)) return false;
           if (evaluatedSubmissionIdSet.has(submissionId)) return false;
           return true;
