@@ -1724,6 +1724,9 @@ router.get('/:id/judge-progress', async (req, res) => {
       snapshotSubmissionIds = snapshotDoc?.submissionIds || [];
     }
     const hasSnapshotContext = Boolean(round.activationSnapshotId || snapshotDoc);
+    const roundScopedSubmissionExists = hasSnapshotContext
+      ? false
+      : Boolean(await Submission.exists({ roundId: round._id, isDeleted: { $ne: true } }));
 
     const activeRoundSubmissionStatusExclusions = ['promoted', 'eliminated', 'disqualified'];
     const submissionQuery = hasSnapshotContext
@@ -1735,7 +1738,16 @@ router.get('/:id/judge-progress', async (req, res) => {
           disqualified: { $ne: true },
           isDeleted: { $ne: true }
         }
-      : {
+      : roundScopedSubmissionExists
+        ? {
+            roundId: round._id,
+            year: round.year,
+            level: round.level,
+            status: { $nin: activeRoundSubmissionStatusExclusions },
+            disqualified: { $ne: true },
+            isDeleted: { $ne: true }
+          }
+        : {
           year: round.year,
           level: round.level,
           status: { $nin: activeRoundSubmissionStatusExclusions },
@@ -1944,10 +1956,21 @@ router.get('/:id/judge-progress', async (req, res) => {
     // Calculate overall statistics
     const totalSubmissions = allSubmissions.length;
     const totalJudges = judges.length;
-    const totalEvaluations = await Evaluation.countDocuments({
-      roundId: round._id,
-      submissionId: { $in: allSubmissions.map(s => s._id) }
-    });
+    let totalEvaluations;
+    if (round.level === 'Council' || round.level === 'Regional') {
+      const latestAssignedCompletedSubmissionIds = new Set();
+      for (const assignment of assignmentDocsForAreaStats) {
+        const submissionId = String(assignment.submissionId);
+        const judgeId = assignment.judgeId ? String(assignment.judgeId) : null;
+        if (!judgeId) continue;
+        if (evaluatedSubmissionJudgePairSet.has(`${submissionId}::${judgeId}`)) {
+          latestAssignedCompletedSubmissionIds.add(submissionId);
+        }
+      }
+      totalEvaluations = latestAssignedCompletedSubmissionIds.size;
+    } else {
+      totalEvaluations = evaluatedSubmissionIdSet.size;
+    }
     const averageProgress = judgeProgress.length > 0
       ? Math.round(judgeProgress.reduce((sum, j) => sum + j.percentage, 0) / judgeProgress.length)
       : 0;
@@ -1995,7 +2018,8 @@ router.get('/:id/judge-progress', async (req, res) => {
       locationContext: {
         groupBy,
         region: scopedRegion || null,
-        council: scopedCouncil || null
+        council: scopedCouncil || null,
+        dataScope: hasSnapshotContext ? 'snapshot' : (roundScopedSubmissionExists ? 'roundId' : 'legacy-year-level')
       }
     });
   } catch (error) {
@@ -2095,6 +2119,9 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
       snapshotSubmissionIds = snapshotDoc?.submissionIds || [];
     }
     const hasSnapshotContext = Boolean(round.activationSnapshotId || snapshotDoc);
+    const roundScopedSubmissionExists = hasSnapshotContext
+      ? false
+      : Boolean(await Submission.exists({ roundId: round._id, isDeleted: { $ne: true } }));
 
     const excludedStatuses = ['evaluated', 'promoted', 'eliminated', 'disqualified'];
     const submissionQuery = hasSnapshotContext
@@ -2104,13 +2131,22 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
           disqualified: { $ne: true },
           isDeleted: { $ne: true }
         }
-      : {
-          year: round.year,
-          level: round.level,
-          status: { $nin: excludedStatuses },
-          disqualified: { $ne: true },
-          isDeleted: { $ne: true }
-        };
+      : roundScopedSubmissionExists
+        ? {
+            roundId: round._id,
+            year: round.year,
+            level: round.level,
+            status: { $nin: excludedStatuses },
+            disqualified: { $ne: true },
+            isDeleted: { $ne: true }
+          }
+        : {
+            year: round.year,
+            level: round.level,
+            status: { $nin: excludedStatuses },
+            disqualified: { $ne: true },
+            isDeleted: { $ne: true }
+          };
     if (scopeRegionRegex) submissionQuery.region = scopeRegionRegex;
     if (scopeCouncilRegex) submissionQuery.council = scopeCouncilRegex;
 
@@ -2271,7 +2307,8 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
       locationContext: {
         groupBy,
         region: scopedRegion || null,
-        council: scopedCouncil || null
+        council: scopedCouncil || null,
+        dataScope: hasSnapshotContext ? 'snapshot' : (roundScopedSubmissionExists ? 'roundId' : 'legacy-year-level')
       },
       summary: {
         totalSubmissions: allSubmissions.length,
@@ -2320,10 +2357,37 @@ router.get('/:id/judge-progress/export', async (req, res) => {
       snapshotSubmissionIds = snapshotDoc?.submissionIds || [];
     }
     const hasSnapshotContext = Boolean(round.activationSnapshotId || snapshotDoc);
+    const roundScopedSubmissionExists = hasSnapshotContext
+      ? false
+      : Boolean(await Submission.exists({ roundId: round._id, isDeleted: { $ne: true } }));
+    const activeRoundSubmissionStatusExclusions = ['promoted', 'eliminated', 'disqualified'];
+    const submissionQuery = hasSnapshotContext
+      ? {
+          _id: { $in: snapshotSubmissionIds },
+          year: round.year,
+          level: round.level,
+          status: { $nin: activeRoundSubmissionStatusExclusions },
+          disqualified: { $ne: true },
+          isDeleted: { $ne: true }
+        }
+      : roundScopedSubmissionExists
+        ? {
+            roundId: round._id,
+            year: round.year,
+            level: round.level,
+            status: { $nin: activeRoundSubmissionStatusExclusions },
+            disqualified: { $ne: true },
+            isDeleted: { $ne: true }
+          }
+        : {
+            year: round.year,
+            level: round.level,
+            status: { $nin: activeRoundSubmissionStatusExclusions },
+            disqualified: { $ne: true },
+            isDeleted: { $ne: true }
+          };
 
-    const allSubmissions = hasSnapshotContext
-      ? await Submission.find({ _id: { $in: snapshotSubmissionIds } })
-      : await Submission.find({ year: round.year, level: round.level });
+    const allSubmissions = await Submission.find(submissionQuery);
 
     // Get all judges assigned to this round's level
     const judgeQuery = { role: 'judge', assignedLevel: round.level, status: 'active' };
