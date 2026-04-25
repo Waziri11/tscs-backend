@@ -1237,6 +1237,18 @@ router.put('/:id', authorize('teacher', 'admin', 'superadmin'), invalidateCacheO
       });
     }
 
+    // Promotion/demotion (level change) is superadmin-only.
+    if (
+      req.user.role === 'admin'
+      && Object.prototype.hasOwnProperty.call(req.body || {}, 'level')
+      && String(req.body.level) !== String(submission.level)
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only superadmin can promote or demote submissions'
+      });
+    }
+
     const updatedSubmission = await Submission.findOneAndUpdate(
       { _id: req.params.id, isDeleted: { $ne: true } },
       req.body,
