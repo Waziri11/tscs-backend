@@ -55,6 +55,10 @@ const areaLeaderboardEntrySchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  totalScore: {
+    type: Number,
+    default: 0
+  },
   totalEvaluations: {
     type: Number,
     default: 0

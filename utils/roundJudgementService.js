@@ -65,8 +65,12 @@ const buildAreaQuery = (level, areaId) => {
 };
 
 const deterministicRankSort = (a, b) => {
-  const aScore = typeof a.averageScore === 'number' ? a.averageScore : 0;
-  const bScore = typeof b.averageScore === 'number' ? b.averageScore : 0;
+  const aScore = typeof a.totalScore === 'number'
+    ? a.totalScore
+    : (typeof a.averageScore === 'number' ? a.averageScore : 0);
+  const bScore = typeof b.totalScore === 'number'
+    ? b.totalScore
+    : (typeof b.averageScore === 'number' ? b.averageScore : 0);
   if (bScore !== aScore) return bScore - aScore;
 
   const aEvaluations = typeof a.totalEvaluations === 'number' ? a.totalEvaluations : 0;
@@ -853,6 +857,7 @@ const rebuildAreaLeaderboard = async (roundId, areaId, options = {}) => {
       $group: {
         _id: '$submissionId',
         averageScore: { $avg: '$averageScore' },
+        totalScore: { $avg: '$totalScore' },
         totalEvaluations: { $sum: 1 }
       }
     }
@@ -863,6 +868,7 @@ const rebuildAreaLeaderboard = async (roundId, areaId, options = {}) => {
       String(item._id),
       {
         averageScore: Math.round((item.averageScore || 0) * 100) / 100,
+        totalScore: Math.round((item.totalScore || 0) * 100) / 100,
         totalEvaluations: item.totalEvaluations || 0
       }
     ])
@@ -871,6 +877,7 @@ const rebuildAreaLeaderboard = async (roundId, areaId, options = {}) => {
   const entries = submissions.map((submission) => {
     const scoreData = evaluationMap.get(String(submission._id)) || {
       averageScore: 0,
+      totalScore: 0,
       totalEvaluations: 0
     };
     const entry = {
@@ -887,6 +894,7 @@ const rebuildAreaLeaderboard = async (roundId, areaId, options = {}) => {
       areaOfFocus: submission.areaOfFocus || 'Unknown',
       rank: 0,
       averageScore: scoreData.averageScore,
+      totalScore: scoreData.totalScore,
       totalEvaluations: scoreData.totalEvaluations,
       status: scoreData.totalEvaluations > 0 ? 'evaluated' : 'pending',
       tieBreakCreatedAt: submission.createdAt || null
@@ -1217,7 +1225,7 @@ const approveAreaLeaderboardAndPromote = async ({ roundId, areaId, approvedBy, f
           toAreaId: nextLevel === 'Regional' ? (entry.region || areaLocation.region) : nextLevel === 'National' ? 'national' : null,
           status: 'promoted',
           rankAtDecision: entry.rank,
-          scoreAtDecision: entry.averageScore,
+          scoreAtDecision: (typeof entry.totalScore === 'number' ? entry.totalScore : entry.averageScore),
           quotaScopeType: quotaInfo.sourceType,
           quotaScopeId: quotaInfo.sourceId,
           approvedBy
@@ -1238,7 +1246,7 @@ const approveAreaLeaderboardAndPromote = async ({ roundId, areaId, approvedBy, f
           toAreaId: null,
           status: 'eliminated',
           rankAtDecision: entry.rank,
-          scoreAtDecision: entry.averageScore,
+          scoreAtDecision: (typeof entry.totalScore === 'number' ? entry.totalScore : entry.averageScore),
           quotaScopeType: quotaInfo.sourceType,
           quotaScopeId: quotaInfo.sourceId,
           approvedBy
@@ -1470,6 +1478,27 @@ const listAreaLeaderboards = async ({ filters = {}, user }) => {
     areaType: 1,
     areaId: 1
   });
+
+  const hasMissingTotalScore = (leaderboard) =>
+    Array.isArray(leaderboard?.entries)
+      && leaderboard.entries.some((entry) => typeof entry?.totalScore !== 'number');
+
+  if (leaderboards.some(hasMissingTotalScore)) {
+    const refreshedLeaderboards = [];
+    for (const leaderboard of leaderboards) {
+      if (!hasMissingTotalScore(leaderboard)) {
+        refreshedLeaderboards.push(leaderboard);
+        continue;
+      }
+      const rebuilt = await rebuildAreaLeaderboard(
+        leaderboard.roundId,
+        leaderboard.areaId,
+        { forceUnlocked: true }
+      );
+      refreshedLeaderboards.push(rebuilt || leaderboard);
+    }
+    leaderboards = refreshedLeaderboards;
+  }
 
   if (filters.areaOfFocus) {
     leaderboards = leaderboards
