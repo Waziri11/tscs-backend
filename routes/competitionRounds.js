@@ -1745,10 +1745,19 @@ router.get('/:id/judge-progress', async (req, res) => {
       snapshotDoc = await RoundSnapshot.findOne({ roundId: round._id }).select('submissionIds');
       snapshotSubmissionIds = snapshotDoc?.submissionIds || [];
     }
-    const hasSnapshotContext = Boolean(round.activationSnapshotId || snapshotDoc);
+    const hasSnapshotContext = Boolean(
+      round.activationSnapshotId ||
+      snapshotDoc ||
+      snapshotSubmissionIds.length > 0
+    );
     const roundScopedSubmissionExists = hasSnapshotContext
       ? false
-      : Boolean(await Submission.exists({ roundId: round._id, isDeleted: { $ne: true } }));
+      : Boolean(await Submission.exists({
+          roundId: round._id,
+          year: round.year,
+          level: round.level,
+          isDeleted: { $ne: true }
+        }));
 
     const activeRoundSubmissionStatusExclusions = ['promoted', 'eliminated', 'disqualified'];
     const submissionQuery = hasSnapshotContext
@@ -1808,6 +1817,7 @@ router.get('/:id/judge-progress', async (req, res) => {
     const assignmentDocsForAreaStatsRaw = (round.level === 'Council' || round.level === 'Regional') && allSubmissionIds.length > 0
       ? await SubmissionAssignment.find({
           roundId: round._id,
+          level: round.level,
           submissionId: { $in: allSubmissionIds }
         })
           .select('submissionId judgeId assignedAt createdAt')
@@ -1842,6 +1852,7 @@ router.get('/:id/judge-progress', async (req, res) => {
     const evaluationsForScopedSubmissions = allSubmissionIds.length > 0
       ? await Evaluation.find({
           roundId: round._id,
+          level: round.level,
           submissionId: { $in: allSubmissionIds }
         })
           .select('submissionId judgeId')
@@ -1928,6 +1939,7 @@ router.get('/:id/judge-progress', async (req, res) => {
     const judgeProgress = await Promise.all(judges.map(async (judge) => {
       const evaluationQuery = { 
         roundId: round._id,
+        level: round.level,
         judgeId: judge._id
       };
       if (submissionIds.length > 0) {
@@ -2140,15 +2152,26 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
       snapshotDoc = await RoundSnapshot.findOne({ roundId: round._id }).select('submissionIds');
       snapshotSubmissionIds = snapshotDoc?.submissionIds || [];
     }
-    const hasSnapshotContext = Boolean(round.activationSnapshotId || snapshotDoc);
+    const hasSnapshotContext = Boolean(
+      round.activationSnapshotId ||
+      snapshotDoc ||
+      snapshotSubmissionIds.length > 0
+    );
     const roundScopedSubmissionExists = hasSnapshotContext
       ? false
-      : Boolean(await Submission.exists({ roundId: round._id, isDeleted: { $ne: true } }));
+      : Boolean(await Submission.exists({
+          roundId: round._id,
+          year: round.year,
+          level: round.level,
+          isDeleted: { $ne: true }
+        }));
 
     const excludedStatuses = ['evaluated', 'promoted', 'eliminated', 'disqualified'];
     const submissionQuery = hasSnapshotContext
       ? {
           _id: { $in: snapshotSubmissionIds },
+          year: round.year,
+          level: round.level,
           status: { $nin: excludedStatuses },
           disqualified: { $ne: true },
           isDeleted: { $ne: true }
@@ -2176,11 +2199,15 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
     const allSubmissionIds = allSubmissions.map((submission) => submission._id);
     const historicalAssignedSubmissionIds = allSubmissionIds.length > 0
       ? await SubmissionAssignment.distinct('submissionId', {
+          roundId: round._id,
+          level: round.level,
           submissionId: { $in: allSubmissionIds }
         })
       : [];
     const evaluatedSubmissionIds = allSubmissionIds.length > 0
       ? await Evaluation.distinct('submissionId', {
+          roundId: round._id,
+          level: round.level,
           submissionId: { $in: allSubmissionIds }
         })
       : [];
@@ -2378,10 +2405,19 @@ router.get('/:id/judge-progress/export', async (req, res) => {
       snapshotDoc = await RoundSnapshot.findOne({ roundId: round._id }).select('submissionIds');
       snapshotSubmissionIds = snapshotDoc?.submissionIds || [];
     }
-    const hasSnapshotContext = Boolean(round.activationSnapshotId || snapshotDoc);
+    const hasSnapshotContext = Boolean(
+      round.activationSnapshotId ||
+      snapshotDoc ||
+      snapshotSubmissionIds.length > 0
+    );
     const roundScopedSubmissionExists = hasSnapshotContext
       ? false
-      : Boolean(await Submission.exists({ roundId: round._id, isDeleted: { $ne: true } }));
+      : Boolean(await Submission.exists({
+          roundId: round._id,
+          year: round.year,
+          level: round.level,
+          isDeleted: { $ne: true }
+        }));
     const activeRoundSubmissionStatusExclusions = ['promoted', 'eliminated', 'disqualified'];
     const submissionQuery = hasSnapshotContext
       ? {
@@ -2461,6 +2497,7 @@ router.get('/:id/judge-progress/export', async (req, res) => {
     const judgeProgress = await Promise.all(judges.map(async (judge) => {
       const evaluations = await Evaluation.find({ 
         roundId: round._id,
+        level: round.level,
         judgeId: judge._id
       });
       const evaluatedSubmissionIds = evaluations.map(e => e.submissionId.toString());

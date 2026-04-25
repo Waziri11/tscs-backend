@@ -485,14 +485,23 @@ router.get('/unassigned', authorize('admin', 'superadmin', 'stakeholder'), cache
         snapshotDoc = await RoundSnapshot.findOne({ roundId: round._id }).select('submissionIds');
         snapshotSubmissionIds = snapshotDoc?.submissionIds || [];
       }
-      const hasSnapshotContext = Boolean(round.activationSnapshotId || snapshotDoc);
+      const hasSnapshotContext = Boolean(
+        round.activationSnapshotId ||
+        snapshotDoc ||
+        snapshotSubmissionIds.length > 0
+      );
 
       const excludedStatuses = ['evaluated', 'promoted', 'eliminated', 'disqualified'];
       const excludedStatusSet = new Set(excludedStatuses);
       const requestedStatusNormalized = normalize(status).toLowerCase();
 
       const submissionQuery = hasSnapshotContext
-        ? { _id: { $in: snapshotSubmissionIds }, isDeleted: { $ne: true } }
+        ? {
+            _id: { $in: snapshotSubmissionIds },
+            year: round.year,
+            level: round.level,
+            isDeleted: { $ne: true }
+          }
         : {
             year: round.year,
             level: round.level,
@@ -528,11 +537,15 @@ router.get('/unassigned', authorize('admin', 'superadmin', 'stakeholder'), cache
 
       const historicalAssignedSubmissionIds = submissionIds.length
         ? await SubmissionAssignment.distinct('submissionId', {
+            roundId: round._id,
+            level: round.level,
             submissionId: { $in: submissionIds }
           })
         : [];
       const evaluatedSubmissionIds = submissionIds.length
         ? await Evaluation.distinct('submissionId', {
+            roundId: round._id,
+            level: round.level,
             submissionId: { $in: submissionIds }
           })
         : [];
