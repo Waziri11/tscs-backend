@@ -379,27 +379,11 @@ const filterSubmissionsPendingLevelEvaluation = async (round, submissions) => {
     roundIds
   });
 
-  if (round.level === 'National') {
-    const judges = await User.find({
-      role: 'judge',
-      status: 'active',
-      isDeleted: { $ne: true },
-      assignedLevel: round.level
-    }).select('_id');
-    const requiredJudgeIds = judges.map((judge) => String(judge._id));
-    if (requiredJudgeIds.length === 0) {
-      return submissions;
-    }
-    return submissions.filter((submission) => {
-      const details = evaluationBySubmission.get(String(submission._id));
-      if (!details) return true;
-      return !requiredJudgeIds.every((judgeId) => details.judgeIds.has(judgeId));
-    });
-  }
-
   return submissions.filter((submission) => {
     const details = evaluationBySubmission.get(String(submission._id));
-    return !details || details.totalEvaluations <= 0;
+    // Strict pending mode: include only submissions with zero evaluations
+    // for the same year + level across rounds.
+    return !details || Number(details.totalEvaluations || 0) <= 0;
   });
 };
 
