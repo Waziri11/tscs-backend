@@ -261,6 +261,162 @@ const buildActivationSubmissionQuery = (round) => {
   };
 };
 
+const buildLevelSubmissionQuery = (year, level) => {
+  const excludedStatuses = level === 'National'
+    ? ['eliminated']
+    : ['eliminated', 'promoted'];
+  return {
+    year: Number(year),
+    level,
+    isDeleted: { $ne: true },
+    status: { $nin: excludedStatuses }
+  };
+};
+
+const getRoundsForYearLevel = async (year, level) => {
+  return CompetitionRound.find({ year: Number(year), level })
+    .select('_id year level status createdAt updatedAt')
+    .sort({ createdAt: 1, _id: 1 });
+};
+
+const getRoundIdsForYearLevel = async (year, level) => {
+  const rounds = await getRoundsForYearLevel(year, level);
+  return rounds.map((round) => round._id);
+};
+
+const getAnchorRoundForYearLevel = async (year, level) => {
+  const rounds = await getRoundsForYearLevel(year, level);
+  return rounds.length > 0 ? rounds[0] : null;
+};
+
+const buildEvaluationMatchForYearLevel = ({ year, level, submissionIds = [], roundIds = [] }) => {
+  const submissionObjectIds = (submissionIds || [])
+    .filter(Boolean)
+    .map((id) => new mongoose.Types.ObjectId(id));
+
+  if (submissionObjectIds.length === 0) {
+    return null;
+  }
+
+  const yearLevelClause = {
+    year: Number(year),
+    level
+  };
+
+  const clauses = [yearLevelClause];
+  if (Array.isArray(roundIds) && roundIds.length > 0) {
+    clauses.push({
+      roundId: { $in: roundIds.map((id) => new mongoose.Types.ObjectId(id)) }
+    });
+  }
+
+  return {
+    submissionId: { $in: submissionObjectIds },
+    $or: clauses
+  };
+};
+
+const getLatestEvaluationJudgeSetsBySubmission = async ({
+  year,
+  level,
+  submissionIds,
+  roundIds = []
+}) => {
+  const match = buildEvaluationMatchForYearLevel({ year, level, submissionIds, roundIds });
+  if (!match) {
+    return new Map();
+  }
+
+  const grouped = await Evaluation.aggregate([
+    { $match: match },
+    { $sort: { submittedAt: -1, updatedAt: -1, createdAt: -1, _id: -1 } },
+    {
+      $group: {
+        _id: {
+          submissionId: '$submissionId',
+          judgeId: '$judgeId'
+        },
+        submissionId: { $first: '$submissionId' },
+        judgeId: { $first: '$judgeId' },
+        averageScore: { $first: '$averageScore' },
+        totalScore: { $first: '$totalScore' }
+      }
+    },
+    {
+      $group: {
+        _id: '$submissionId',
+        judgeIds: { $addToSet: '$judgeId' },
+        averageScore: { $avg: '$averageScore' },
+        totalScore: { $avg: '$totalScore' },
+        totalEvaluations: { $sum: 1 }
+      }
+    }
+  ]);
+
+  const map = new Map();
+  for (const item of grouped) {
+    map.set(String(item._id), {
+      judgeIds: new Set((item.judgeIds || []).map((judgeId) => String(judgeId))),
+      averageScore: Math.round((item.averageScore || 0) * 100) / 100,
+      totalScore: Math.round((item.totalScore || 0) * 100) / 100,
+      totalEvaluations: item.totalEvaluations || 0
+    });
+  }
+  return map;
+};
+
+const filterSubmissionsPendingLevelEvaluation = async (round, submissions) => {
+  if (!Array.isArray(submissions) || submissions.length === 0) {
+    return [];
+  }
+
+  const submissionIds = submissions.map((submission) => submission._id);
+  const roundIds = await getRoundIdsForYearLevel(round.year, round.level);
+  const evaluationBySubmission = await getLatestEvaluationJudgeSetsBySubmission({
+    year: round.year,
+    level: round.level,
+    submissionIds,
+    roundIds
+  });
+
+  if (round.level === 'National') {
+    const judges = await User.find({
+      role: 'judge',
+      status: 'active',
+      isDeleted: { $ne: true },
+      assignedLevel: round.level
+    }).select('_id');
+    const requiredJudgeIds = judges.map((judge) => String(judge._id));
+    if (requiredJudgeIds.length === 0) {
+      return submissions;
+    }
+    return submissions.filter((submission) => {
+      const details = evaluationBySubmission.get(String(submission._id));
+      if (!details) return true;
+      return !requiredJudgeIds.every((judgeId) => details.judgeIds.has(judgeId));
+    });
+  }
+
+  return submissions.filter((submission) => {
+    const details = evaluationBySubmission.get(String(submission._id));
+    return !details || details.totalEvaluations <= 0;
+  });
+};
+
+const getAreaSubmissionsForLevel = async (round, areaId) => {
+  const areaQuery = buildAreaQuery(round.level, areaId);
+  const submissions = await Submission.find({
+    ...buildLevelSubmissionQuery(round.year, round.level),
+    ...areaQuery
+  })
+    .select(
+      '_id teacherId teacherName school region council category class subject areaOfFocus status disqualified createdAt videoFileUrl videoLink preferredLink'
+    )
+    .populate('teacherId', 'name email');
+
+  return submissions.filter((submission) => hasSubmissionVideo(submission));
+};
+
 const getSubmissionAreaDescriptor = (level, submission) => {
   const areaId = buildAreaId(level, submission.region, submission.council);
   const areaType = getAreaTypeForLevel(level);
@@ -409,7 +565,17 @@ const activateRoundWithSnapshot = async (roundId, activatedBy) => {
   const hasChunkConfiguration = configuredChunks.length > 0;
   const dueChunkAreaSet = hasChunkConfiguration ? buildChunkAreaSet(dueChunksAtActivation) : null;
 
-  let eligibleSubmissions = submissions.filter(hasSubmissionVideo);
+  const submissionsWithVideo = submissions.filter(hasSubmissionVideo);
+  const pendingAcrossLevel = await filterSubmissionsPendingLevelEvaluation(round, submissionsWithVideo);
+  if (pendingAcrossLevel.length === 0) {
+    return {
+      success: false,
+      status: 400,
+      message: `No pending submissions found for ${round.level} level in ${round.year}. This level has already been finalized for the year.`
+    };
+  }
+
+  let eligibleSubmissions = pendingAcrossLevel;
   if (hasChunkConfiguration) {
     eligibleSubmissions = eligibleSubmissions.filter((submission) => {
       const areaId = buildAreaId(round.level, submission.region, submission.council);
@@ -421,7 +587,7 @@ const activateRoundWithSnapshot = async (roundId, activatedBy) => {
     return {
       success: false,
       status: 400,
-      message: 'No eligible submissions with videos found for this level'
+      message: `No pending submissions found for ${round.level} level in ${round.year}. This level may already be completed.`
     };
   }
 
@@ -608,12 +774,19 @@ const activateDueChunksForRound = async (roundOrId, options = {}) => {
     ...((snapshot?.submissionIds || []).map((id) => String(id)))
   ]);
 
-  const dueSubmissions = candidates
+  const candidateSubmissions = candidates
     .filter(hasSubmissionVideo)
     .filter((submission) => {
       const areaId = buildAreaId(round.level, submission.region, submission.council);
       return areaSet.has(areaId);
-    })
+    });
+
+  const pendingCandidateSubmissions = await filterSubmissionsPendingLevelEvaluation(
+    round,
+    candidateSubmissions
+  );
+
+  const dueSubmissions = pendingCandidateSubmissions
     .filter((submission) => !existingSubmissionIdSet.has(String(submission._id)));
 
   const dueSubmissionIds = dueSubmissions.map((submission) => submission._id);
@@ -732,28 +905,40 @@ const getRoundBySubmissionForEvaluation = async (submission) => {
 };
 
 const recalculateSubmissionAverageForRound = async (submissionId, roundId) => {
+  const round = await CompetitionRound.findById(roundId).select('_id year level');
+  if (!round) {
+    return { averageScore: 0, totalEvaluations: 0 };
+  }
   const submission = await Submission.findById(submissionId).select('disqualified status');
-  const evaluations = await Evaluation.find({ submissionId, roundId }).select('averageScore');
+  const roundIds = await getRoundIdsForYearLevel(round.year, round.level);
+  const evaluationBySubmission = await getLatestEvaluationJudgeSetsBySubmission({
+    year: round.year,
+    level: round.level,
+    submissionIds: [submissionId],
+    roundIds
+  });
+  const scoreData = evaluationBySubmission.get(String(submissionId)) || {
+    averageScore: 0,
+    totalEvaluations: 0
+  };
 
   const isDisqualified = Boolean(
     submission && (submission.disqualified === true || submission.status === 'disqualified')
   );
 
   if (isDisqualified) {
-    const totalAverage = evaluations.reduce((sum, evaluation) => sum + (evaluation.averageScore || 0), 0);
-    const averageScore = evaluations.length > 0
-      ? Math.round((totalAverage / evaluations.length) * 100) / 100
-      : 0;
-
     await Submission.findByIdAndUpdate(submissionId, {
-      averageScore,
+      averageScore: scoreData.averageScore || 0,
       status: 'disqualified',
       disqualified: true
     });
-    return { averageScore, totalEvaluations: evaluations.length };
+    return {
+      averageScore: scoreData.averageScore || 0,
+      totalEvaluations: scoreData.totalEvaluations || 0
+    };
   }
 
-  if (evaluations.length === 0) {
+  if (!scoreData.totalEvaluations) {
     await Submission.findByIdAndUpdate(submissionId, {
       averageScore: 0,
       status: 'submitted'
@@ -761,15 +946,15 @@ const recalculateSubmissionAverageForRound = async (submissionId, roundId) => {
     return { averageScore: 0, totalEvaluations: 0 };
   }
 
-  const totalAverage = evaluations.reduce((sum, evaluation) => sum + (evaluation.averageScore || 0), 0);
-  const averageScore = Math.round((totalAverage / evaluations.length) * 100) / 100;
-
   await Submission.findByIdAndUpdate(submissionId, {
-    averageScore,
+    averageScore: scoreData.averageScore || 0,
     status: 'evaluated'
   });
 
-  return { averageScore, totalEvaluations: evaluations.length };
+  return {
+    averageScore: scoreData.averageScore || 0,
+    totalEvaluations: scoreData.totalEvaluations || 0
+  };
 };
 
 const getAreaSubmissionIdsFromSnapshot = async (round, areaId) => {
@@ -796,83 +981,38 @@ const rebuildAreaLeaderboard = async (roundId, areaId, options = {}) => {
   }
 
   const areaType = getAreaTypeForLevel(round.level);
-  const existingLeaderboard = await AreaLeaderboard.findOne({
-    roundId: round._id,
+  const anchorRound = await getAnchorRoundForYearLevel(round.year, round.level);
+  const leaderboardRoundId = anchorRound?._id || round._id;
+  let existingLeaderboard = await AreaLeaderboard.findOne({
+    year: round.year,
     level: round.level,
     areaType,
     areaId
-  });
+  }).sort({ updatedAt: -1, createdAt: -1, _id: -1 });
+
+  if (!existingLeaderboard) {
+    existingLeaderboard = await AreaLeaderboard.findOne({
+      roundId: leaderboardRoundId,
+      level: round.level,
+      areaType,
+      areaId
+    });
+  }
 
   if (existingLeaderboard && existingLeaderboard.isLocked && !forceUnlocked) {
     return existingLeaderboard;
   }
 
-  const snapshot = await getRoundSnapshot(round._id);
-  if (!snapshot || !snapshot.submissionIds || snapshot.submissionIds.length === 0) {
-    return null;
-  }
-
-  const submissionIds = await getAreaSubmissionIdsFromSnapshot(round, areaId);
-  if (submissionIds.length === 0) {
-    return AreaLeaderboard.findOneAndUpdate(
-      {
-        roundId: round._id,
-        level: round.level,
-        areaType,
-        areaId
-      },
-      {
-        year: round.year,
-        region: parseAreaId(round.level, areaId).region,
-        council: parseAreaId(round.level, areaId).council,
-        entries: [],
-        totalSubmissions: 0,
-        totalEvaluations: 0,
-        state: existingLeaderboard && existingLeaderboard.state === 'published'
-          ? 'published'
-          : existingLeaderboard && existingLeaderboard.state === 'finalized'
-            ? 'finalized'
-            : 'provisional',
-        isLocked: existingLeaderboard ? existingLeaderboard.isLocked : false,
-        lastUpdated: new Date()
-      },
-      { upsert: true, new: true, runValidators: true }
-    );
-  }
-
-  const submissions = await Submission.find({
-    _id: { $in: submissionIds }
-  })
-    .populate('teacherId', 'name email')
-    .lean();
-
-  const evaluationGroups = await Evaluation.aggregate([
-    {
-      $match: {
-        roundId: new mongoose.Types.ObjectId(round._id),
-        submissionId: { $in: submissionIds.map((id) => new mongoose.Types.ObjectId(id)) }
-      }
-    },
-    {
-      $group: {
-        _id: '$submissionId',
-        averageScore: { $avg: '$averageScore' },
-        totalScore: { $avg: '$totalScore' },
-        totalEvaluations: { $sum: 1 }
-      }
-    }
-  ]);
-
-  const evaluationMap = new Map(
-    evaluationGroups.map((item) => [
-      String(item._id),
-      {
-        averageScore: Math.round((item.averageScore || 0) * 100) / 100,
-        totalScore: Math.round((item.totalScore || 0) * 100) / 100,
-        totalEvaluations: item.totalEvaluations || 0
-      }
-    ])
-  );
+  const submissions = (await getAreaSubmissionsForLevel(round, areaId))
+    .map((submission) => (submission && typeof submission.toObject === 'function' ? submission.toObject() : submission));
+  const submissionIds = submissions.map((submission) => submission._id);
+  const roundIds = await getRoundIdsForYearLevel(round.year, round.level);
+  const evaluationMap = await getLatestEvaluationJudgeSetsBySubmission({
+    year: round.year,
+    level: round.level,
+    submissionIds,
+    roundIds
+  });
 
   const entries = submissions.map((submission) => {
     const scoreData = evaluationMap.get(String(submission._id)) || {
@@ -904,7 +1044,7 @@ const rebuildAreaLeaderboard = async (roundId, areaId, options = {}) => {
       entry.status = 'disqualified';
     } else if (submission.status === 'eliminated') {
       entry.status = 'eliminated';
-    } else if (submission.promotedFromRoundId && String(submission.promotedFromRoundId) === String(round._id)) {
+    } else if (submission.status === 'promoted') {
       entry.status = 'promoted';
     }
 
@@ -924,7 +1064,7 @@ const rebuildAreaLeaderboard = async (roundId, areaId, options = {}) => {
   const upsertPayload = {
     year: round.year,
     level: round.level,
-    roundId: round._id,
+    roundId: leaderboardRoundId,
     areaType,
     areaId,
     region: parseAreaId(round.level, areaId).region,
@@ -939,13 +1079,15 @@ const rebuildAreaLeaderboard = async (roundId, areaId, options = {}) => {
     lastUpdated: new Date(),
     metadata: {
       ...(existingLeaderboard?.metadata || {}),
+      sourceRoundId: String(round._id),
+      leaderboardRoundId: String(leaderboardRoundId),
       quotaSourceType: quotaInfo.sourceType,
       quotaSourceId: quotaInfo.sourceId
     }
   };
 
   return AreaLeaderboard.findOneAndUpdate(
-    { roundId: round._id, level: round.level, areaType, areaId },
+    { year: round.year, level: round.level, areaType, areaId },
     upsertPayload,
     { upsert: true, new: true, runValidators: true }
   );
@@ -963,7 +1105,8 @@ const checkAreaJudgeCompletion = async (roundId, areaId) => {
     };
   }
 
-  const submissionIds = await getAreaSubmissionIdsFromSnapshot(round, areaId);
+  const submissions = await getAreaSubmissionsForLevel(round, areaId);
+  const submissionIds = submissions.map((submission) => submission._id);
   if (submissionIds.length === 0) {
     return {
       ready: true,
@@ -974,70 +1117,49 @@ const checkAreaJudgeCompletion = async (roundId, areaId) => {
     };
   }
 
-  const disqualifiedSubmissions = await Submission.find({
-    _id: { $in: submissionIds },
-    $or: [{ disqualified: true }, { status: 'disqualified' }]
-  }).select('_id');
   const disqualifiedSubmissionIds = new Set(
-    disqualifiedSubmissions.map((submission) => String(submission._id))
+    submissions
+      .filter((submission) => submission.disqualified === true || submission.status === 'disqualified')
+      .map((submission) => String(submission._id))
   );
-
-  const evaluationGroups = await Evaluation.aggregate([
-    {
-      $match: {
-        roundId: new mongoose.Types.ObjectId(round._id),
-        submissionId: { $in: submissionIds.map((id) => new mongoose.Types.ObjectId(id)) }
-      }
-    },
-    {
-      $group: {
-        _id: '$submissionId',
-        judgeIds: { $addToSet: '$judgeId' }
-      }
-    }
-  ]);
-  const evaluationMap = new Map(
-    evaluationGroups.map((group) => [
-      String(group._id),
-      new Set(group.judgeIds.map((judgeId) => String(judgeId)))
-    ])
-  );
+  const roundIds = await getRoundIdsForYearLevel(round.year, round.level);
+  const evaluationMap = await getLatestEvaluationJudgeSetsBySubmission({
+    year: round.year,
+    level: round.level,
+    submissionIds,
+    roundIds
+  });
 
   const blockers = [];
   let pendingCount = 0;
 
   if (['Council', 'Regional'].includes(round.level)) {
-    const assignments = await SubmissionAssignment.find({
-      roundId: round._id,
-      submissionId: { $in: submissionIds }
-    }).select('submissionId judgeId');
-    const assignmentMap = new Map(
-      assignments.map((assignment) => [String(assignment.submissionId), String(assignment.judgeId)])
-    );
+    const uniqueJudgeIds = new Set();
 
     for (const submissionId of submissionIds) {
       const submissionKey = String(submissionId);
       if (disqualifiedSubmissionIds.has(submissionKey)) {
         continue;
       }
-      const assignedJudgeId = assignmentMap.get(submissionKey);
-      if (!assignedJudgeId) {
+      const details = evaluationMap.get(submissionKey);
+      if (!details || details.totalEvaluations <= 0) {
         pendingCount += 1;
-        blockers.push(`No judge assignment for submission ${submissionKey}`);
         continue;
       }
-      const evaluatedJudgeIds = evaluationMap.get(submissionKey) || new Set();
-      if (!evaluatedJudgeIds.has(assignedJudgeId)) {
-        pendingCount += 1;
+      for (const judgeId of details.judgeIds) {
+        uniqueJudgeIds.add(judgeId);
       }
     }
 
-    const uniqueJudges = new Set(assignments.map((assignment) => String(assignment.judgeId)));
+    if (pendingCount > 0 && uniqueJudgeIds.size === 0) {
+      blockers.push('No completed evaluations found for this area yet');
+    }
+
     return {
       ready: pendingCount === 0,
       pendingCount,
       totalSubmissions: submissionIds.length,
-      totalJudges: uniqueJudges.size,
+      totalJudges: uniqueJudgeIds.size,
       blockers
     };
   }
@@ -1045,14 +1167,16 @@ const checkAreaJudgeCompletion = async (roundId, areaId) => {
   const nationalJudges = await User.find({
     role: 'judge',
     status: 'active',
+    isDeleted: { $ne: true },
     assignedLevel: round.level
   }).select('_id');
   const judgeIds = nationalJudges.map((judge) => String(judge._id));
 
   if (judgeIds.length === 0) {
+    const activeSubmissionCount = submissionIds.length - disqualifiedSubmissionIds.size;
     return {
       ready: false,
-      pendingCount: submissionIds.length,
+      pendingCount: Math.max(activeSubmissionCount, 0),
       totalSubmissions: submissionIds.length,
       totalJudges: 0,
       blockers: ['No active judges assigned for this level']
@@ -1064,7 +1188,8 @@ const checkAreaJudgeCompletion = async (roundId, areaId) => {
     if (disqualifiedSubmissionIds.has(submissionKey)) {
       continue;
     }
-    const evaluatedJudgeIds = evaluationMap.get(submissionKey) || new Set();
+    const details = evaluationMap.get(submissionKey);
+    const evaluatedJudgeIds = details?.judgeIds || new Set();
     const allJudgesDone = judgeIds.every((judgeId) => evaluatedJudgeIds.has(judgeId));
     if (!allJudgesDone) {
       pendingCount += 1;
@@ -1137,19 +1262,51 @@ const approveAreaLeaderboardAndPromote = async ({ roundId, areaId, approvedBy, f
     return {
       success: false,
       status: 400,
-      message: 'Area is not ready for finalization. Not all assigned judges have submitted.',
+      message: 'Area is not ready for finalization. Some submissions are still missing required evaluations.',
       completion
     };
   }
 
   const quotaInfo = await resolveQuotaForArea({ round, areaId, areaType });
-  const rankedEntries = rankEntriesDeterministically(
-    leaderboard.entries.filter((entry) => !['eliminated', 'disqualified'].includes(entry.status))
-  );
-  const quota = Math.max(0, Math.min(quotaInfo.quota || 0, rankedEntries.length));
-  const promotedEntries = rankedEntries.slice(0, quota);
-  const eliminatedEntries = rankedEntries.slice(quota);
   const nextLevel = getNextLevel(round.level);
+  const eligibleEntries = leaderboard.entries.filter(
+    (entry) => !['eliminated', 'disqualified'].includes(entry.status)
+  );
+  const groupedByFocus = new Map();
+  for (const rawEntry of eligibleEntries) {
+    const entry = rawEntry && typeof rawEntry.toObject === 'function'
+      ? rawEntry.toObject()
+      : { ...rawEntry };
+    const focus = String(entry.areaOfFocus || 'Unknown');
+    if (!groupedByFocus.has(focus)) {
+      groupedByFocus.set(focus, []);
+    }
+    groupedByFocus.get(focus).push(entry);
+  }
+
+  const promotedEntries = [];
+  const eliminatedEntries = [];
+  const decisionByAreaOfFocus = {};
+  const defaultQuota = Math.max(0, Number(quotaInfo.quota) || 0);
+
+  for (const [focus, entries] of groupedByFocus.entries()) {
+    const rankedEntries = rankEntriesDeterministically(entries);
+    const groupQuota = round.level === 'National'
+      ? (rankedEntries.length > 0 ? 1 : 0)
+      : Math.max(0, Math.min(defaultQuota, rankedEntries.length));
+
+    const promotedGroup = rankedEntries.slice(0, groupQuota);
+    const eliminatedGroup = rankedEntries.slice(groupQuota);
+    promotedEntries.push(...promotedGroup);
+    eliminatedEntries.push(...eliminatedGroup);
+    decisionByAreaOfFocus[focus] = {
+      total: rankedEntries.length,
+      quota: groupQuota,
+      promoted: promotedGroup.length,
+      eliminated: eliminatedGroup.length
+    };
+  }
+
   let targetRoundId = null;
   if (nextLevel) {
     const targetRound = await CompetitionRound.findOne({
@@ -1162,8 +1319,8 @@ const approveAreaLeaderboardAndPromote = async ({ roundId, areaId, approvedBy, f
     targetRoundId = targetRound?._id || null;
   }
 
-  const promotedIds = promotedEntries.map((entry) => entry.submissionId);
-  const eliminatedIds = eliminatedEntries.map((entry) => entry.submissionId);
+  const promotedIds = [...new Set(promotedEntries.map((entry) => String(entry.submissionId)))];
+  const eliminatedIds = [...new Set(eliminatedEntries.map((entry) => String(entry.submissionId)))];
 
   const session = await mongoose.startSession();
   let result = null;
@@ -1273,13 +1430,16 @@ const approveAreaLeaderboardAndPromote = async ({ roundId, areaId, approvedBy, f
         const id = String(entry.submissionId);
         const promoted = promotedEntries.some((candidate) => String(candidate.submissionId) === id);
         const eliminated = eliminatedEntries.some((candidate) => String(candidate.submissionId) === id);
-        if (promoted) return { ...entry.toObject(), status: 'promoted' };
-        if (eliminated) return { ...entry.toObject(), status: 'eliminated' };
-        return { ...entry.toObject() };
+        const plainEntry = entry && typeof entry.toObject === 'function'
+          ? entry.toObject()
+          : { ...entry };
+        if (promoted) return { ...plainEntry, status: 'promoted' };
+        if (eliminated) return { ...plainEntry, status: 'eliminated' };
+        return plainEntry;
       });
 
       leaderboard.entries = updatedEntries;
-      leaderboard.quota = quotaInfo.quota || 0;
+      leaderboard.quota = round.level === 'National' ? 1 : defaultQuota;
       leaderboard.state = 'finalized';
       leaderboard.isLocked = true;
       leaderboard.finalizedAt = new Date();
@@ -1297,8 +1457,9 @@ const approveAreaLeaderboardAndPromote = async ({ roundId, areaId, approvedBy, f
         leaderboard,
         promoted: promotedEntries.length,
         eliminated: eliminatedEntries.length,
-        promotedIds: promotedEntries.map((entry) => String(entry.submissionId)),
-        eliminatedIds: eliminatedEntries.map((entry) => String(entry.submissionId)),
+        promotedIds,
+        eliminatedIds,
+        decisionsByAreaOfFocus: decisionByAreaOfFocus,
         nextLevel
       };
     });
@@ -1323,11 +1484,11 @@ const publishAreaLeaderboard = async ({ roundId, areaId, publishedBy, audiences 
 
   const areaType = getAreaTypeForLevel(round.level);
   const leaderboard = await AreaLeaderboard.findOne({
-    roundId: round._id,
+    year: round.year,
     level: round.level,
     areaType,
     areaId
-  });
+  }).sort({ updatedAt: -1, createdAt: -1, _id: -1 });
 
   if (!leaderboard) {
     return { success: false, status: 404, message: 'Area leaderboard not found' };
@@ -1365,11 +1526,11 @@ const reopenAreaLeaderboard = async ({ roundId, areaId }) => {
 
   const areaType = getAreaTypeForLevel(round.level);
   const leaderboard = await AreaLeaderboard.findOne({
-    roundId: round._id,
+    year: round.year,
     level: round.level,
     areaType,
     areaId
-  });
+  }).sort({ updatedAt: -1, createdAt: -1, _id: -1 });
 
   if (!leaderboard) {
     return { success: false, status: 404, message: 'Area leaderboard not found' };
@@ -1424,7 +1585,16 @@ const canAdminAccessLeaderboard = (adminUser, leaderboard) => {
 
 const listAreaLeaderboards = async ({ filters = {}, user }) => {
   const query = {};
-  if (filters.roundId) query.roundId = filters.roundId;
+
+  if (filters.roundId) {
+    const round = await CompetitionRound.findById(filters.roundId).select('year level');
+    if (round) {
+      query.year = round.year;
+      query.level = round.level;
+    } else {
+      query.roundId = filters.roundId;
+    }
+  }
   if (filters.year) query.year = parseInt(filters.year, 10);
   if (filters.level) query.level = filters.level;
   if (filters.areaType) query.areaType = filters.areaType;
@@ -1499,6 +1669,48 @@ const listAreaLeaderboards = async ({ filters = {}, user }) => {
     }
     leaderboards = refreshedLeaderboards;
   }
+
+  const statePriority = {
+    published: 4,
+    finalized: 3,
+    awaiting_superadmin_approval: 2,
+    provisional: 1
+  };
+  const dedupedByScope = new Map();
+  for (const leaderboard of leaderboards) {
+    const key = `${leaderboard.year}::${leaderboard.level}::${leaderboard.areaType}::${leaderboard.areaId}`;
+    const current = dedupedByScope.get(key);
+    if (!current) {
+      dedupedByScope.set(key, leaderboard);
+      continue;
+    }
+
+    const currentPriority = statePriority[current.state] || 0;
+    const nextPriority = statePriority[leaderboard.state] || 0;
+    if (nextPriority > currentPriority) {
+      dedupedByScope.set(key, leaderboard);
+      continue;
+    }
+    if (nextPriority < currentPriority) {
+      continue;
+    }
+
+    const currentUpdated = new Date(current.updatedAt || current.lastUpdated || current.createdAt || 0).getTime();
+    const nextUpdated = new Date(leaderboard.updatedAt || leaderboard.lastUpdated || leaderboard.createdAt || 0).getTime();
+    if (nextUpdated >= currentUpdated) {
+      dedupedByScope.set(key, leaderboard);
+    }
+  }
+  leaderboards = [...dedupedByScope.values()].sort((left, right) => {
+    if (left.year !== right.year) return right.year - left.year;
+    if ((left.level || '') !== (right.level || '')) {
+      return String(left.level || '').localeCompare(String(right.level || ''));
+    }
+    if ((left.areaType || '') !== (right.areaType || '')) {
+      return String(left.areaType || '').localeCompare(String(right.areaType || ''));
+    }
+    return String(left.areaId || '').localeCompare(String(right.areaId || ''));
+  });
 
   if (filters.areaOfFocus) {
     leaderboards = leaderboards

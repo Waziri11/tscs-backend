@@ -13,9 +13,9 @@ const {
   getAreaIdFromSubmission,
   markRoundEndedIfComplete
 } = require('../utils/roundJudgementService');
-const { resolveSubmissionRoundContext, isRoundActionable } = require('../utils/roundContext');
 const { canAdminAccessSubmission } = require('../utils/adminScope');
 const Competition = require('../models/Competition');
+const CompetitionRound = require('../models/CompetitionRound');
 const {
   getEvaluationCriteriaFromCompetition,
   normalizeStoredCriteria,
@@ -28,10 +28,9 @@ router.use(protect);
 
 /**
  * Resolve which round an evaluation should be written to.
- * Primary source is active/ended snapshot membership.
- * Fallback source is the judge's explicit submission assignment round.
+ * Evaluations are only allowed when the submission is in an actionable round snapshot.
  */
-async function resolveEvaluationRoundForJudge(submission, judgeId) {
+async function resolveEvaluationRoundForJudge(submission) {
   const snapshotRound = await getRoundBySubmissionForEvaluation(submission);
   if (snapshotRound) {
     return {
@@ -40,37 +39,37 @@ async function resolveEvaluationRoundForJudge(submission, judgeId) {
     };
   }
 
-  const assignment = await SubmissionAssignment.findOne({
-    submissionId: submission._id,
-    judgeId
-  })
-    .sort({ assignedAt: -1, createdAt: -1 })
-    .populate('roundId');
-
-  if (assignment?.roundId && isRoundActionable(assignment.roundId)) {
-    return {
-      round: assignment.roundId,
-      source: 'assignment'
-    };
-  }
-
-  // Fallback to the currently actionable round context for the submission level/year.
-  // This prevents false "No eligible round found" when snapshot membership has drifted.
-  const context = await resolveSubmissionRoundContext(submission, {
-    includeHistorical: false,
-    allowFallbackByYearLevel: true
-  });
-  if (context.round && isRoundActionable(context.round)) {
-    return {
-      round: context.round,
-      source: 'context'
-    };
-  }
-
   return {
     round: null,
     source: 'none'
   };
+}
+
+async function findExistingEvaluationForLevelYear(submission, judgeId) {
+  const year = Number(submission.year);
+  const level = submission.level;
+
+  let existing = await Evaluation.findOne({
+    submissionId: submission._id,
+    judgeId,
+    year,
+    level
+  });
+
+  if (existing) {
+    return existing;
+  }
+
+  const roundIds = await CompetitionRound.find({ year, level }).distinct('_id');
+  if (!Array.isArray(roundIds) || roundIds.length === 0) {
+    return null;
+  }
+
+  return Evaluation.findOne({
+    submissionId: submission._id,
+    judgeId,
+    roundId: { $in: roundIds }
+  }).sort({ submittedAt: -1, updatedAt: -1, createdAt: -1, _id: -1 });
 }
 
 // @route   GET /api/evaluations
@@ -228,11 +227,11 @@ router.post('/', authorize('judge'), invalidateCacheOnChange(['cache:/api/leader
       });
     }
 
-    const { round } = await resolveEvaluationRoundForJudge(submission, req.user._id);
+    const { round } = await resolveEvaluationRoundForJudge(submission);
     if (!round) {
       return res.status(403).json({
         success: false,
-        message: 'No eligible round found for this submission. It must be in an active/ended snapshot or assigned to you in a valid round.'
+        message: 'No eligible round found for this submission. It must be in an active or ended round snapshot.'
       });
     }
 
@@ -323,10 +322,21 @@ router.post('/', authorize('judge'), invalidateCacheOnChange(['cache:/api/leader
 
     const totalScore = verdict.totalScore;
     const averageScore = verdict.averageScore;
+    const existingEvaluation = await findExistingEvaluationForLevelYear(submission, req.user._id);
+    const evaluationFilter = existingEvaluation
+      ? { _id: existingEvaluation._id }
+      : {
+          submissionId,
+          judgeId: req.user._id,
+          year: Number(submission.year),
+          level: submission.level
+        };
 
     const evaluation = await Evaluation.findOneAndUpdate(
-      { roundId: round._id, submissionId, judgeId: req.user._id },
+      evaluationFilter,
       {
+        year: Number(submission.year),
+        level: submission.level,
         roundId: round._id,
         submissionId,
         judgeId: req.user._id,
@@ -336,7 +346,7 @@ router.post('/', authorize('judge'), invalidateCacheOnChange(['cache:/api/leader
         comments: comments || '',
         submittedAt: new Date()
       },
-      { new: true, upsert: true, runValidators: true }
+      { new: true, upsert: !existingEvaluation, runValidators: true }
     )
       .populate('submissionId', 'teacherName category subject level region council')
       .populate('roundId', 'year level status');
@@ -466,7 +476,7 @@ router.post('/:submissionId/disqualify', authorize('judge'), async (req, res) =>
       });
     }
 
-    const { round } = await resolveEvaluationRoundForJudge(submission, req.user._id);
+    const { round } = await resolveEvaluationRoundForJudge(submission);
     if (!round) {
       return res.status(400).json({
         success: false,

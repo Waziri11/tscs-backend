@@ -1,6 +1,17 @@
 const mongoose = require('mongoose');
 
 const evaluationSchema = new mongoose.Schema({
+  year: {
+    type: Number,
+    required: true,
+    index: true
+  },
+  level: {
+    type: String,
+    enum: ['Council', 'Regional', 'National'],
+    required: true,
+    index: true
+  },
   roundId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'CompetitionRound',
@@ -46,6 +57,9 @@ const evaluationSchema = new mongoose.Schema({
 
 // Indexes
 evaluationSchema.index({ roundId: 1, submissionId: 1, judgeId: 1 }, { unique: true });
+evaluationSchema.index({ year: 1, level: 1, submissionId: 1, judgeId: 1 });
+evaluationSchema.index({ year: 1, level: 1, submissionId: 1 });
+evaluationSchema.index({ year: 1, level: 1, judgeId: 1 });
 evaluationSchema.index({ roundId: 1, submissionId: 1 });
 evaluationSchema.index({ roundId: 1, judgeId: 1 });
 evaluationSchema.index({ submissionId: 1 });

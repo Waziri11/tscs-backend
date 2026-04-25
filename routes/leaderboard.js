@@ -487,7 +487,7 @@ router.post('/:year/:level/:areaOfFocus/advance', invalidateCacheOnChange('cache
     const areasToAdvance = [];
     if (global) {
       const areaLeaderboards = await AreaLeaderboard.find({
-        roundId: round._id,
+        year: round.year,
         level: round.level
       }).select('areaId');
       areaLeaderboards.forEach((lb) => areasToAdvance.push(lb.areaId));

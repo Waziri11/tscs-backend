@@ -919,7 +919,7 @@ router.post('/:id/activate', async (req, res) => {
 });
 
 // @route   POST /api/competition-rounds/:id/close
-// @desc    Close a competition round after area finalization
+// @desc    Close a competition round phase (leaderboard finalization remains year-level)
 // @access  Private (Superadmin)
 router.post('/:id/close', invalidateCacheOnChange('cache:/api/leaderboard*'), async (req, res) => {
   try {
@@ -939,7 +939,7 @@ router.post('/:id/close', invalidateCacheOnChange('cache:/api/leaderboard*'), as
       });
     }
     const roundLeaderboards = await AreaLeaderboard.find({
-      roundId: round._id,
+      year: round.year,
       level: round.level
     }).select('areaId state');
 
@@ -951,25 +951,10 @@ router.post('/:id/close', invalidateCacheOnChange('cache:/api/leaderboard*'), as
     }
 
     const refreshedLeaderboards = await AreaLeaderboard.find({
-      roundId: round._id,
+      year: round.year,
       level: round.level
     }).select('areaId state totalSubmissions');
-
-    const pendingFinalization = refreshedLeaderboards.filter(
-      (leaderboard) => !['finalized', 'published'].includes(leaderboard.state)
-    );
-
     const forceClose = req.body.force === true;
-    if (pendingFinalization.length > 0 && !forceClose) {
-      return res.status(400).json({
-        success: false,
-        message: 'Cannot close round: some areas are not finalized yet',
-        pendingAreas: pendingFinalization.map((leaderboard) => ({
-          areaId: leaderboard.areaId,
-          state: leaderboard.state
-        }))
-      });
-    }
 
     const now = new Date();
     round.status = 'closed';
@@ -1207,7 +1192,7 @@ router.patch('/:id/leaderboard-visibility', async (req, res) => {
 
     if (visibility === 'frozen') {
       const snapshot = await AreaLeaderboard.find({
-        roundId: round._id,
+        year: round.year,
         level: round.level
       }).sort({ areaType: 1, areaId: 1 });
       round.frozenLeaderboardSnapshot = snapshot.map((leaderboard) => ({
@@ -1604,7 +1589,7 @@ router.get('/:id/leaderboard', async (req, res) => {
     }
 
     const query = {
-      roundId: round._id,
+      year: round.year,
       level: round.level
     };
 
@@ -1612,7 +1597,44 @@ router.get('/:id/leaderboard', async (req, res) => {
     if (req.query.areaId) query.areaId = req.query.areaId;
     if (req.query.areaType) query.areaType = req.query.areaType;
 
-    const leaderboards = await AreaLeaderboard.find(query).sort({ areaType: 1, areaId: 1 });
+    const rawLeaderboards = await AreaLeaderboard.find(query).sort({ updatedAt: -1, createdAt: -1, areaType: 1, areaId: 1 });
+    const statePriority = {
+      published: 4,
+      finalized: 3,
+      awaiting_superadmin_approval: 2,
+      provisional: 1
+    };
+    const scopedLeaderboards = new Map();
+    for (const leaderboard of rawLeaderboards) {
+      const key = `${leaderboard.areaType}::${leaderboard.areaId}`;
+      const existing = scopedLeaderboards.get(key);
+      if (!existing) {
+        scopedLeaderboards.set(key, leaderboard);
+        continue;
+      }
+
+      const existingPriority = statePriority[existing.state] || 0;
+      const nextPriority = statePriority[leaderboard.state] || 0;
+      if (nextPriority > existingPriority) {
+        scopedLeaderboards.set(key, leaderboard);
+        continue;
+      }
+      if (nextPriority < existingPriority) {
+        continue;
+      }
+
+      const existingUpdated = new Date(existing.updatedAt || existing.lastUpdated || existing.createdAt || 0).getTime();
+      const nextUpdated = new Date(leaderboard.updatedAt || leaderboard.lastUpdated || leaderboard.createdAt || 0).getTime();
+      if (nextUpdated >= existingUpdated) {
+        scopedLeaderboards.set(key, leaderboard);
+      }
+    }
+    const leaderboards = [...scopedLeaderboards.values()].sort((left, right) => {
+      if ((left.areaType || '') !== (right.areaType || '')) {
+        return String(left.areaType || '').localeCompare(String(right.areaType || ''));
+      }
+      return String(left.areaId || '').localeCompare(String(right.areaId || ''));
+    });
 
     res.json({
       success: true,
