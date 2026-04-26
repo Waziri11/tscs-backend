@@ -542,11 +542,25 @@ router.get('/unassigned', authorize('admin', 'superadmin', 'stakeholder'), cache
             submissionId: { $in: submissionIds }
           })
         : [];
+      const levelRoundIds = await CompetitionRound.find({
+        year: round.year,
+        level: round.level
+      }).distinct('_id');
+      const evaluationScope = [
+        {
+          year: Number(round.year),
+          level: round.level
+        }
+      ];
+      if (Array.isArray(levelRoundIds) && levelRoundIds.length > 0) {
+        evaluationScope.push({
+          roundId: { $in: levelRoundIds }
+        });
+      }
       const evaluatedSubmissionIds = submissionIds.length
         ? await Evaluation.distinct('submissionId', {
-            roundId: round._id,
-            level: round.level,
-            submissionId: { $in: submissionIds }
+            submissionId: { $in: submissionIds },
+            $or: evaluationScope
           })
         : [];
       const historicalAssignedSubmissionIdSet = new Set(

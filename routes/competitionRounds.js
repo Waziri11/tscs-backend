@@ -1793,6 +1793,30 @@ router.get('/:id/judge-progress', async (req, res) => {
     const submissionById = new Map(
       allSubmissions.map((submission) => [String(submission._id), submission])
     );
+    const levelRoundIds = await CompetitionRound.find({
+      year: round.year,
+      level: round.level
+    }).distinct('_id');
+    const levelEvaluationScope = [
+      {
+        year: Number(round.year),
+        level: round.level
+      }
+    ];
+    if (Array.isArray(levelRoundIds) && levelRoundIds.length > 0) {
+      levelEvaluationScope.push({
+        roundId: { $in: levelRoundIds }
+      });
+    }
+    const levelEvaluatedSubmissionIds = allSubmissionIds.length > 0
+      ? await Evaluation.distinct('submissionId', {
+          submissionId: { $in: allSubmissionIds },
+          $or: levelEvaluationScope
+        })
+      : [];
+    const levelEvaluatedSubmissionIdSet = new Set(
+      levelEvaluatedSubmissionIds.map((evaluationId) => String(evaluationId))
+    );
 
     // Get all judges assigned to this round's level and location
     const judgeQuery = { role: 'judge', assignedLevel: round.level, status: 'active' };
@@ -1849,6 +1873,26 @@ router.get('/:id/judge-progress', async (req, res) => {
       [...areaAssignedSetMap.entries()].map(([key, submissionSet]) => [key, submissionSet.size])
     );
 
+    const areaUnassignedSetMap = new Map();
+    for (const submission of allSubmissions) {
+      const areaKey = buildAreaKey(submission);
+      if (!areaKey) continue;
+      const submissionId = String(submission._id);
+      const status = String(submission.status || '').toLowerCase();
+      const isAssigned = latestAssignmentBySubmissionId.has(submissionId);
+      const isEvaluated = levelEvaluatedSubmissionIdSet.has(submissionId)
+        || submission.disqualified === true
+        || status === 'disqualified'
+        || status === 'evaluated';
+
+      if (isAssigned || isEvaluated) continue;
+
+      if (!areaUnassignedSetMap.has(areaKey)) {
+        areaUnassignedSetMap.set(areaKey, new Set());
+      }
+      areaUnassignedSetMap.get(areaKey).add(submissionId);
+    }
+
     const evaluationsForScopedSubmissions = allSubmissionIds.length > 0
       ? await Evaluation.find({
           roundId: round._id,
@@ -1903,7 +1947,7 @@ router.get('/:id/judge-progress', async (req, res) => {
         areaId,
         totalSubmissions: areaTotalsMap.get(areaId) || 0,
         assignedSubmissions: areaAssignedMap.get(areaId) || 0,
-        unassignedSubmissions: Math.max((areaTotalsMap.get(areaId) || 0) - (areaAssignedMap.get(areaId) || 0), 0),
+        unassignedSubmissions: areaUnassignedSetMap.get(areaId)?.size || 0,
         completedSubmissions: areaCompletedSetMap.get(areaId)?.size || 0,
         activeJudges: areaActiveJudgeSetMap.get(areaId)?.size || 0
       }))
@@ -2197,6 +2241,21 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
 
     const allSubmissions = await Submission.find(submissionQuery).sort({ createdAt: -1 });
     const allSubmissionIds = allSubmissions.map((submission) => submission._id);
+    const levelRoundIds = await CompetitionRound.find({
+      year: round.year,
+      level: round.level
+    }).distinct('_id');
+    const evaluationScope = [
+      {
+        year: Number(round.year),
+        level: round.level
+      }
+    ];
+    if (Array.isArray(levelRoundIds) && levelRoundIds.length > 0) {
+      evaluationScope.push({
+        roundId: { $in: levelRoundIds }
+      });
+    }
     const historicalAssignedSubmissionIds = allSubmissionIds.length > 0
       ? await SubmissionAssignment.distinct('submissionId', {
           roundId: round._id,
@@ -2206,9 +2265,8 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
       : [];
     const evaluatedSubmissionIds = allSubmissionIds.length > 0
       ? await Evaluation.distinct('submissionId', {
-          roundId: round._id,
-          level: round.level,
-          submissionId: { $in: allSubmissionIds }
+          submissionId: { $in: allSubmissionIds },
+          $or: evaluationScope
         })
       : [];
     const assignedOrEvaluatedSubmissionIdSet = new Set([
