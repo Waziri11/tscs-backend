@@ -2160,6 +2160,7 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
 
     const requestedRegion = normalize(req.query.region);
     const requestedCouncil = normalize(req.query.council);
+    const requestedAreaOfFocus = normalize(req.query.areaOfFocus);
     const requestedGroupBy = normalize(req.query.groupBy).toLowerCase();
     const page = parsePositiveInt(req.query.page, 1);
     const limit = parsePositiveInt(req.query.limit, 20);
@@ -2173,8 +2174,10 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
 
     const scopedRegion = requestedRegion || normalize(round.region);
     const scopedCouncil = requestedCouncil || normalize(round.council);
+    const scopedAreaOfFocus = requestedAreaOfFocus;
     const scopeRegionRegex = toExactRegex(scopedRegion);
     const scopeCouncilRegex = toExactRegex(scopedCouncil);
+    const scopeAreaOfFocusRegex = toExactRegex(scopedAreaOfFocus);
     const groupBy = ['regions', 'councils'].includes(requestedGroupBy)
       ? requestedGroupBy
       : (scopedCouncil || scopedRegion ? 'councils' : 'regions');
@@ -2238,8 +2241,17 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
           };
     if (scopeRegionRegex) submissionQuery.region = scopeRegionRegex;
     if (scopeCouncilRegex) submissionQuery.council = scopeCouncilRegex;
+    if (scopeAreaOfFocusRegex) submissionQuery.areaOfFocus = scopeAreaOfFocusRegex;
 
     const allSubmissions = await Submission.find(submissionQuery).sort({ createdAt: -1 });
+    let areaOfFocusOptionSource = allSubmissions;
+    if (scopeAreaOfFocusRegex) {
+      const optionQuery = { ...submissionQuery };
+      delete optionQuery.areaOfFocus;
+      areaOfFocusOptionSource = await Submission.find(optionQuery)
+        .select('areaOfFocus category')
+        .lean();
+    }
     const allSubmissionIds = allSubmissions.map((submission) => submission._id);
     const levelRoundIds = await CompetitionRound.find({
       year: round.year,
@@ -2276,6 +2288,41 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
     const unassignedSubmissions = allSubmissions.filter(
       (submission) => !assignedOrEvaluatedSubmissionIdSet.has(String(submission._id))
     );
+
+    const areaOfFocusTotalsMap = new Map();
+    for (const submission of allSubmissions) {
+      const key = String(submission.areaOfFocus || submission.category || 'Unknown').trim() || 'Unknown';
+      areaOfFocusTotalsMap.set(key, (areaOfFocusTotalsMap.get(key) || 0) + 1);
+    }
+
+    const areaOfFocusUnassignedMap = new Map();
+    for (const submission of unassignedSubmissions) {
+      const key = String(submission.areaOfFocus || submission.category || 'Unknown').trim() || 'Unknown';
+      areaOfFocusUnassignedMap.set(key, (areaOfFocusUnassignedMap.get(key) || 0) + 1);
+    }
+
+    const areaOfFocusKeys = [...new Set([
+      ...areaOfFocusTotalsMap.keys(),
+      ...areaOfFocusUnassignedMap.keys()
+    ])];
+    const areaOfFocusOptions = [...new Set(
+      (areaOfFocusOptionSource || [])
+        .map((submission) => String(submission.areaOfFocus || submission.category || '').trim())
+        .filter(Boolean)
+    )].sort((a, b) => a.localeCompare(b));
+
+    const areaOfFocusDistribution = areaOfFocusKeys
+      .map((areaOfFocus) => {
+        const totalSubmissions = areaOfFocusTotalsMap.get(areaOfFocus) || 0;
+        const unassignedCount = areaOfFocusUnassignedMap.get(areaOfFocus) || 0;
+        return {
+          areaOfFocus,
+          totalSubmissions,
+          assignedEvaluationCount: Math.max(totalSubmissions - unassignedCount, 0),
+          unassignedSubmissions: unassignedCount
+        };
+      })
+      .sort((a, b) => b.unassignedSubmissions - a.unassignedSubmissions);
 
     const distributionMap = new Map();
     for (const submission of unassignedSubmissions) {
@@ -2376,7 +2423,7 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
       })
       .sort((a, b) => b.unassignedSubmissions - a.unassignedSubmissions);
 
-    const submissionsPool = scopedCouncil ? unassignedSubmissions : [];
+    const submissionsPool = unassignedSubmissions;
     const submissionsTotal = submissionsPool.length;
     const submissionsStart = (page - 1) * limit;
     const paginatedSubmissions = submissionsPool.slice(submissionsStart, submissionsStart + limit);
@@ -2388,7 +2435,8 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
       school: submission.school || null,
       region: submission.region || null,
       council: submission.council || null,
-      areaOfFocus: submission.category || null,
+      areaOfFocus: submission.areaOfFocus || submission.category || null,
+      category: submission.category || null,
       subject: submission.subject || null,
       status: submission.status || null,
       roundId: round._id,
@@ -2415,6 +2463,7 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
         groupBy,
         region: scopedRegion || null,
         council: scopedCouncil || null,
+        areaOfFocus: scopedAreaOfFocus || null,
         dataScope: hasSnapshotContext ? 'snapshot' : (roundScopedSubmissionExists ? 'roundId' : 'legacy-year-level')
       },
       summary: {
@@ -2422,6 +2471,8 @@ router.get('/:id/unassigned-dashboard', async (req, res) => {
         assignedEvaluationCount: Math.max(allSubmissions.length - unassignedSubmissions.length, 0),
         totalUnassignedSubmissions: unassignedSubmissions.length
       },
+      areaOfFocusOptions,
+      areaOfFocusDistribution,
       distribution,
       children,
       submissions: submissionRows,
