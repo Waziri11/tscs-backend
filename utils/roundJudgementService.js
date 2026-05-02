@@ -329,23 +329,45 @@ const getLatestEvaluationJudgeSetsBySubmission = async ({
 
   const grouped = await Evaluation.aggregate([
     { $match: match },
+    {
+      $addFields: {
+        resolvedTotalScore: {
+          $cond: [
+            { $gt: [{ $ifNull: ['$totalScore', 0] }, 0] },
+            '$totalScore',
+            {
+              $sum: {
+                $map: {
+                  input: { $objectToArray: { $ifNull: ['$scores', {}] } },
+                  as: 'scoreItem',
+                  in: { $ifNull: ['$$scoreItem.v', 0] }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
     { $sort: { submittedAt: -1, updatedAt: -1, createdAt: -1, _id: -1 } },
     {
       $group: {
         _id: {
           submissionId: '$submissionId',
-          judgeId: '$judgeId'
+          judgeId: '$judgeId',
+          roundId: '$roundId'
         },
         submissionId: { $first: '$submissionId' },
         judgeId: { $first: '$judgeId' },
+        roundId: { $first: '$roundId' },
         averageScore: { $first: '$averageScore' },
-        totalScore: { $first: '$totalScore' }
+        totalScore: { $first: '$resolvedTotalScore' }
       }
     },
     {
       $group: {
         _id: '$submissionId',
         judgeIds: { $addToSet: '$judgeId' },
+        roundIds: { $addToSet: '$roundId' },
         averageScore: { $avg: '$averageScore' },
         totalScore: { $avg: '$totalScore' },
         totalEvaluations: { $sum: 1 }
@@ -357,6 +379,7 @@ const getLatestEvaluationJudgeSetsBySubmission = async ({
   for (const item of grouped) {
     map.set(String(item._id), {
       judgeIds: new Set((item.judgeIds || []).map((judgeId) => String(judgeId))),
+      roundIds: new Set((item.roundIds || []).map((roundId) => String(roundId))),
       averageScore: Math.round((item.averageScore || 0) * 100) / 100,
       totalScore: Math.round((item.totalScore || 0) * 100) / 100,
       totalEvaluations: item.totalEvaluations || 0

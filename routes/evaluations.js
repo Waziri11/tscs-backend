@@ -15,7 +15,6 @@ const {
 } = require('../utils/roundJudgementService');
 const { canAdminAccessSubmission } = require('../utils/adminScope');
 const Competition = require('../models/Competition');
-const CompetitionRound = require('../models/CompetitionRound');
 const {
   getEvaluationCriteriaFromCompetition,
   normalizeStoredCriteria,
@@ -45,31 +44,12 @@ async function resolveEvaluationRoundForJudge(submission) {
   };
 }
 
-async function findExistingEvaluationForLevelYear(submission, judgeId) {
-  const year = Number(submission.year);
-  const level = submission.level;
-
-  let existing = await Evaluation.findOne({
-    submissionId: submission._id,
-    judgeId,
-    year,
-    level
-  });
-
-  if (existing) {
-    return existing;
-  }
-
-  const roundIds = await CompetitionRound.find({ year, level }).distinct('_id');
-  if (!Array.isArray(roundIds) || roundIds.length === 0) {
-    return null;
-  }
-
+async function findExistingEvaluationForRound(submissionId, judgeId, roundId) {
   return Evaluation.findOne({
-    submissionId: submission._id,
+    submissionId,
     judgeId,
-    roundId: { $in: roundIds }
-  }).sort({ submittedAt: -1, updatedAt: -1, createdAt: -1, _id: -1 });
+    roundId
+  });
 }
 
 // @route   GET /api/evaluations
@@ -322,14 +302,17 @@ router.post('/', authorize('judge'), invalidateCacheOnChange(['cache:/api/leader
 
     const totalScore = verdict.totalScore;
     const averageScore = verdict.averageScore;
-    const existingEvaluation = await findExistingEvaluationForLevelYear(submission, req.user._id);
+    const existingEvaluation = await findExistingEvaluationForRound(
+      submission._id,
+      req.user._id,
+      round._id
+    );
     const evaluationFilter = existingEvaluation
       ? { _id: existingEvaluation._id }
       : {
           submissionId,
           judgeId: req.user._id,
-          year: Number(submission.year),
-          level: submission.level
+          roundId: round._id
         };
 
     const evaluation = await Evaluation.findOneAndUpdate(
