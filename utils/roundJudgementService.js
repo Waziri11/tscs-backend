@@ -94,6 +94,16 @@ const rankEntriesDeterministically = (entries) => {
   return rankedEntries;
 };
 
+const isTransactionUnsupportedError = (error) => {
+  const message = String(error?.message || '');
+  return (
+    message.includes('Transaction numbers are only allowed on a replica set member or mongos') ||
+    message.includes('transactions are not supported') ||
+    message.includes('Transaction is not supported') ||
+    message.includes('This MongoDB deployment does not support retryable writes')
+  );
+};
+
 const getNextLevel = (level) => NEXT_LEVEL[level] || null;
 
 const getRoundSnapshot = async (roundId) => {
@@ -1341,10 +1351,10 @@ const approveAreaLeaderboardAndPromote = async ({
   const promotedIds = [...new Set(promotedEntries.map((entry) => String(entry.submissionId)))];
   const eliminatedIds = [...new Set(eliminatedEntries.map((entry) => String(entry.submissionId)))];
 
-  const session = await mongoose.startSession();
   let result = null;
-  try {
-    await session.withTransaction(async () => {
+  const runFinalizationWrites = async (session = null) => {
+    const writeOptions = session ? { session } : {};
+
       if (promotedIds.length > 0) {
         if (nextLevel) {
           await Submission.updateMany(
@@ -1357,7 +1367,7 @@ const approveAreaLeaderboardAndPromote = async ({
                 promotedFromRoundId: round._id
               }
             },
-            { session }
+            writeOptions
           );
         } else {
           await Submission.updateMany(
@@ -1368,7 +1378,7 @@ const approveAreaLeaderboardAndPromote = async ({
                 promotedFromRoundId: round._id
               }
             },
-            { session }
+            writeOptions
           );
         }
       }
@@ -1381,7 +1391,7 @@ const approveAreaLeaderboardAndPromote = async ({
               status: 'eliminated'
             }
           },
-          { session }
+          writeOptions
         );
       }
 
@@ -1441,7 +1451,7 @@ const approveAreaLeaderboardAndPromote = async ({
               upsert: true
             }
           })),
-          { session }
+          writeOptions
         );
       }
 
@@ -1470,7 +1480,7 @@ const approveAreaLeaderboardAndPromote = async ({
         quotaSourceId: quotaInfo.sourceId,
         quotaOverride: normalizedQuotaOverride
       };
-      await leaderboard.save({ session });
+      await leaderboard.save(writeOptions);
 
       result = {
         success: true,
@@ -1483,7 +1493,25 @@ const approveAreaLeaderboardAndPromote = async ({
         decisionsByAreaOfFocus: decisionByAreaOfFocus,
         nextLevel
       };
-    });
+  };
+
+  const session = await mongoose.startSession();
+  try {
+    try {
+      await session.withTransaction(async () => {
+        await runFinalizationWrites(session);
+      });
+    } catch (error) {
+      if (!isTransactionUnsupportedError(error)) {
+        throw error;
+      }
+
+      console.warn(
+        'MongoDB transactions are unavailable; finalizing leaderboard without a transaction.',
+        error.message
+      );
+      await runFinalizationWrites();
+    }
   } catch (error) {
     return {
       success: false,
