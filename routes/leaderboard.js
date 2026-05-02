@@ -282,11 +282,24 @@ router.post('/:id/finalize', invalidateCacheOnChange('cache:/api/leaderboard*'),
       });
     }
 
+    let quotaOverride = null;
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'quota')) {
+      const parsedQuota = Number(req.body.quota);
+      if (!Number.isInteger(parsedQuota) || parsedQuota < 1) {
+        return res.status(400).json({
+          success: false,
+          message: 'Quota must be a whole number greater than or equal to 1'
+        });
+      }
+      quotaOverride = parsedQuota;
+    }
+
     const result = await approveAreaLeaderboardAndPromote({
       roundId: leaderboard.roundId,
       areaId: leaderboard.areaId,
       approvedBy: req.user._id,
-      force: req.body.force === true
+      force: req.body.force === true,
+      quotaOverride
     });
 
     if (!result.success) {
@@ -308,7 +321,8 @@ router.post('/:id/finalize', invalidateCacheOnChange('cache:/api/leaderboard*'),
           areaId: leaderboard.areaId,
           promoted: result.promoted,
           eliminated: result.eliminated,
-          nextLevel: result.nextLevel
+          nextLevel: result.nextLevel,
+          appliedQuota: result.appliedQuota
         },
         'success',
         'update'

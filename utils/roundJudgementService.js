@@ -1221,7 +1221,13 @@ const refreshSubmissionAndAreaLeaderboard = async ({ submissionId, roundId }) =>
   return { submissionId, areaId };
 };
 
-const approveAreaLeaderboardAndPromote = async ({ roundId, areaId, approvedBy, force = false }) => {
+const approveAreaLeaderboardAndPromote = async ({
+  roundId,
+  areaId,
+  approvedBy,
+  force = false,
+  quotaOverride = null
+}) => {
   const round = await CompetitionRound.findById(roundId);
   if (!round) {
     return { success: false, status: 404, message: 'Competition round not found' };
@@ -1272,12 +1278,18 @@ const approveAreaLeaderboardAndPromote = async ({ roundId, areaId, approvedBy, f
   const eliminatedEntries = [];
   const decisionByAreaOfFocus = {};
   const defaultQuota = Math.max(0, Number(quotaInfo.quota) || 0);
+  const normalizedQuotaOverride = Number.isInteger(quotaOverride) && quotaOverride > 0
+    ? quotaOverride
+    : null;
+  const appliedQuota = round.level === 'National'
+    ? 1
+    : (normalizedQuotaOverride ?? defaultQuota);
 
   for (const [focus, entries] of groupedByFocus.entries()) {
     const rankedEntries = rankEntriesDeterministically(entries);
     const groupQuota = round.level === 'National'
       ? (rankedEntries.length > 0 ? 1 : 0)
-      : Math.max(0, Math.min(defaultQuota, rankedEntries.length));
+      : Math.max(0, Math.min(appliedQuota, rankedEntries.length));
 
     const promotedGroup = rankedEntries.slice(0, groupQuota);
     const eliminatedGroup = rankedEntries.slice(groupQuota);
@@ -1423,7 +1435,7 @@ const approveAreaLeaderboardAndPromote = async ({ roundId, areaId, approvedBy, f
       });
 
       leaderboard.entries = updatedEntries;
-      leaderboard.quota = round.level === 'National' ? 1 : defaultQuota;
+      leaderboard.quota = round.level === 'National' ? 1 : appliedQuota;
       leaderboard.state = 'finalized';
       leaderboard.isLocked = true;
       leaderboard.finalizedAt = new Date();
@@ -1432,13 +1444,15 @@ const approveAreaLeaderboardAndPromote = async ({ roundId, areaId, approvedBy, f
       leaderboard.metadata = {
         ...(leaderboard.metadata || {}),
         quotaSourceType: quotaInfo.sourceType,
-        quotaSourceId: quotaInfo.sourceId
+        quotaSourceId: quotaInfo.sourceId,
+        quotaOverride: normalizedQuotaOverride
       };
       await leaderboard.save({ session });
 
       result = {
         success: true,
         leaderboard,
+        appliedQuota: round.level === 'National' ? 1 : appliedQuota,
         promoted: promotedEntries.length,
         eliminated: eliminatedEntries.length,
         promotedIds,
