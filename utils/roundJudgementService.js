@@ -341,20 +341,100 @@ const getLatestEvaluationJudgeSetsBySubmission = async ({
     { $match: match },
     {
       $addFields: {
-        resolvedTotalScore: {
-          $cond: [
-            { $gt: [{ $ifNull: ['$totalScore', 0] }, 0] },
-            '$totalScore',
-            {
-              $sum: {
-                $map: {
-                  input: { $objectToArray: { $ifNull: ['$scores', {}] } },
-                  as: 'scoreItem',
-                  in: { $ifNull: ['$$scoreItem.v', 0] }
+        normalizedAverageScore: {
+          $convert: {
+            input: '$averageScore',
+            to: 'double',
+            onError: null,
+            onNull: null
+          }
+        },
+        normalizedTotalScore: {
+          $convert: {
+            input: '$totalScore',
+            to: 'double',
+            onError: null,
+            onNull: null
+          }
+        },
+        scoresTotal: {
+          $sum: {
+            $map: {
+              input: { $objectToArray: { $ifNull: ['$scores', {}] } },
+              as: 'scoreItem',
+              in: {
+                $convert: {
+                  input: '$$scoreItem.v',
+                  to: 'double',
+                  onError: 0,
+                  onNull: 0
                 }
               }
             }
-          ]
+          }
+        }
+      }
+    },
+    {
+      $addFields: {
+        resolvedAverageScore: {
+          $let: {
+            vars: {
+              averageScore: '$normalizedAverageScore',
+              totalScore: '$normalizedTotalScore',
+              scoresTotal: '$scoresTotal'
+            },
+            in: {
+              $cond: [
+                {
+                  $and: [
+                    { $ne: ['$$averageScore', null] },
+                    { $gt: ['$$averageScore', 0] }
+                  ]
+                },
+                '$$averageScore',
+                {
+                  $cond: [
+                    {
+                      $and: [
+                        { $ne: ['$$totalScore', null] },
+                        { $gt: ['$$totalScore', 0] }
+                      ]
+                    },
+                    '$$totalScore',
+                    '$$scoresTotal'
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        resolvedTotalScore: {
+          $let: {
+            vars: {
+              averageScore: '$normalizedAverageScore',
+              totalScore: '$normalizedTotalScore',
+              scoresTotal: '$scoresTotal'
+            },
+            in: {
+              $cond: [
+                {
+                  $and: [
+                    { $ne: ['$$totalScore', null] },
+                    { $gt: ['$$totalScore', 0] }
+                  ]
+                },
+                '$$totalScore',
+                {
+                  $cond: [
+                    { $gt: ['$$scoresTotal', 0] },
+                    '$$scoresTotal',
+                    { $ifNull: ['$$averageScore', 0] }
+                  ]
+                }
+              ]
+            }
+          }
         }
       }
     },
@@ -369,7 +449,7 @@ const getLatestEvaluationJudgeSetsBySubmission = async ({
         submissionId: { $first: '$submissionId' },
         judgeId: { $first: '$judgeId' },
         roundId: { $first: '$roundId' },
-        averageScore: { $first: '$averageScore' },
+        averageScore: { $first: '$resolvedAverageScore' },
         totalScore: { $first: '$resolvedTotalScore' }
       }
     },
@@ -396,6 +476,102 @@ const getLatestEvaluationJudgeSetsBySubmission = async ({
     });
   }
   return map;
+};
+
+const approximatelyEqual = (left, right, tolerance = 0.000001) => {
+  return Math.abs(Number(left || 0) - Number(right || 0)) <= tolerance;
+};
+
+const normalizeNumeric = (value, fallback = 0) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+};
+
+const syncLeaderboardScoresFromEvaluations = async (leaderboard, roundIdsCache = new Map()) => {
+  if (!leaderboard || !Array.isArray(leaderboard.entries) || leaderboard.entries.length === 0) {
+    return leaderboard;
+  }
+
+  const plainEntries = leaderboard.entries.map((entry) => (
+    entry && typeof entry.toObject === 'function' ? entry.toObject() : { ...entry }
+  ));
+  const submissionIds = [...new Set(
+    plainEntries
+      .map((entry) => entry?.submissionId)
+      .filter(Boolean)
+      .map((id) => String(id))
+  )];
+
+  if (submissionIds.length === 0) {
+    return leaderboard;
+  }
+
+  const roundKey = `${leaderboard.year}::${leaderboard.level}`;
+  let roundIds = roundIdsCache.get(roundKey);
+  if (!roundIds) {
+    roundIds = await getRoundIdsForYearLevel(leaderboard.year, leaderboard.level);
+    roundIdsCache.set(roundKey, roundIds);
+  }
+
+  const evaluationMap = await getLatestEvaluationJudgeSetsBySubmission({
+    year: leaderboard.year,
+    level: leaderboard.level,
+    submissionIds,
+    roundIds
+  });
+
+  let changed = false;
+  const updatedEntries = plainEntries.map((entry) => {
+    const entryId = String(entry?.submissionId || '');
+    if (!entryId) return entry;
+
+    const scoreData = evaluationMap.get(entryId);
+    const fallbackAverage = normalizeNumeric(entry.averageScore);
+    const fallbackTotal = normalizeNumeric(entry.totalScore);
+    const fallbackCount = Math.max(0, Math.floor(normalizeNumeric(entry.totalEvaluations)));
+
+    const nextAverage = scoreData ? normalizeNumeric(scoreData.averageScore) : fallbackAverage;
+    const nextTotal = scoreData ? normalizeNumeric(scoreData.totalScore) : fallbackTotal;
+    const nextCount = scoreData ? Math.max(0, Math.floor(normalizeNumeric(scoreData.totalEvaluations))) : fallbackCount;
+
+    let nextStatus = entry.status;
+    if (!['promoted', 'eliminated', 'disqualified'].includes(nextStatus)) {
+      nextStatus = nextCount > 0 ? 'evaluated' : 'pending';
+    }
+
+    if (
+      !approximatelyEqual(fallbackAverage, nextAverage)
+      || !approximatelyEqual(fallbackTotal, nextTotal)
+      || fallbackCount !== nextCount
+      || String(entry.status || '') !== String(nextStatus || '')
+    ) {
+      changed = true;
+    }
+
+    return {
+      ...entry,
+      averageScore: nextAverage,
+      totalScore: nextTotal,
+      totalEvaluations: nextCount,
+      status: nextStatus
+    };
+  });
+
+  if (!changed) {
+    return leaderboard;
+  }
+
+  const rankedEntries = rankEntriesDeterministically(updatedEntries);
+  leaderboard.entries = rankedEntries;
+  leaderboard.totalSubmissions = rankedEntries.length;
+  leaderboard.totalEvaluations = rankedEntries.reduce(
+    (sum, entry) => sum + normalizeNumeric(entry.totalEvaluations),
+    0
+  );
+  leaderboard.lastUpdated = new Date();
+  await leaderboard.save();
+
+  return leaderboard;
 };
 
 const filterSubmissionsPendingLevelEvaluation = async (round, submissions) => {
@@ -1698,26 +1874,13 @@ const listAreaLeaderboards = async ({ filters = {}, user }) => {
     areaId: 1
   });
 
-  const hasMissingTotalScore = (leaderboard) =>
-    Array.isArray(leaderboard?.entries)
-      && leaderboard.entries.some((entry) => typeof entry?.totalScore !== 'number');
-
-  if (leaderboards.some(hasMissingTotalScore)) {
-    const refreshedLeaderboards = [];
-    for (const leaderboard of leaderboards) {
-      if (!hasMissingTotalScore(leaderboard)) {
-        refreshedLeaderboards.push(leaderboard);
-        continue;
-      }
-      const rebuilt = await rebuildAreaLeaderboard(
-        leaderboard.roundId,
-        leaderboard.areaId,
-        { forceUnlocked: true }
-      );
-      refreshedLeaderboards.push(rebuilt || leaderboard);
-    }
-    leaderboards = refreshedLeaderboards;
+  const roundIdsCache = new Map();
+  const refreshedLeaderboards = [];
+  for (const leaderboard of leaderboards) {
+    const synced = await syncLeaderboardScoresFromEvaluations(leaderboard, roundIdsCache);
+    refreshedLeaderboards.push(synced || leaderboard);
   }
+  leaderboards = refreshedLeaderboards;
 
   const statePriority = {
     published: 4,
