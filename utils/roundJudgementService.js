@@ -306,10 +306,16 @@ const getAnchorRoundForYearLevel = async (year, level) => {
   return rounds.length > 0 ? rounds[0] : null;
 };
 
+const toObjectIdList = (values = []) => {
+  return (values || [])
+    .filter((value) => value !== null && value !== undefined)
+    .map((value) => String(value))
+    .filter((value) => mongoose.Types.ObjectId.isValid(value))
+    .map((value) => new mongoose.Types.ObjectId(value));
+};
+
 const buildEvaluationMatchForYearLevel = ({ year, level, submissionIds = [], roundIds = [] }) => {
-  const submissionObjectIds = (submissionIds || [])
-    .filter(Boolean)
-    .map((id) => new mongoose.Types.ObjectId(id));
+  const submissionObjectIds = toObjectIdList(submissionIds);
 
   if (submissionObjectIds.length === 0) {
     return null;
@@ -321,9 +327,10 @@ const buildEvaluationMatchForYearLevel = ({ year, level, submissionIds = [], rou
   };
 
   const clauses = [yearLevelClause];
-  if (Array.isArray(roundIds) && roundIds.length > 0) {
+  const roundObjectIds = toObjectIdList(roundIds);
+  if (roundObjectIds.length > 0) {
     clauses.push({
-      roundId: { $in: roundIds.map((id) => new mongoose.Types.ObjectId(id)) }
+      roundId: { $in: roundObjectIds }
     });
   }
 
@@ -509,8 +516,17 @@ const toPlainObject = (value) => (
   value && typeof value.toObject === 'function' ? value.toObject() : { ...value }
 );
 
+const resolveTeacherId = (submission) => {
+  const teacher = submission?.teacherId;
+  if (!teacher) return null;
+  if (typeof teacher === 'object' && teacher._id) return teacher._id;
+  return teacher;
+};
+
 const buildLeaderboardEntryFromSubmission = (submission, scoreData = null) => {
   const resolvedScoreData = scoreData || {};
+  const resolvedTeacherId = resolveTeacherId(submission);
+  if (!resolvedTeacherId) return null;
   const totalEvaluations = Math.max(
     0,
     Math.floor(normalizeNumeric(resolvedScoreData.totalEvaluations))
@@ -527,7 +543,7 @@ const buildLeaderboardEntryFromSubmission = (submission, scoreData = null) => {
 
   return {
     submissionId: submission?._id,
-    teacherId: submission?.teacherId?._id || submission?.teacherId || null,
+    teacherId: resolvedTeacherId,
     teacherName: submission?.teacherId?.name || submission?.teacherName || 'Unknown',
     teacherEmail: submission?.teacherId?.email || '',
     school: submission?.school || 'Unknown',
@@ -653,7 +669,10 @@ const syncLeaderboardScoresFromEvaluations = async (
     };
 
     if (submission) {
-      nextEntry.teacherId = submission.teacherId?._id || submission.teacherId || nextEntry.teacherId;
+      const resolvedTeacherId = resolveTeacherId(submission);
+      if (resolvedTeacherId) {
+        nextEntry.teacherId = resolvedTeacherId;
+      }
       nextEntry.teacherName = submission.teacherId?.name || submission.teacherName || nextEntry.teacherName;
       nextEntry.teacherEmail = submission.teacherId?.email || nextEntry.teacherEmail || '';
       nextEntry.school = submission.school || nextEntry.school;
@@ -682,7 +701,12 @@ const syncLeaderboardScoresFromEvaluations = async (
       totalScore: 0,
       totalEvaluations: 0
     };
-    updatedEntries.push(buildLeaderboardEntryFromSubmission(submission, scoreData));
+    const builtEntry = buildLeaderboardEntryFromSubmission(submission, scoreData);
+    if (!builtEntry) {
+      console.warn(`Skipping leaderboard entry without teacherId for submission ${submissionId}`);
+      continue;
+    }
+    updatedEntries.push(builtEntry);
     changed = true;
   }
 
@@ -691,9 +715,16 @@ const syncLeaderboardScoresFromEvaluations = async (
   }
 
   const rankedEntries = rankEntriesDeterministically(updatedEntries);
-  leaderboard.entries = rankedEntries;
-  leaderboard.totalSubmissions = rankedEntries.length;
-  leaderboard.totalEvaluations = rankedEntries.reduce(
+  const sanitizedEntries = rankedEntries.filter(
+    (entry) => Boolean(entry?.submissionId) && Boolean(entry?.teacherId)
+  );
+  if (sanitizedEntries.length !== rankedEntries.length) {
+    changed = true;
+  }
+  const normalizedEntries = rankEntriesDeterministically(sanitizedEntries);
+  leaderboard.entries = normalizedEntries;
+  leaderboard.totalSubmissions = normalizedEntries.length;
+  leaderboard.totalEvaluations = normalizedEntries.reduce(
     (sum, entry) => sum + normalizeNumeric(entry.totalEvaluations),
     0
   );
@@ -734,8 +765,7 @@ const getAreaSubmissionsForLevel = async (round, areaId, options = {}) => {
   })
     .select(
       '_id teacherId teacherName school region council category class subject areaOfFocus status disqualified createdAt videoFileUrl videoLink preferredLink'
-    )
-    .populate('teacherId', 'name email');
+    );
 
   return submissions.filter((submission) => {
     if (hasSubmissionVideo(submission)) return true;
@@ -2050,8 +2080,15 @@ const listAreaLeaderboards = async ({ filters = {}, user }) => {
 
       if (missingAreaIds.length > 0) {
         for (const missingAreaId of missingAreaIds) {
-          const rebuilt = await rebuildAreaLeaderboard(anchorRound._id, missingAreaId, { forceUnlocked: true });
-          if (rebuilt) leaderboards.push(rebuilt);
+          try {
+            const rebuilt = await rebuildAreaLeaderboard(anchorRound._id, missingAreaId, { forceUnlocked: true });
+            if (rebuilt) leaderboards.push(rebuilt);
+          } catch (error) {
+            console.warn(
+              `Failed to auto-build leaderboard for area "${missingAreaId}" (${query.year}/${query.level}):`,
+              error.message
+            );
+          }
         }
       }
     }
@@ -2061,12 +2098,20 @@ const listAreaLeaderboards = async ({ filters = {}, user }) => {
   const areaSubmissionsCache = new Map();
   const refreshedLeaderboards = [];
   for (const leaderboard of leaderboards) {
-    const synced = await syncLeaderboardScoresFromEvaluations(
-      leaderboard,
-      roundIdsCache,
-      areaSubmissionsCache
-    );
-    refreshedLeaderboards.push(synced || leaderboard);
+    try {
+      const synced = await syncLeaderboardScoresFromEvaluations(
+        leaderboard,
+        roundIdsCache,
+        areaSubmissionsCache
+      );
+      refreshedLeaderboards.push(synced || leaderboard);
+    } catch (error) {
+      console.warn(
+        `Failed to sync leaderboard "${leaderboard?._id}" (${leaderboard?.year}/${leaderboard?.level}/${leaderboard?.areaId}):`,
+        error.message
+      );
+      refreshedLeaderboards.push(leaderboard);
+    }
   }
   leaderboards = refreshedLeaderboards;
 
