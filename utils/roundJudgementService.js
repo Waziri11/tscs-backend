@@ -498,20 +498,85 @@ const matchesAreaOfFocus = (candidate, targetNormalized) => {
   return normalizeAreaOfFocus(candidate) === targetNormalized;
 };
 
-const syncLeaderboardScoresFromEvaluations = async (leaderboard, roundIdsCache = new Map()) => {
-  if (!leaderboard || !Array.isArray(leaderboard.entries) || leaderboard.entries.length === 0) {
+const toPlainObject = (value) => (
+  value && typeof value.toObject === 'function' ? value.toObject() : { ...value }
+);
+
+const buildLeaderboardEntryFromSubmission = (submission, scoreData = null) => {
+  const resolvedScoreData = scoreData || {};
+  const totalEvaluations = Math.max(
+    0,
+    Math.floor(normalizeNumeric(resolvedScoreData.totalEvaluations))
+  );
+
+  let status = totalEvaluations > 0 ? 'evaluated' : 'pending';
+  if (submission?.disqualified === true || submission?.status === 'disqualified') {
+    status = 'disqualified';
+  } else if (submission?.status === 'eliminated') {
+    status = 'eliminated';
+  } else if (submission?.status === 'promoted') {
+    status = 'promoted';
+  }
+
+  return {
+    submissionId: submission?._id,
+    teacherId: submission?.teacherId?._id || submission?.teacherId || null,
+    teacherName: submission?.teacherId?.name || submission?.teacherName || 'Unknown',
+    teacherEmail: submission?.teacherId?.email || '',
+    school: submission?.school || 'Unknown',
+    region: submission?.region || null,
+    council: submission?.council || null,
+    category: submission?.category || 'Unknown',
+    class: submission?.class || 'Unknown',
+    subject: submission?.subject || 'Unknown',
+    areaOfFocus: submission?.areaOfFocus || 'Unknown',
+    rank: 0,
+    averageScore: normalizeNumeric(resolvedScoreData.averageScore),
+    totalScore: normalizeNumeric(resolvedScoreData.totalScore),
+    totalEvaluations,
+    status,
+    tieBreakCreatedAt: submission?.createdAt || null
+  };
+};
+
+const syncLeaderboardScoresFromEvaluations = async (
+  leaderboard,
+  roundIdsCache = new Map(),
+  areaSubmissionsCache = new Map()
+) => {
+  if (!leaderboard) {
     return leaderboard;
   }
 
-  const plainEntries = leaderboard.entries.map((entry) => (
-    entry && typeof entry.toObject === 'function' ? entry.toObject() : { ...entry }
-  ));
-  const submissionIds = [...new Set(
-    plainEntries
+  const plainEntries = Array.isArray(leaderboard.entries)
+    ? leaderboard.entries.map((entry) => toPlainObject(entry))
+    : [];
+
+  const areaSubmissionsKey = `${leaderboard.year}::${leaderboard.level}::${leaderboard.areaId}`;
+  let areaSubmissions = areaSubmissionsCache.get(areaSubmissionsKey);
+  if (!areaSubmissions) {
+    areaSubmissions = await getAreaSubmissionsForLevel(
+      { year: leaderboard.year, level: leaderboard.level },
+      leaderboard.areaId,
+      { includeEvaluatedWithoutVideo: true }
+    );
+    areaSubmissionsCache.set(areaSubmissionsKey, areaSubmissions);
+  }
+  const plainAreaSubmissions = (areaSubmissions || []).map((submission) => toPlainObject(submission));
+  const submissionsById = new Map(
+    plainAreaSubmissions.map((submission) => [String(submission._id), submission])
+  );
+
+  const submissionIds = [...new Set([
+    ...plainEntries
       .map((entry) => entry?.submissionId)
       .filter(Boolean)
+      .map((id) => String(id)),
+    ...plainAreaSubmissions
+      .map((submission) => submission?._id)
+      .filter(Boolean)
       .map((id) => String(id))
-  )];
+  ])];
 
   if (submissionIds.length === 0) {
     return leaderboard;
@@ -536,6 +601,7 @@ const syncLeaderboardScoresFromEvaluations = async (leaderboard, roundIdsCache =
     const entryId = String(entry?.submissionId || '');
     if (!entryId) return entry;
 
+    const submission = submissionsById.get(entryId);
     const scoreData = evaluationMap.get(entryId);
     const fallbackAverage = normalizeNumeric(entry.averageScore);
     const fallbackTotal = normalizeNumeric(entry.totalScore);
@@ -550,23 +616,68 @@ const syncLeaderboardScoresFromEvaluations = async (leaderboard, roundIdsCache =
       nextStatus = nextCount > 0 ? 'evaluated' : 'pending';
     }
 
+    if (submission?.disqualified === true || submission?.status === 'disqualified') {
+      nextStatus = 'disqualified';
+    } else if (submission?.status === 'eliminated') {
+      nextStatus = 'eliminated';
+    } else if (submission?.status === 'promoted') {
+      nextStatus = 'promoted';
+    }
+
+    const nextAreaOfFocus = submission?.areaOfFocus || entry.areaOfFocus || 'Unknown';
+
     if (
       !approximatelyEqual(fallbackAverage, nextAverage)
       || !approximatelyEqual(fallbackTotal, nextTotal)
       || fallbackCount !== nextCount
       || String(entry.status || '') !== String(nextStatus || '')
+      || String(entry.areaOfFocus || '') !== String(nextAreaOfFocus || '')
     ) {
       changed = true;
     }
 
-    return {
+    const nextEntry = {
       ...entry,
       averageScore: nextAverage,
       totalScore: nextTotal,
       totalEvaluations: nextCount,
-      status: nextStatus
+      status: nextStatus,
+      areaOfFocus: nextAreaOfFocus
     };
+
+    if (submission) {
+      nextEntry.teacherId = submission.teacherId?._id || submission.teacherId || nextEntry.teacherId;
+      nextEntry.teacherName = submission.teacherId?.name || submission.teacherName || nextEntry.teacherName;
+      nextEntry.teacherEmail = submission.teacherId?.email || nextEntry.teacherEmail || '';
+      nextEntry.school = submission.school || nextEntry.school;
+      nextEntry.region = submission.region || nextEntry.region || null;
+      nextEntry.council = submission.council || nextEntry.council || null;
+      nextEntry.category = submission.category || nextEntry.category;
+      nextEntry.class = submission.class || nextEntry.class;
+      nextEntry.subject = submission.subject || nextEntry.subject;
+      nextEntry.tieBreakCreatedAt = submission.createdAt || nextEntry.tieBreakCreatedAt || null;
+    }
+
+    return nextEntry;
   });
+
+  const existingEntryIds = new Set(
+    updatedEntries
+      .map((entry) => entry?.submissionId)
+      .filter(Boolean)
+      .map((id) => String(id))
+  );
+  for (const submission of plainAreaSubmissions) {
+    const submissionId = String(submission?._id || '');
+    if (!submissionId || existingEntryIds.has(submissionId)) continue;
+    const scoreData = evaluationMap.get(submissionId) || {
+      averageScore: 0,
+      totalScore: 0,
+      totalEvaluations: 0
+    };
+    updatedEntries.push(buildLeaderboardEntryFromSubmission(submission, scoreData));
+    changed = true;
+  }
 
   if (!changed) {
     return leaderboard;
@@ -607,7 +718,8 @@ const filterSubmissionsPendingLevelEvaluation = async (round, submissions) => {
   });
 };
 
-const getAreaSubmissionsForLevel = async (round, areaId) => {
+const getAreaSubmissionsForLevel = async (round, areaId, options = {}) => {
+  const { includeEvaluatedWithoutVideo = false } = options;
   const areaQuery = buildAreaQuery(round.level, areaId);
   const submissions = await Submission.find({
     ...buildLevelSubmissionQuery(round.year, round.level),
@@ -618,7 +730,13 @@ const getAreaSubmissionsForLevel = async (round, areaId) => {
     )
     .populate('teacherId', 'name email');
 
-  return submissions.filter((submission) => hasSubmissionVideo(submission));
+  return submissions.filter((submission) => {
+    if (hasSubmissionVideo(submission)) return true;
+    if (!includeEvaluatedWithoutVideo) return false;
+    const status = String(submission?.status || '').toLowerCase();
+    return ['evaluated', 'promoted', 'eliminated', 'disqualified'].includes(status)
+      || Number(submission?.averageScore || 0) > 0;
+  });
 };
 
 const getSubmissionAreaDescriptor = (level, submission) => {
@@ -1904,9 +2022,14 @@ const listAreaLeaderboards = async ({ filters = {}, user }) => {
   });
 
   const roundIdsCache = new Map();
+  const areaSubmissionsCache = new Map();
   const refreshedLeaderboards = [];
   for (const leaderboard of leaderboards) {
-    const synced = await syncLeaderboardScoresFromEvaluations(leaderboard, roundIdsCache);
+    const synced = await syncLeaderboardScoresFromEvaluations(
+      leaderboard,
+      roundIdsCache,
+      areaSubmissionsCache
+    );
     refreshedLeaderboards.push(synced || leaderboard);
   }
   leaderboards = refreshedLeaderboards;
@@ -1953,14 +2076,15 @@ const listAreaLeaderboards = async ({ filters = {}, user }) => {
     return String(left.areaId || '').localeCompare(String(right.areaId || ''));
   });
 
-  if (filters.areaOfFocus) {
+  const requestedAreaOfFocus = normalizeAreaOfFocus(filters.areaOfFocus);
+  if (requestedAreaOfFocus) {
     leaderboards = leaderboards
       .map((leaderboard) => {
         const filteredEntries = leaderboard.entries.filter(
-          (entry) => entry.areaOfFocus === filters.areaOfFocus
+          (entry) => matchesAreaOfFocus(entry?.areaOfFocus, requestedAreaOfFocus)
         );
         leaderboard.entries = rankEntriesDeterministically(
-          filteredEntries.map((entry) => entry.toObject())
+          filteredEntries.map((entry) => toPlainObject(entry))
         );
         leaderboard.totalSubmissions = leaderboard.entries.length;
         leaderboard.totalEvaluations = leaderboard.entries.reduce(
@@ -2000,6 +2124,7 @@ const listCouncilAreaLeaderboards = async ({ filters = {}, user }) => {
   const regionSet = new Set();
   const councilKeySet = new Set();
   const competitionAreaSet = new Set();
+  const requestedAreaOfFocus = normalizeAreaOfFocus(filters.areaOfFocus);
 
   for (const leaderboard of scopedAreaLeaderboards) {
     const plainLeaderboard = leaderboard.toObject ? leaderboard.toObject() : leaderboard;
@@ -2014,15 +2139,22 @@ const listCouncilAreaLeaderboards = async ({ filters = {}, user }) => {
     for (const entry of baseEntries) {
       const competitionArea = String(entry.areaOfFocus || '').trim();
       if (!competitionArea) continue;
+      const competitionAreaKey = normalizeAreaOfFocus(competitionArea);
+      if (!competitionAreaKey) continue;
       competitionAreaSet.add(competitionArea);
-      if (!areaMap.has(competitionArea)) {
-        areaMap.set(competitionArea, []);
+      if (!areaMap.has(competitionAreaKey)) {
+        areaMap.set(competitionAreaKey, {
+          label: competitionArea,
+          entries: []
+        });
       }
-      areaMap.get(competitionArea).push(entry);
+      areaMap.get(competitionAreaKey).entries.push(entry);
     }
 
-    for (const [competitionArea, entries] of areaMap.entries()) {
-      if (filters.areaOfFocus && competitionArea !== filters.areaOfFocus) continue;
+    for (const [competitionAreaKey, group] of areaMap.entries()) {
+      if (requestedAreaOfFocus && competitionAreaKey !== requestedAreaOfFocus) continue;
+      const competitionArea = group.label;
+      const entries = group.entries;
 
       const rankedEntries = rankEntriesDeterministically(
         entries.map((entry) => (entry && typeof entry.toObject === 'function' ? entry.toObject() : { ...entry }))
@@ -2092,9 +2224,12 @@ const listAvailableLocations = async ({ year, level, areaOfFocus, user }) => {
   const leaderboards = await listAreaLeaderboards({ filters, user });
 
   const locationSet = new Set();
+  const normalizedAreaOfFocus = normalizeAreaOfFocus(areaOfFocus);
   for (const leaderboard of leaderboards) {
-    if (areaOfFocus) {
-      const hasArea = leaderboard.entries.some((entry) => entry.areaOfFocus === areaOfFocus);
+    if (normalizedAreaOfFocus) {
+      const hasArea = leaderboard.entries.some((entry) =>
+        matchesAreaOfFocus(entry?.areaOfFocus, normalizedAreaOfFocus)
+      );
       if (!hasArea) continue;
     }
     locationSet.add(leaderboard.areaId);
