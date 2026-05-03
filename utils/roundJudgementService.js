@@ -487,6 +487,17 @@ const normalizeNumeric = (value, fallback = 0) => {
   return Number.isFinite(numeric) ? numeric : fallback;
 };
 
+const normalizeAreaOfFocus = (value) => {
+  if (value === null || value === undefined) return null;
+  const normalized = String(value).trim().toLowerCase();
+  return normalized.length > 0 ? normalized : null;
+};
+
+const matchesAreaOfFocus = (candidate, targetNormalized) => {
+  if (!targetNormalized) return true;
+  return normalizeAreaOfFocus(candidate) === targetNormalized;
+};
+
 const syncLeaderboardScoresFromEvaluations = async (leaderboard, roundIdsCache = new Map()) => {
   if (!leaderboard || !Array.isArray(leaderboard.entries) || leaderboard.entries.length === 0) {
     return leaderboard;
@@ -1286,7 +1297,8 @@ const rebuildAreaLeaderboard = async (roundId, areaId, options = {}) => {
   );
 };
 
-const checkAreaJudgeCompletion = async (roundId, areaId) => {
+const checkAreaJudgeCompletion = async (roundId, areaId, options = {}) => {
+  const scopedAreaOfFocus = normalizeAreaOfFocus(options?.areaOfFocus);
   const round = await CompetitionRound.findById(roundId);
   if (!round) {
     return {
@@ -1298,7 +1310,12 @@ const checkAreaJudgeCompletion = async (roundId, areaId) => {
     };
   }
 
-  const submissions = await getAreaSubmissionsForLevel(round, areaId);
+  let submissions = await getAreaSubmissionsForLevel(round, areaId);
+  if (scopedAreaOfFocus) {
+    submissions = submissions.filter((submission) =>
+      matchesAreaOfFocus(submission?.areaOfFocus, scopedAreaOfFocus)
+    );
+  }
   const submissionIds = submissions.map((submission) => submission._id);
   if (submissionIds.length === 0) {
     return {
@@ -1435,7 +1452,8 @@ const approveAreaLeaderboardAndPromote = async ({
   areaId,
   approvedBy,
   force = false,
-  quotaOverride = null
+  quotaOverride = null,
+  areaOfFocus = null
 }) => {
   const round = await CompetitionRound.findById(roundId);
   if (!round) {
@@ -1456,7 +1474,10 @@ const approveAreaLeaderboardAndPromote = async ({
     };
   }
 
-  const completion = await checkAreaJudgeCompletion(roundId, areaId);
+  const scopedAreaOfFocus = normalizeAreaOfFocus(areaOfFocus);
+  const completion = await checkAreaJudgeCompletion(roundId, areaId, {
+    areaOfFocus: scopedAreaOfFocus
+  });
   if (!completion.ready && !force) {
     return {
       success: false,
@@ -1468,20 +1489,28 @@ const approveAreaLeaderboardAndPromote = async ({
 
   const quotaInfo = await resolveQuotaForArea({ round, areaId, areaType });
   const nextLevel = getNextLevel(round.level);
-  const eligibleEntries = leaderboard.entries.filter(
-    (entry) => !['eliminated', 'disqualified'].includes(entry.status)
-  );
-  const groupedByFocus = new Map();
-  for (const rawEntry of eligibleEntries) {
-    const entry = rawEntry && typeof rawEntry.toObject === 'function'
-      ? rawEntry.toObject()
-      : { ...rawEntry };
-    const focus = String(entry.areaOfFocus || 'Unknown');
-    if (!groupedByFocus.has(focus)) {
-      groupedByFocus.set(focus, []);
+  if (scopedAreaOfFocus) {
+    const hasMatchingEntries = leaderboard.entries.some((entry) =>
+      matchesAreaOfFocus(entry?.areaOfFocus, scopedAreaOfFocus)
+    );
+    if (!hasMatchingEntries) {
+      return {
+        success: false,
+        status: 404,
+        message: 'No leaderboard entries found for the selected area of focus in this location.'
+      };
     }
-    groupedByFocus.get(focus).push(entry);
   }
+
+  const eligibleEntries = leaderboard.entries.filter((entry) => {
+    if (!matchesAreaOfFocus(entry?.areaOfFocus, scopedAreaOfFocus)) return false;
+    return !['eliminated', 'disqualified', 'promoted'].includes(entry.status);
+  });
+  const normalizedEligibleEntries = eligibleEntries.map((rawEntry) => (
+    rawEntry && typeof rawEntry.toObject === 'function'
+      ? rawEntry.toObject()
+      : { ...rawEntry }
+  ));
 
   const promotedEntries = [];
   const eliminatedEntries = [];
@@ -1494,23 +1523,22 @@ const approveAreaLeaderboardAndPromote = async ({
     ? 1
     : (normalizedQuotaOverride ?? defaultQuota);
 
-  for (const [focus, entries] of groupedByFocus.entries()) {
-    const rankedEntries = rankEntriesDeterministically(entries);
-    const groupQuota = round.level === 'National'
-      ? (rankedEntries.length > 0 ? 1 : 0)
-      : Math.max(0, Math.min(appliedQuota, rankedEntries.length));
+  const rankedEntries = rankEntriesDeterministically(normalizedEligibleEntries);
+  const effectiveQuota = round.level === 'National'
+    ? (rankedEntries.length > 0 ? 1 : 0)
+    : Math.max(0, Math.min(appliedQuota, rankedEntries.length));
 
-    const promotedGroup = rankedEntries.slice(0, groupQuota);
-    const eliminatedGroup = rankedEntries.slice(groupQuota);
-    promotedEntries.push(...promotedGroup);
-    eliminatedEntries.push(...eliminatedGroup);
-    decisionByAreaOfFocus[focus] = {
-      total: rankedEntries.length,
-      quota: groupQuota,
-      promoted: promotedGroup.length,
-      eliminated: eliminatedGroup.length
-    };
-  }
+  const promotedGroup = rankedEntries.slice(0, effectiveQuota);
+  const eliminatedGroup = rankedEntries.slice(effectiveQuota);
+  promotedEntries.push(...promotedGroup);
+  eliminatedEntries.push(...eliminatedGroup);
+  const decisionKey = scopedAreaOfFocus || 'overall';
+  decisionByAreaOfFocus[decisionKey] = {
+    total: rankedEntries.length,
+    quota: effectiveQuota,
+    promoted: promotedGroup.length,
+    eliminated: eliminatedGroup.length
+  };
 
   let targetRoundId = null;
   if (nextLevel) {
@@ -1654,7 +1682,8 @@ const approveAreaLeaderboardAndPromote = async ({
         ...(leaderboard.metadata || {}),
         quotaSourceType: quotaInfo.sourceType,
         quotaSourceId: quotaInfo.sourceId,
-        quotaOverride: normalizedQuotaOverride
+        quotaOverride: normalizedQuotaOverride,
+        finalizedAreaOfFocus: scopedAreaOfFocus
       };
       await leaderboard.save(writeOptions);
 

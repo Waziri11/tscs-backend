@@ -294,12 +294,25 @@ router.post('/:id/finalize', invalidateCacheOnChange('cache:/api/leaderboard*'),
       quotaOverride = parsedQuota;
     }
 
+    let scopedAreaOfFocus = null;
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'areaOfFocus')) {
+      const parsedAreaOfFocus = String(req.body.areaOfFocus || '').trim();
+      if (!parsedAreaOfFocus) {
+        return res.status(400).json({
+          success: false,
+          message: 'areaOfFocus must be a non-empty string when provided'
+        });
+      }
+      scopedAreaOfFocus = parsedAreaOfFocus;
+    }
+
     const result = await approveAreaLeaderboardAndPromote({
       roundId: leaderboard.roundId,
       areaId: leaderboard.areaId,
       approvedBy: req.user._id,
       force: req.body.force === true,
-      quotaOverride
+      quotaOverride,
+      areaOfFocus: scopedAreaOfFocus
     });
 
     if (!result.success) {
@@ -319,6 +332,7 @@ router.post('/:id/finalize', invalidateCacheOnChange('cache:/api/leaderboard*'),
           leaderboardId: req.params.id,
           roundId: leaderboard.roundId.toString(),
           areaId: leaderboard.areaId,
+          areaOfFocus: scopedAreaOfFocus,
           promoted: result.promoted,
           eliminated: result.eliminated,
           nextLevel: result.nextLevel,
@@ -467,7 +481,8 @@ router.post('/:year/:level/:areaOfFocus/advance', invalidateCacheOnChange('cache
       });
     }
 
-    const { year, level } = req.params;
+    const { year, level, areaOfFocus } = req.params;
+    const decodedAreaOfFocus = decodeURIComponent(String(areaOfFocus || '')).trim();
     const { locationKey, global } = req.body || {};
 
     if (!['Council', 'Regional', 'National'].includes(level)) {
@@ -522,7 +537,8 @@ router.post('/:year/:level/:areaOfFocus/advance', invalidateCacheOnChange('cache
         roundId: round._id,
         areaId,
         approvedBy: req.user._id,
-        force: req.body.force === true
+        force: req.body.force === true,
+        areaOfFocus: decodedAreaOfFocus || null
       });
       results.push({ areaId, ...result });
     }
