@@ -29,6 +29,13 @@ const hasSubmissionVideo = (submission) => {
   return videoCandidates.some((value) => typeof value === 'string' && value.trim().length > 0);
 };
 
+const isSubmissionEligibleForLeaderboard = (submission) => {
+  if (hasSubmissionVideo(submission)) return true;
+  const status = String(submission?.status || '').toLowerCase();
+  return ['evaluated', 'promoted', 'eliminated', 'disqualified'].includes(status)
+    || Number(submission?.averageScore || 0) > 0;
+};
+
 const getAreaTypeForLevel = (level) => {
   if (level === 'Council') return 'council';
   if (level === 'Regional') return 'region';
@@ -2010,16 +2017,45 @@ const listAreaLeaderboards = async ({ filters = {}, user }) => {
     }
   }
 
-  if (user.role === 'teacher') {
-    query['entries.teacherId'] = user._id;
-  }
-
   let leaderboards = await AreaLeaderboard.find(query).sort({
     year: -1,
     level: 1,
     areaType: 1,
     areaId: 1
   });
+
+  if (user.role === 'superadmin' && Number.isFinite(Number(query.year)) && typeof query.level === 'string') {
+    const anchorRound = await getAnchorRoundForYearLevel(query.year, query.level);
+    if (anchorRound) {
+      const areaSubmissionQuery = {
+        ...buildLevelSubmissionQuery(query.year, query.level)
+      };
+      if (query.areaId) {
+        Object.assign(areaSubmissionQuery, buildAreaQuery(query.level, query.areaId));
+      }
+
+      const scopedSubmissions = await Submission.find(areaSubmissionQuery)
+        .select('_id region council status averageScore videoFileUrl videoLink preferredLink');
+
+      const discoveredAreaIds = new Set();
+      for (const submission of scopedSubmissions) {
+        if (!isSubmissionEligibleForLeaderboard(submission)) continue;
+        discoveredAreaIds.add(buildAreaId(query.level, submission.region, submission.council));
+      }
+
+      const existingAreaIds = new Set(
+        leaderboards.map((leaderboard) => String(leaderboard.areaId || ''))
+      );
+      const missingAreaIds = [...discoveredAreaIds].filter((areaId) => !existingAreaIds.has(areaId));
+
+      if (missingAreaIds.length > 0) {
+        for (const missingAreaId of missingAreaIds) {
+          const rebuilt = await rebuildAreaLeaderboard(anchorRound._id, missingAreaId, { forceUnlocked: true });
+          if (rebuilt) leaderboards.push(rebuilt);
+        }
+      }
+    }
+  }
 
   const roundIdsCache = new Map();
   const areaSubmissionsCache = new Map();
@@ -2094,6 +2130,13 @@ const listAreaLeaderboards = async ({ filters = {}, user }) => {
         return leaderboard;
       })
       .filter((leaderboard) => leaderboard.entries.length > 0);
+  }
+
+  if (user.role === 'teacher') {
+    leaderboards = leaderboards.filter((leaderboard) =>
+      Array.isArray(leaderboard.entries)
+      && leaderboard.entries.some((entry) => String(entry?.teacherId) === String(user._id))
+    );
   }
 
   return leaderboards;
