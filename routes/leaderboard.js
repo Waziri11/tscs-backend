@@ -10,7 +10,11 @@ const {
   findAreaLeaderboardById,
   approveAreaLeaderboardAndPromote,
   publishAreaLeaderboard,
-  reopenAreaLeaderboard
+  reopenAreaLeaderboard,
+  discoverMissingLeaderboardAreas,
+  rebuildAreaLeaderboard,
+  buildAreaId,
+  getAreaTypeForLevel
 } = require('../utils/roundJudgementService');
 
 // Safely import logger
@@ -199,6 +203,125 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
     });
   } catch (error) {
     console.error('Get leaderboards error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   GET /api/leaderboard/missing-areas
+// @desc    Discover areas with eligible submissions but no leaderboard
+// @access  Private (Superadmin)
+router.get('/missing-areas', authorize('superadmin'), async (req, res) => {
+  try {
+    const { year, level, region, council, areaOfFocus } = req.query;
+
+    if (!year || !level) {
+      return res.status(400).json({
+        success: false,
+        message: 'Year and level are required'
+      });
+    }
+
+    const missingAreas = await discoverMissingLeaderboardAreas({
+      year: parseInt(year, 10),
+      level,
+      region: region || null,
+      council: council || null,
+      areaOfFocus: areaOfFocus ? decodeURIComponent(areaOfFocus) : null
+    });
+
+    return res.json({
+      success: true,
+      missingAreas,
+      count: missingAreas.length
+    });
+  } catch (error) {
+    console.error('Get missing areas error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/leaderboard/build
+// @desc    Build a leaderboard for a specific area that doesn't have one
+// @access  Private (Superadmin)
+router.post('/build', authorize('superadmin'), invalidateCacheOnChange('cache:/api/leaderboard*'), async (req, res) => {
+  try {
+    const { year, level, areaId, region, council } = req.body;
+
+    if (!year || !level) {
+      return res.status(400).json({
+        success: false,
+        message: 'Year and level are required'
+      });
+    }
+
+    // Resolve areaId from region/council if not provided directly
+    const resolvedAreaId = areaId || buildAreaId(level, region, council);
+    if (!resolvedAreaId || resolvedAreaId.includes('unknown')) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid areaId or region/council must be provided'
+      });
+    }
+
+    // Find the anchor round for this year+level
+    const round = await CompetitionRound.findOne({
+      year: parseInt(year, 10),
+      level
+    }).sort({ createdAt: 1, _id: 1 });
+
+    if (!round) {
+      return res.status(404).json({
+        success: false,
+        message: `No competition round found for ${year} ${level} level. Please create a round first.`
+      });
+    }
+
+    const leaderboard = await rebuildAreaLeaderboard(round._id, resolvedAreaId, {
+      forceUnlocked: true
+    });
+
+    if (!leaderboard) {
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to build leaderboard. No eligible submissions found for this area.'
+      });
+    }
+
+    if (logger) {
+      logger.logAdminAction(
+        'Superadmin manually built area leaderboard',
+        req.user._id,
+        req,
+        {
+          year: parseInt(year, 10),
+          level,
+          areaId: resolvedAreaId,
+          entriesCount: leaderboard.entries?.length || 0,
+          state: leaderboard.state
+        },
+        'success',
+        'create'
+      ).catch(() => {});
+    }
+
+    const plain = leaderboard.toObject ? leaderboard.toObject() : leaderboard;
+    return res.json({
+      success: true,
+      message: `Leaderboard built with ${plain.entries?.length || 0} entries.`,
+      leaderboard: {
+        ...plain,
+        locationKey: plain.areaId,
+        isFinalized: ['finalized', 'published'].includes(plain.state)
+      }
+    });
+  } catch (error) {
+    console.error('Build leaderboard error:', error);
     return res.status(500).json({
       success: false,
       message: error.message || 'Server error'

@@ -1362,7 +1362,7 @@ const rebuildAreaLeaderboard = async (roundId, areaId, options = {}) => {
     return existingLeaderboard;
   }
 
-  const submissions = (await getAreaSubmissionsForLevel(round, areaId))
+  const submissions = (await getAreaSubmissionsForLevel(round, areaId, { includeEvaluatedWithoutVideo: true }))
     .map((submission) => (submission && typeof submission.toObject === 'function' ? submission.toObject() : submission));
   const submissionIds = submissions.map((submission) => submission._id);
   const roundIds = await getRoundIdsForYearLevel(round.year, round.level);
@@ -2477,6 +2477,91 @@ const addSubmissionToActiveRoundSnapshot = async (round, submission) => {
   };
 };
 
+/**
+ * Discover areas that have eligible submissions but no AreaLeaderboard document
+ * (or one with 0 entries). Used by the superadmin "Build Leaderboard" feature.
+ */
+const discoverMissingLeaderboardAreas = async ({ year, level, region, council, areaOfFocus }) => {
+  const baseQuery = {
+    year: Number(year),
+    level,
+    isDeleted: { $ne: true },
+    status: { $nin: level === 'National' ? ['eliminated'] : ['eliminated', 'promoted'] }
+  };
+  if (region) baseQuery.region = region;
+  if (council) baseQuery.council = council;
+
+  const submissions = await Submission.find(baseQuery)
+    .select('_id region council areaOfFocus status averageScore videoFileUrl videoLink preferredLink teacherName school category class subject')
+    .populate('teacherId', 'name email');
+
+  // Group submissions by areaId
+  const areaMap = new Map();
+  for (const sub of submissions) {
+    // A submission is eligible if it has video, is evaluated, or has a score
+    if (!isSubmissionEligibleForLeaderboard(sub)) continue;
+
+    const areaId = buildAreaId(level, sub.region, sub.council);
+    if (!areaMap.has(areaId)) {
+      areaMap.set(areaId, {
+        areaId,
+        areaType: getAreaTypeForLevel(level),
+        region: sub.region || null,
+        council: sub.council || null,
+        submissions: [],
+        areasOfFocus: new Set()
+      });
+    }
+    const area = areaMap.get(areaId);
+    area.submissions.push(sub);
+    if (sub.areaOfFocus) area.areasOfFocus.add(sub.areaOfFocus);
+  }
+
+  // Get existing leaderboards for this scope
+  const existingLeaderboards = await AreaLeaderboard.find({
+    year: Number(year),
+    level
+  }).select('areaId entries');
+
+  const existingWithEntries = new Set();
+  for (const lb of existingLeaderboards) {
+    if (Array.isArray(lb.entries) && lb.entries.length > 0) {
+      existingWithEntries.add(lb.areaId);
+    }
+  }
+
+  // Find areas that have submissions but no leaderboard with entries
+  const normalizedAoF = normalizeAreaOfFocus(areaOfFocus);
+  const missingAreas = [];
+
+  for (const [areaId, areaData] of areaMap.entries()) {
+    if (existingWithEntries.has(areaId)) continue;
+    if (areaData.submissions.length === 0) continue;
+
+    let filteredSubs = areaData.submissions;
+    if (normalizedAoF) {
+      filteredSubs = filteredSubs.filter((s) =>
+        matchesAreaOfFocus(s.areaOfFocus, normalizedAoF)
+      );
+    }
+    if (filteredSubs.length === 0) continue;
+
+    missingAreas.push({
+      areaId,
+      areaType: areaData.areaType,
+      region: areaData.region,
+      council: areaData.council,
+      eligibleCount: filteredSubs.length,
+      evaluatedCount: filteredSubs.filter(
+        (s) => s.status === 'evaluated' || Number(s.averageScore || 0) > 0
+      ).length,
+      areasOfFocus: [...areaData.areasOfFocus].sort()
+    });
+  }
+
+  return missingAreas.sort((a, b) => a.areaId.localeCompare(b.areaId));
+};
+
 module.exports = {
   ROUND_LEVELS,
   getNextLevel,
@@ -2505,5 +2590,6 @@ module.exports = {
   rebuildAreaLeaderboard,
   updateAreaStateByCompletion,
   checkAreaJudgeCompletion,
-  addSubmissionToActiveRoundSnapshot
+  addSubmissionToActiveRoundSnapshot,
+  discoverMissingLeaderboardAreas
 };
