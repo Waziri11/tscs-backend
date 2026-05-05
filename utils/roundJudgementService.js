@@ -728,6 +728,79 @@ const syncLeaderboardScoresFromEvaluations = async (
   return leaderboard;
 };
 
+const syncLeaderboardStatusesFromPromotionDecisions = async (leaderboard) => {
+  if (
+    !leaderboard
+    || !['finalized', 'published'].includes(leaderboard.state)
+    || !leaderboard.roundId
+    || !Array.isArray(leaderboard.entries)
+    || leaderboard.entries.length === 0
+  ) {
+    return leaderboard;
+  }
+
+  const submissionIds = [...new Set(
+    leaderboard.entries
+      .map((entry) => entry?.submissionId)
+      .filter(Boolean)
+      .map((id) => String(id))
+  )];
+  if (submissionIds.length === 0) return leaderboard;
+
+  const [promotionRecords, submissions] = await Promise.all([
+    PromotionRecord.find({
+      fromRoundId: leaderboard.roundId,
+      submissionId: { $in: submissionIds }
+    }).select('submissionId status'),
+    Submission.find({ _id: { $in: submissionIds } })
+      .select('_id level status promotedFromRoundId')
+  ]);
+
+  const decisionBySubmissionId = new Map(
+    promotionRecords.map((record) => [String(record.submissionId), record.status])
+  );
+  const submissionById = new Map(
+    submissions.map((submission) => [String(submission._id), submission])
+  );
+  const roundId = String(leaderboard.roundId);
+  let changed = false;
+
+  const updatedEntries = leaderboard.entries.map((entry) => {
+    const plainEntry = toPlainObject(entry);
+    const submissionId = String(plainEntry.submissionId || '');
+    let nextStatus = decisionBySubmissionId.get(submissionId) || null;
+
+    if (!nextStatus) {
+      const submission = submissionById.get(submissionId);
+      const promotedFromRoundId = submission?.promotedFromRoundId
+        ? String(submission.promotedFromRoundId)
+        : null;
+      if (promotedFromRoundId === roundId && submission?.level !== leaderboard.level) {
+        nextStatus = 'promoted';
+      } else if (submission?.status === 'eliminated' && submission?.level === leaderboard.level) {
+        nextStatus = 'eliminated';
+      }
+    }
+
+    if (!nextStatus || plainEntry.status === nextStatus) {
+      return plainEntry;
+    }
+
+    changed = true;
+    return {
+      ...plainEntry,
+      status: nextStatus
+    };
+  });
+
+  if (!changed) return leaderboard;
+
+  leaderboard.entries = updatedEntries;
+  leaderboard.lastUpdated = new Date();
+  await leaderboard.save();
+  return leaderboard;
+};
+
 const filterSubmissionsPendingLevelEvaluation = async (round, submissions) => {
   if (!Array.isArray(submissions) || submissions.length === 0) {
     return [];
@@ -2098,7 +2171,8 @@ const listAreaLeaderboards = async ({ filters = {}, user }) => {
         roundIdsCache,
         areaSubmissionsCache
       );
-      refreshedLeaderboards.push(synced || leaderboard);
+      const statusSynced = await syncLeaderboardStatusesFromPromotionDecisions(synced || leaderboard);
+      refreshedLeaderboards.push(statusSynced || synced || leaderboard);
     } catch (error) {
       console.warn(
         `Failed to sync leaderboard "${leaderboard?._id}" (${leaderboard?.year}/${leaderboard?.level}/${leaderboard?.areaId}):`,
@@ -2320,8 +2394,9 @@ const listAvailableLocations = async ({ year, level, areaOfFocus, user }) => {
 };
 
 const findAreaLeaderboardById = async ({ id, user }) => {
-  const leaderboard = await AreaLeaderboard.findById(id);
+  let leaderboard = await AreaLeaderboard.findById(id);
   if (!leaderboard) return null;
+  leaderboard = await syncLeaderboardStatusesFromPromotionDecisions(leaderboard);
 
   if (
     ['judge', 'teacher', 'stakeholder', 'admin'].includes(user.role) &&
