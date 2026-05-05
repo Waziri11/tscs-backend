@@ -1,6 +1,7 @@
 const express = require('express');
 const Competition = require('../models/Competition');
 const { protect, authorize } = require('../middleware/auth');
+const { getCanonicalAreaOfFocusLabel } = require('../utils/areaOfFocus');
 const { logger } = require('../utils/logger');
 
 const router = express.Router();
@@ -303,9 +304,8 @@ router.get('/:year/areas-of-focus', async (req, res) => {
       for (const cls of category.classes) {
         for (const subject of cls.subjects) {
           for (const area of subject.areasOfFocus) {
-            if (area.name) {
-              areasSet.add(area.name);
-            }
+            const areaName = getCanonicalAreaOfFocusLabel(area.name);
+            if (areaName) areasSet.add(areaName);
           }
         }
       }
@@ -327,4 +327,3 @@ router.get('/:year/areas-of-focus', async (req, res) => {
 });
 
 module.exports = router;
-
