@@ -517,40 +517,6 @@ const resolveTeacherId = (submission) => {
   return teacher;
 };
 
-const isZeroScoreEvaluation = (scoreData = {}) => {
-  const totalEvaluations = Math.max(0, Math.floor(normalizeNumeric(scoreData.totalEvaluations)));
-  if (totalEvaluations <= 0) return false;
-
-  return (
-    approximatelyEqual(normalizeNumeric(scoreData.averageScore), 0) &&
-    approximatelyEqual(normalizeNumeric(scoreData.totalScore), 0)
-  );
-};
-
-const deriveLeaderboardEntryStatus = ({ submission = null, scoreData = {}, fallbackStatus = null } = {}) => {
-  const normalizedFallbackStatus = String(fallbackStatus || '').toLowerCase();
-
-  if (submission?.disqualified === true || submission?.status === 'disqualified' || normalizedFallbackStatus === 'disqualified') {
-    return 'disqualified';
-  }
-
-  if (
-    submission?.status === 'eliminated' ||
-    submission?.status === 'promoted' ||
-    normalizedFallbackStatus === 'eliminated' ||
-    normalizedFallbackStatus === 'promoted'
-  ) {
-    return 'eliminated';
-  }
-
-  if (isZeroScoreEvaluation(scoreData)) {
-    return 'eliminated';
-  }
-
-  const totalEvaluations = Math.max(0, Math.floor(normalizeNumeric(scoreData.totalEvaluations)));
-  return totalEvaluations > 0 ? 'evaluated' : 'not_evaluated';
-};
-
 const buildLeaderboardEntryFromSubmission = (submission, scoreData = null) => {
   const resolvedScoreData = scoreData || {};
   const resolvedTeacherId = resolveTeacherId(submission);
@@ -560,10 +526,14 @@ const buildLeaderboardEntryFromSubmission = (submission, scoreData = null) => {
     Math.floor(normalizeNumeric(resolvedScoreData.totalEvaluations))
   );
 
-  const status = deriveLeaderboardEntryStatus({
-    submission,
-    scoreData: resolvedScoreData
-  });
+  let status = totalEvaluations > 0 ? 'evaluated' : 'pending';
+  if (submission?.disqualified === true || submission?.status === 'disqualified') {
+    status = 'disqualified';
+  } else if (submission?.status === 'eliminated') {
+    status = 'eliminated';
+  } else if (submission?.status === 'promoted') {
+    status = 'promoted';
+  }
 
   return {
     submissionId: submission?._id,
@@ -658,15 +628,18 @@ const syncLeaderboardScoresFromEvaluations = async (
     const nextTotal = scoreData ? normalizeNumeric(scoreData.totalScore) : fallbackTotal;
     const nextCount = scoreData ? Math.max(0, Math.floor(normalizeNumeric(scoreData.totalEvaluations))) : fallbackCount;
 
-    const nextStatus = deriveLeaderboardEntryStatus({
-      submission,
-      scoreData: {
-        averageScore: nextAverage,
-        totalScore: nextTotal,
-        totalEvaluations: nextCount
-      },
-      fallbackStatus: entry.status
-    });
+    let nextStatus = entry.status;
+    if (!['promoted', 'eliminated', 'disqualified'].includes(nextStatus)) {
+      nextStatus = nextCount > 0 ? 'evaluated' : 'pending';
+    }
+
+    if (submission?.disqualified === true || submission?.status === 'disqualified') {
+      nextStatus = 'disqualified';
+    } else if (submission?.status === 'eliminated') {
+      nextStatus = 'eliminated';
+    } else if (submission?.status === 'promoted') {
+      nextStatus = 'promoted';
+    }
 
     const nextAreaOfFocus = submission?.areaOfFocus || entry.areaOfFocus || 'Unknown';
 
@@ -1416,9 +1389,17 @@ const rebuildAreaLeaderboard = async (roundId, areaId, options = {}) => {
       averageScore: scoreData.averageScore,
       totalScore: scoreData.totalScore,
       totalEvaluations: scoreData.totalEvaluations,
-      status: deriveLeaderboardEntryStatus({ submission, scoreData }),
+      status: scoreData.totalEvaluations > 0 ? 'evaluated' : 'pending',
       tieBreakCreatedAt: submission.createdAt || null
     };
+
+    if (submission.disqualified === true || submission.status === 'disqualified') {
+      entry.status = 'disqualified';
+    } else if (submission.status === 'eliminated') {
+      entry.status = 'eliminated';
+    } else if (submission.status === 'promoted') {
+      entry.status = 'promoted';
+    }
 
     return entry;
   });
@@ -1672,7 +1653,7 @@ const approveAreaLeaderboardAndPromote = async ({
 
   const eligibleEntries = leaderboard.entries.filter((entry) => {
     if (!matchesAreaOfFocus(entry?.areaOfFocus, scopedAreaOfFocus)) return false;
-    return !['pending', 'not_evaluated', 'eliminated', 'disqualified', 'promoted'].includes(entry.status);
+    return !['eliminated', 'disqualified', 'promoted'].includes(entry.status);
   });
   const normalizedEligibleEntries = eligibleEntries.map((rawEntry) => (
     rawEntry && typeof rawEntry.toObject === 'function'
@@ -1834,7 +1815,7 @@ const approveAreaLeaderboardAndPromote = async ({
         const plainEntry = entry && typeof entry.toObject === 'function'
           ? entry.toObject()
           : { ...entry };
-        if (promoted) return { ...plainEntry, status: 'eliminated' };
+        if (promoted) return { ...plainEntry, status: 'promoted' };
         if (eliminated) return { ...plainEntry, status: 'eliminated' };
         return plainEntry;
       });
