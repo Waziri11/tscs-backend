@@ -3,6 +3,7 @@ const Submission = require('../models/Submission');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
 const CompetitionRound = require('../models/CompetitionRound');
 const RoundChunk = require('../models/RoundChunk');
+const PromotionRecord = require('../models/PromotionRecord');
 const notificationService = require('../services/notificationService');
 const {
   buildCaseInsensitiveExactRegex,
@@ -65,10 +66,59 @@ const buildJudgeAreaQueryByLevel = (level, region, council) => {
   return {};
 };
 
-const isSubmissionActionableForAssignment = (submission) => {
+const isSubmissionStatusActionableForAssignment = (submission) => {
   if (!submission) return false;
   if (submission.disqualified) return false;
   return ACTIONABLE_ASSIGNMENT_STATUSES.has(submission.status);
+};
+
+const ensureSubmissionActionableForAssignment = async (submission, round) => {
+  if (!submission) {
+    return { actionable: false, status: null };
+  }
+
+  if (submission.disqualified) {
+    return { actionable: false, status: submission.status };
+  }
+
+  if (isSubmissionStatusActionableForAssignment(submission)) {
+    return { actionable: true, status: submission.status };
+  }
+
+  if (
+    submission.status !== 'eliminated'
+    || !round
+    || String(submission.level || '') !== String(round.level || '')
+    || !submission.promotedFromRoundId
+  ) {
+    return { actionable: false, status: submission.status };
+  }
+
+  const [promotionIntoCurrentLevel, currentLevelDecision] = await Promise.all([
+    PromotionRecord.findOne({
+      submissionId: submission._id,
+      fromRoundId: submission.promotedFromRoundId,
+      toLevel: submission.level,
+      status: 'promoted'
+    }).select('_id'),
+    PromotionRecord.findOne({
+      submissionId: submission._id,
+      fromLevel: submission.level,
+      status: { $in: ['promoted', 'eliminated'] }
+    }).select('_id')
+  ]);
+
+  if (!promotionIntoCurrentLevel || currentLevelDecision) {
+    return { actionable: false, status: submission.status };
+  }
+
+  await Submission.updateOne(
+    { _id: submission._id, status: 'eliminated' },
+    { $set: { status: 'submitted' } }
+  );
+  submission.status = 'submitted';
+
+  return { actionable: true, status: submission.status, repaired: true };
 };
 
 const resolveActionableRoundForSubmission = async (submission, explicitRoundId = null) => {
@@ -158,14 +208,6 @@ async function assignJudgeToSubmission(submission, options = {}) {
       };
     }
 
-    if (!isSubmissionActionableForAssignment(submission)) {
-      return {
-        success: false,
-        assignment: null,
-        error: `Submission status "${submission.status}" is not eligible for assignment`
-      };
-    }
-
     const roundResolution = await resolveActionableRoundForSubmission(submission, options.roundId || null);
     if (!roundResolution.round) {
       return {
@@ -176,6 +218,15 @@ async function assignJudgeToSubmission(submission, options = {}) {
     }
 
     const round = roundResolution.round;
+    const actionable = await ensureSubmissionActionableForAssignment(submission, round);
+    if (!actionable.actionable) {
+      return {
+        success: false,
+        assignment: null,
+        error: `Submission status "${actionable.status || submission.status}" is not eligible for assignment`
+      };
+    }
+
     const chunkEligible = await isSubmissionEligibleForRoundChunkSchedule(submission, round);
     if (!chunkEligible) {
       return {
@@ -568,20 +619,21 @@ async function manuallyAssignSubmission(submissionId, judgeId, options = {}) {
       return { success: false, assignment: null, error: 'National level does not require assignment' };
     }
 
-    if (!isSubmissionActionableForAssignment(submission)) {
-      return {
-        success: false,
-        assignment: null,
-        error: `Submission status "${submission.status}" is not eligible for assignment`
-      };
-    }
-
     const roundResolution = await resolveActionableRoundForSubmission(submission, options.roundId || null);
     if (!roundResolution.round) {
       return { success: false, assignment: null, error: 'No active or ended round found for this submission level' };
     }
 
     const round = roundResolution.round;
+    const actionable = await ensureSubmissionActionableForAssignment(submission, round);
+    if (!actionable.actionable) {
+      return {
+        success: false,
+        assignment: null,
+        error: `Submission status "${actionable.status || submission.status}" is not eligible for assignment`
+      };
+    }
+
     const assignmentLevel = round.level || submission.level;
     const assignmentCouncil = assignmentLevel === 'Council' ? submission.council : null;
     const chunkEligible = await isSubmissionEligibleForRoundChunkSchedule(submission, round);
@@ -696,7 +748,7 @@ async function manuallyAssignSubmission(submissionId, judgeId, options = {}) {
  */
 async function getEligibleJudges(submissionId, options = {}) {
   try {
-    const submission = await Submission.findById(submissionId).select('_id year level roundId region council status disqualified areaOfFocus');
+    const submission = await Submission.findById(submissionId).select('_id year level roundId promotedFromRoundId region council status disqualified areaOfFocus');
 
     if (!submission) {
       return { success: false, judges: [], error: 'Submission not found' };
@@ -722,11 +774,12 @@ async function getEligibleJudges(submissionId, options = {}) {
       };
     }
 
-    if (!isSubmissionActionableForAssignment(submission)) {
+    const actionable = await ensureSubmissionActionableForAssignment(submission, roundResolution.round);
+    if (!actionable.actionable) {
       return {
         success: true,
         judges: [],
-        message: `Submission status "${submission.status}" is not eligible for assignment`
+        message: `Submission status "${actionable.status || submission.status}" is not eligible for assignment`
       };
     }
 
