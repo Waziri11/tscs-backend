@@ -88,13 +88,23 @@ const isSubmissionStatusActionableForAssignment = (submission) => {
   return ACTIONABLE_ASSIGNMENT_STATUSES.has(submission.status);
 };
 
-const ensureSubmissionActionableForAssignment = async (submission, round) => {
+const ensureSubmissionActionableForAssignment = async (submission, round, options = {}) => {
+  const { allowDisqualified = false } = options;
+
   if (!submission) {
     return { actionable: false, status: null };
   }
 
   if (submission.disqualified) {
-    return { actionable: false, status: submission.status };
+    return allowDisqualified
+      ? { actionable: true, status: submission.status, disqualified: true }
+      : { actionable: false, status: submission.status };
+  }
+
+  if (submission.status === 'disqualified') {
+    return allowDisqualified
+      ? { actionable: true, status: submission.status, disqualified: true }
+      : { actionable: false, status: submission.status };
   }
 
   if (isSubmissionStatusActionableForAssignment(submission)) {
@@ -650,7 +660,9 @@ async function manuallyAssignSubmission(submissionId, judgeId, options = {}) {
     }
 
     const round = roundResolution.round;
-    const actionable = await ensureSubmissionActionableForAssignment(submission, round);
+    const actionable = await ensureSubmissionActionableForAssignment(submission, round, {
+      allowDisqualified: true
+    });
     if (!actionable.actionable) {
       return {
         success: false,
@@ -799,7 +811,9 @@ async function getEligibleJudges(submissionId, options = {}) {
       };
     }
 
-    const actionable = await ensureSubmissionActionableForAssignment(submission, roundResolution.round);
+    const actionable = await ensureSubmissionActionableForAssignment(submission, roundResolution.round, {
+      allowDisqualified: true
+    });
     if (!actionable.actionable) {
       return {
         success: true,
