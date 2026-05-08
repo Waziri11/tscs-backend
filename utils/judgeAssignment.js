@@ -11,6 +11,7 @@ const {
   isRoundActionable,
   isRoundHistorical
 } = require('./roundContext');
+const { getCanonicalAreaOfFocusLabel } = require('./areaOfFocus');
 
 const ACTIONABLE_ASSIGNMENT_STATUSES = new Set(['pending', 'submitted', 'under_review', 'evaluated']);
 
@@ -18,7 +19,7 @@ const isDuplicateKeyError = (error) => {
   return Boolean(error && (error.code === 11000 || error?.cause?.code === 11000));
 };
 
-const normalizeAreaOfFocus = (value) => String(value || '')
+const normalizeAreaOfFocus = (value) => String(getCanonicalAreaOfFocusLabel(value) || '')
   .normalize('NFKD')
   .replace(/[\u0300-\u036f]/g, '')
   .replace(/[^a-zA-Z0-9]+/g, ' ')

@@ -88,20 +88,38 @@ const resolveSubmissionRoundContext = async (submission, options = {}) => {
       };
     }
 
+    if (submission && !roundMatchesSubmission(explicitRound, submission)) {
+      if (allowFallbackByYearLevel) {
+        const fallbackRounds = await findRoundsByLevel({
+          level: submission.level,
+          year: submission.year,
+          includeHistorical
+        });
+        const fallbackRound = fallbackRounds[0] || null;
+        if (fallbackRound) {
+          return {
+            round: fallbackRound,
+            source: 'fallback',
+            reason: null,
+            rejectedRound: explicitRound,
+            rejectedReason: 'explicit_round_submission_mismatch'
+          };
+        }
+      }
+
+      return {
+        round: null,
+        source: 'explicit',
+        reason: 'explicit_round_submission_mismatch',
+        rejectedRound: explicitRound
+      };
+    }
+
     if (!allowedStatuses.includes(explicitRound.status)) {
       return {
         round: null,
         source: 'explicit',
         reason: 'explicit_round_not_allowed',
-        rejectedRound: explicitRound
-      };
-    }
-
-    if (submission && !roundMatchesSubmission(explicitRound, submission)) {
-      return {
-        round: null,
-        source: 'explicit',
-        reason: 'explicit_round_submission_mismatch',
         rejectedRound: explicitRound
       };
     }
