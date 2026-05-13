@@ -24,6 +24,7 @@ const NEXT_LEVEL = {
   Regional: 'National',
   National: null
 };
+const NATIONAL_AREA_PANEL_SIZE = 3;
 
 const hasSubmissionVideo = (submission) => {
   const videoCandidates = [
@@ -879,40 +880,103 @@ const assignRoundSubmissionsToJudges = async (round, submissions) => {
   }
 
   if (round.level === 'National') {
-    const submissionIds = assignableSubmissions.map((submission) => submission._id);
+    const submissionAreaById = new Map(
+      assignableSubmissions.map((submission) => [
+        String(submission._id),
+        normalizeAreaOfFocus(submission.areaOfFocus || '') || 'national'
+      ])
+    );
     const existingAssignments = await SubmissionAssignment.find({
-      roundId: round._id,
-      submissionId: { $in: submissionIds }
+      roundId: round._id
     }).select('submissionId judgeId');
+    const externalSubmissionIds = [
+      ...new Set(
+        existingAssignments
+          .map((assignment) => String(assignment.submissionId))
+          .filter((submissionId) => !submissionAreaById.has(submissionId))
+      )
+    ];
+
+    if (externalSubmissionIds.length > 0) {
+      const externalSubmissions = await Submission.find({
+        _id: { $in: externalSubmissionIds },
+        level: 'National'
+      }).select('_id areaOfFocus');
+
+      for (const submission of externalSubmissions) {
+        submissionAreaById.set(
+          String(submission._id),
+          normalizeAreaOfFocus(submission.areaOfFocus || '') || 'national'
+        );
+      }
+    }
 
     const existingAssignmentSet = new Set(
       existingAssignments.map((assignment) => `${assignment.submissionId}:${assignment.judgeId}`)
     );
+    const assignmentCountMap = new Map();
+    for (const assignment of existingAssignments) {
+      const judgeId = String(assignment.judgeId);
+      assignmentCountMap.set(judgeId, (assignmentCountMap.get(judgeId) || 0) + 1);
+    }
+
+    const submissionsByArea = new Map();
+    for (const submission of assignableSubmissions) {
+      const areaKey = normalizeAreaOfFocus(submission.areaOfFocus || '') || 'national';
+      if (!submissionsByArea.has(areaKey)) submissionsByArea.set(areaKey, []);
+      submissionsByArea.get(areaKey).push(submission);
+    }
+
     const newAssignments = [];
 
-    for (const submission of assignableSubmissions) {
-      const submissionAreaOfFocus = normalizeAreaOfFocus(submission.areaOfFocus || '');
-      for (const judge of judges) {
+    for (const [areaKey, areaSubmissions] of submissionsByArea.entries()) {
+      const existingPanelJudgeIds = [
+        ...new Set(
+          existingAssignments
+            .filter((assignment) => submissionAreaById.get(String(assignment.submissionId)) === areaKey)
+            .map((assignment) => String(assignment.judgeId))
+        )
+      ];
+      const eligibleJudges = judges.filter((judge) => {
         const judgeAreas = Array.isArray(judge.areasOfFocus) ? judge.areasOfFocus : [];
-        if (
-          submissionAreaOfFocus
-          && judgeAreas.length > 0
-          && !judgeAreas.some((focus) => matchesAreaOfFocus(focus, submissionAreaOfFocus))
-        ) {
-          continue;
+        return !areaKey
+          || judgeAreas.length === 0
+          || judgeAreas.some((focus) => matchesAreaOfFocus(focus, areaKey));
+      });
+      const eligibleJudgeIds = new Set(eligibleJudges.map((judge) => String(judge._id)));
+      const panelJudgeIds = existingPanelJudgeIds
+        .filter((judgeId) => eligibleJudgeIds.has(judgeId))
+        .slice(0, NATIONAL_AREA_PANEL_SIZE);
+
+      if (panelJudgeIds.length < NATIONAL_AREA_PANEL_SIZE) {
+        const additionalJudgeIds = eligibleJudges
+          .map((judge) => String(judge._id))
+          .filter((judgeId) => !panelJudgeIds.includes(judgeId))
+          .sort((a, b) => {
+            const countDiff = (assignmentCountMap.get(a) || 0) - (assignmentCountMap.get(b) || 0);
+            if (countDiff !== 0) return countDiff;
+            return a.localeCompare(b);
+          })
+          .slice(0, NATIONAL_AREA_PANEL_SIZE - panelJudgeIds.length);
+        panelJudgeIds.push(...additionalJudgeIds);
+      }
+
+      for (const submission of areaSubmissions) {
+        for (const judgeId of panelJudgeIds) {
+          const key = `${submission._id}:${judgeId}`;
+          if (existingAssignmentSet.has(key)) continue;
+          newAssignments.push({
+            roundId: round._id,
+            submissionId: submission._id,
+            judgeId,
+            level: round.level,
+            region: submission.region || null,
+            council: null,
+            judgeNotified: false
+          });
+          existingAssignmentSet.add(key);
+          assignmentCountMap.set(judgeId, (assignmentCountMap.get(judgeId) || 0) + 1);
         }
-        const key = `${submission._id}:${judge._id}`;
-        if (existingAssignmentSet.has(key)) continue;
-        newAssignments.push({
-          roundId: round._id,
-          submissionId: submission._id,
-          judgeId: judge._id,
-          level: round.level,
-          region: submission.region || null,
-          council: null,
-          judgeNotified: false
-        });
-        existingAssignmentSet.add(key);
       }
     }
 
