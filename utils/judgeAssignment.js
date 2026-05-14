@@ -16,6 +16,7 @@ const {
 const { getCanonicalAreaOfFocusLabel } = require('./areaOfFocus');
 
 const ACTIONABLE_ASSIGNMENT_STATUSES = new Set(['pending', 'submitted', 'under_review', 'evaluated']);
+const LEGACY_GLOBAL_SUBMISSION_INDEX = 'submissionId_1';
 const LEGACY_SINGLE_ASSIGNMENT_INDEX = 'roundId_1_submissionId_1';
 const UNIQUE_JUDGE_ASSIGNMENT_INDEX = 'roundId_1_submissionId_1_judgeId_1';
 const UNIQUE_SCOPED_ASSIGNMENT_INDEX = 'roundId_1_submissionId_1_level_1';
@@ -24,11 +25,17 @@ const isDuplicateKeyError = (error) => {
   return Boolean(error && (error.code === 11000 || error?.cause?.code === 11000));
 };
 
-const isLegacySingleAssignmentIndexError = (error) => {
+const isLegacyAssignmentIndexError = (error) => {
   if (!isDuplicateKeyError(error)) return false;
   const message = String(error.message || '');
   const keyPattern = error.keyPattern || error?.cause?.keyPattern || {};
-  return message.includes(`index: ${LEGACY_SINGLE_ASSIGNMENT_INDEX}`)
+  return message.includes(`index: ${LEGACY_GLOBAL_SUBMISSION_INDEX}`)
+    || message.includes(`index: ${LEGACY_SINGLE_ASSIGNMENT_INDEX}`)
+    || (
+      keyPattern.submissionId === 1
+      && !Object.prototype.hasOwnProperty.call(keyPattern, 'roundId')
+      && !Object.prototype.hasOwnProperty.call(keyPattern, 'judgeId')
+    )
     || (
       keyPattern.roundId === 1
       && keyPattern.submissionId === 1
@@ -90,8 +97,9 @@ const ensureAssignmentIndex = async (key, options) => {
   await SubmissionAssignment.collection.createIndex(key, options);
 };
 
-const dropLegacySingleAssignmentIndex = async () => {
+const repairSubmissionAssignmentIndexes = async () => {
   try {
+    const droppedGlobal = await dropIndexIfPresent(LEGACY_GLOBAL_SUBMISSION_INDEX);
     const droppedLegacy = await dropIndexIfPresent(LEGACY_SINGLE_ASSIGNMENT_INDEX);
     await ensureAssignmentIndex(
       { roundId: 1, submissionId: 1, judgeId: 1 },
@@ -105,10 +113,13 @@ const dropLegacySingleAssignmentIndex = async () => {
         partialFilterExpression: { level: { $in: ['Council', 'Regional'] } }
       }
     );
+    if (droppedGlobal) {
+      console.warn(`Dropped legacy submission assignment index: ${LEGACY_GLOBAL_SUBMISSION_INDEX}`);
+    }
     if (droppedLegacy) {
       console.warn(`Dropped legacy submission assignment index: ${LEGACY_SINGLE_ASSIGNMENT_INDEX}`);
     }
-    return true;
+    return droppedGlobal || droppedLegacy;
   } catch (error) {
     if (
       error.code === 26
@@ -122,19 +133,41 @@ const dropLegacySingleAssignmentIndex = async () => {
   }
 };
 
+let assignmentIndexesEnsured = false;
+let ensureAssignmentIndexesPromise = null;
+const ensureSubmissionAssignmentIndexesReady = async ({ force = false } = {}) => {
+  if (!force && assignmentIndexesEnsured) {
+    return { success: true, changed: false, skipped: true };
+  }
+  if (!force && ensureAssignmentIndexesPromise) {
+    return ensureAssignmentIndexesPromise;
+  }
+
+  const execution = (async () => {
+    const changed = await repairSubmissionAssignmentIndexes();
+    assignmentIndexesEnsured = true;
+    return { success: true, changed, skipped: false };
+  })();
+
+  if (!force) {
+    ensureAssignmentIndexesPromise = execution.finally(() => {
+      ensureAssignmentIndexesPromise = null;
+    });
+    return ensureAssignmentIndexesPromise;
+  }
+
+  return execution;
+};
+
 const createSubmissionAssignment = async (data) => {
   try {
     return await SubmissionAssignment.create(data);
   } catch (error) {
-    if (data.level !== 'National' || !isLegacySingleAssignmentIndexError(error)) {
+    if (!isLegacyAssignmentIndexError(error)) {
       throw error;
     }
 
-    const dropped = await dropLegacySingleAssignmentIndex();
-    if (!dropped) {
-      throw error;
-    }
-
+    await ensureSubmissionAssignmentIndexesReady({ force: true });
     return SubmissionAssignment.create(data);
   }
 };
@@ -1268,5 +1301,6 @@ module.exports = {
   resolveJudgeEvaluationAuthorization,
   assignUnassignedSubmissionsToJudge,
   manuallyAssignSubmission,
-  getEligibleJudges
+  getEligibleJudges,
+  ensureSubmissionAssignmentIndexesReady
 };

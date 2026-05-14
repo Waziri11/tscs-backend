@@ -12,6 +12,7 @@ const AreaLeaderboard = require('../models/AreaLeaderboard');
 const PromotionRecord = require('../models/PromotionRecord');
 const { getAdminScope } = require('./adminScope');
 const { resolveSubmissionRoundContext, isRoundActionable } = require('./roundContext');
+const { ensureSubmissionAssignmentIndexesReady } = require('./judgeAssignment');
 const {
   getCanonicalAreaOfFocusLabel,
   normalizeAreaOfFocus,
@@ -1024,6 +1025,8 @@ const assignRoundSubmissionsToJudges = async (round, submissions) => {
   }
 
   if (round.level === 'National') {
+    await ensureSubmissionAssignmentIndexesReady();
+
     const submissionAreaById = new Map(
       assignableSubmissions.map((submission) => [
         String(submission._id),
