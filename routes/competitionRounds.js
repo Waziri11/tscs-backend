@@ -18,6 +18,7 @@ const {
   rebuildAreaLeaderboard,
   ensureChunkAreasDoNotOverlap,
   addSubmissionToActiveRoundSnapshot,
+  updateRoundSubmissionsFromScope,
   autoReassignUnassignedSubmissionsForRound
 } = require('../utils/roundJudgementService');
 const { manuallyAssignSubmission } = require('../utils/judgeAssignment');
@@ -1575,6 +1576,53 @@ router.post('/:id/submissions', authorize('superadmin'), invalidateCacheOnChange
   } catch (error) {
     console.error('Create round submission error:', error);
     res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+});
+
+// @route   POST /api/competition-rounds/:id/submissions/update
+// @route   POST /api/competition-rounds/:id/update-submissions
+// @desc    Backfill missing in-scope submissions into an active round and auto-assign judges
+// @access  Private (Superadmin)
+router.post(['/:id/submissions/update', '/:id/update-submissions'], authorize('superadmin'), invalidateCacheOnChange(['cache:/api/submissions*', 'cache:/api/competition-rounds*', 'cache:/api/leaderboard*']), async (req, res) => {
+  try {
+    const result = await updateRoundSubmissionsFromScope(req.params.id);
+    if (!result.success) {
+      return res.status(result.status || 400).json({
+        success: false,
+        message: result.message || 'Failed to update round submissions'
+      });
+    }
+
+    if (logger) {
+      logger.logAdminAction(
+        'Superadmin updated active round submissions from scope',
+        req.user._id,
+        req,
+        {
+          roundId: req.params.id,
+          level: result.level,
+          scopeSubmissions: result.scopeSubmissions,
+          existingInRound: result.existingInRound,
+          addedSubmissions: result.addedSubmissions,
+          assignments: result.assignments,
+          chunking: result.chunking
+        },
+        'success',
+        'update'
+      ).catch(() => {});
+    }
+
+    return res.json({
+      success: true,
+      message: `Round submissions updated. Added ${result.addedSubmissions} submission(s) and created ${result.assignments?.assigned || 0} assignment(s).`,
+      ...result
+    });
+  } catch (error) {
+    console.error('Update round submissions from scope error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
   }
 });
 

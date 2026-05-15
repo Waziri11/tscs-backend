@@ -2953,6 +2953,157 @@ const addSubmissionToActiveRoundSnapshot = async (round, submission) => {
   };
 };
 
+const updateRoundSubmissionsFromScope = async (roundId, options = {}) => {
+  const now = options.now ? new Date(options.now) : new Date();
+  const round = await CompetitionRound.findById(roundId);
+  if (!round) {
+    return { success: false, status: 404, message: 'Competition round not found' };
+  }
+
+  if (round.status !== 'active') {
+    return { success: false, status: 400, message: 'Round must be active to update submissions' };
+  }
+
+  let scopedSubmissions = await Submission.find(buildActivationSubmissionQuery(round)).select(
+    '_id region council areaOfFocus status disqualified year level videoFileUrl videoLink preferredLink createdAt'
+  );
+  scopedSubmissions = scopedSubmissions.filter((submission) => hasSubmissionVideo(submission));
+
+  const areaType = round.level === 'Council' ? 'council' : round.level === 'Regional' ? 'region' : null;
+  let hasChunkConfiguration = false;
+  let activeChunkCount = 0;
+  if (areaType) {
+    const configuredChunks = await RoundChunk.find({
+      roundId: round._id,
+      areaType,
+      isActive: true
+    }).select('_id areas scheduledActivationTime scheduledEndTime activatedAt endedAt');
+
+    hasChunkConfiguration = configuredChunks.length > 0;
+    if (hasChunkConfiguration) {
+      const activeChunks = configuredChunks.filter((chunk) => isChunkActiveAtTime(chunk, now));
+      activeChunkCount = activeChunks.length;
+      const activeAreaSet = buildChunkAreaSet(activeChunks);
+      scopedSubmissions = scopedSubmissions.filter((submission) => {
+        const areaId = buildAreaId(round.level, submission.region, submission.council);
+        return activeAreaSet.has(areaId);
+      });
+    }
+  }
+
+  const pendingScopedSubmissions = await filterSubmissionsPendingLevelEvaluation(round, scopedSubmissions);
+
+  const snapshot = await RoundSnapshot.findOne({ roundId: round._id });
+  const existingSubmissionIdSet = new Set([
+    ...((round.pendingSubmissionsSnapshot || []).map((id) => String(id))),
+    ...((snapshot?.submissionIds || []).map((id) => String(id)))
+  ]);
+
+  const missingSubmissions = pendingScopedSubmissions.filter(
+    (submission) => !existingSubmissionIdSet.has(String(submission._id))
+  );
+
+  if (missingSubmissions.length === 0) {
+    return {
+      success: true,
+      roundId: String(round._id),
+      level: round.level,
+      scopeSubmissions: pendingScopedSubmissions.length,
+      existingInRound: pendingScopedSubmissions.length,
+      addedSubmissions: 0,
+      assignments: { assigned: 0, unassigned: 0 },
+      chunking: {
+        configured: hasChunkConfiguration,
+        activeChunks: activeChunkCount
+      }
+    };
+  }
+
+  const areaMap = new Map();
+  const baseAreas = Array.isArray(snapshot?.activeAreas) && snapshot.activeAreas.length > 0
+    ? snapshot.activeAreas
+    : (round.activeAreas || []);
+  for (const area of baseAreas) {
+    if (!area?.areaId) continue;
+    areaMap.set(String(area.areaId), {
+      areaType: area.areaType,
+      areaId: area.areaId,
+      region: area.region || null,
+      council: area.council || null,
+      submissionCount: Number(area.submissionCount) || 0
+    });
+  }
+
+  for (const submission of missingSubmissions) {
+    const descriptor = getSubmissionAreaDescriptor(round.level, submission);
+    const currentArea = areaMap.get(descriptor.areaId) || {
+      areaType: descriptor.areaType,
+      areaId: descriptor.areaId,
+      region: descriptor.region,
+      council: descriptor.council,
+      submissionCount: 0
+    };
+    currentArea.submissionCount += 1;
+    areaMap.set(descriptor.areaId, currentArea);
+  }
+
+  const mergedSubmissionIds = [
+    ...existingSubmissionIdSet,
+    ...missingSubmissions.map((submission) => String(submission._id))
+  ];
+
+  const updatedSnapshot = await RoundSnapshot.findOneAndUpdate(
+    { roundId: round._id },
+    {
+      roundId: round._id,
+      year: round.year,
+      level: round.level,
+      submissionIds: mergedSubmissionIds,
+      activeAreas: [...areaMap.values()],
+      totalSubmissions: mergedSubmissionIds.length,
+      frozenAt: snapshot?.frozenAt || round.snapshotCreatedAt || now,
+      metadata: {
+        ...(snapshot?.metadata || {}),
+        lastScopeSyncAt: now,
+        lastScopeSyncAddedCount: missingSubmissions.length
+      }
+    },
+    { upsert: true, new: true, runValidators: true }
+  );
+
+  const addedSubmissionIds = missingSubmissions.map((submission) => submission._id);
+  await Submission.updateMany(
+    { _id: { $in: addedSubmissionIds } },
+    { $set: { roundId: round._id } }
+  );
+
+  round.pendingSubmissionsSnapshot = updatedSnapshot.submissionIds || [];
+  round.activeAreas = updatedSnapshot.activeAreas || [];
+  if (!round.activationSnapshotId) {
+    round.activationSnapshotId = updatedSnapshot._id;
+  }
+  if (!round.snapshotCreatedAt) {
+    round.snapshotCreatedAt = now;
+  }
+  await round.save();
+
+  const assignments = await assignRoundSubmissionsToJudges(round, missingSubmissions);
+
+  return {
+    success: true,
+    roundId: String(round._id),
+    level: round.level,
+    scopeSubmissions: pendingScopedSubmissions.length,
+    existingInRound: Math.max(pendingScopedSubmissions.length - missingSubmissions.length, 0),
+    addedSubmissions: missingSubmissions.length,
+    assignments,
+    chunking: {
+      configured: hasChunkConfiguration,
+      activeChunks: activeChunkCount
+    }
+  };
+};
+
 const autoReassignUnassignedSubmissionsForRound = async (roundId, options = {}) => {
   const round = await CompetitionRound.findById(roundId);
   if (!round) {
@@ -3232,6 +3383,7 @@ module.exports = {
   updateAreaStateByCompletion,
   checkAreaJudgeCompletion,
   addSubmissionToActiveRoundSnapshot,
+  updateRoundSubmissionsFromScope,
   discoverMissingLeaderboardAreas,
   autoReassignUnassignedSubmissionsForRound
 };
