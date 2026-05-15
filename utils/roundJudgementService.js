@@ -947,10 +947,15 @@ const syncLeaderboardStatusesFromPromotionDecisions = async (leaderboard) => {
   return leaderboard;
 };
 
-const filterSubmissionsPendingLevelEvaluation = async (round, submissions) => {
+const filterSubmissionsPendingLevelEvaluation = async (round, submissions, options = {}) => {
   if (!Array.isArray(submissions) || submissions.length === 0) {
     return [];
   }
+
+  const parsedMaxEvaluations = Number(options.maxEvaluations);
+  const maxEvaluations = Number.isFinite(parsedMaxEvaluations)
+    ? Math.max(0, parsedMaxEvaluations)
+    : 0;
 
   const submissionIds = submissions.map((submission) => submission._id);
   const roundIds = await getRoundIdsForYearLevel(round.year, round.level);
@@ -963,9 +968,8 @@ const filterSubmissionsPendingLevelEvaluation = async (round, submissions) => {
 
   return submissions.filter((submission) => {
     const details = evaluationBySubmission.get(String(submission._id));
-    // Strict pending mode: include only submissions with zero evaluations
-    // for the same year + level across rounds.
-    return !details || Number(details.totalEvaluations || 0) <= 0;
+    // Include submissions whose year+level evaluation count is still below threshold.
+    return !details || Number(details.totalEvaluations || 0) <= maxEvaluations;
   });
 };
 
@@ -2991,7 +2995,14 @@ const updateRoundSubmissionsFromScope = async (roundId, options = {}) => {
     }
   }
 
-  const pendingScopedSubmissions = await filterSubmissionsPendingLevelEvaluation(round, scopedSubmissions);
+  const maxEvaluationsForInclusion = round.level === 'National'
+    ? Math.max(NATIONAL_AREA_PANEL_SIZE - 1, 0)
+    : 0;
+  const pendingScopedSubmissions = await filterSubmissionsPendingLevelEvaluation(
+    round,
+    scopedSubmissions,
+    { maxEvaluations: maxEvaluationsForInclusion }
+  );
 
   const snapshot = await RoundSnapshot.findOne({ roundId: round._id });
   const existingSubmissionIdSet = new Set([
