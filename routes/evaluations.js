@@ -23,6 +23,15 @@ const {
 const router = express.Router();
 
 router.use(protect);
+router.use((req, res, next) => {
+  if (req.user?.role === 'teacher') {
+    return res.status(403).json({
+      success: false,
+      message: 'Teachers are not authorized to access evaluation details'
+    });
+  }
+  return next();
+});
 
 /**
  * Resolve which round an evaluation should be written to.

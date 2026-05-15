@@ -32,6 +32,15 @@ try {
 const router = express.Router();
 
 router.use(protect);
+router.use((req, res, next) => {
+  if (req.user?.role === 'teacher') {
+    return res.status(403).json({
+      success: false,
+      message: 'Teachers are not authorized to access leaderboard data'
+    });
+  }
+  return next();
+});
 
 // @route   GET /api/leaderboard/available-locations
 // @desc    Get available leaderboard area IDs for current filters

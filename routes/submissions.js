@@ -43,6 +43,22 @@ const getMissingSubmissionParts = (submission) => {
   return missingParts;
 };
 
+const sanitizeSubmissionForTeacher = (submission) => {
+  if (!submission) return submission;
+  const plain = (typeof submission.toObject === 'function')
+    ? submission.toObject()
+    : { ...submission };
+  delete plain.score;
+  delete plain.averageScore;
+  delete plain.totalScore;
+  delete plain.totalEvaluations;
+  delete plain.evaluationDetails;
+  delete plain.evaluations;
+  delete plain.judgeCompleted;
+  delete plain.judgeCompletionStatus;
+  return plain;
+};
+
 const buildMissingMediaQuery = () => ({
   $or: [
     { lessonPlanFileUrl: { $exists: false } },
@@ -226,15 +242,19 @@ router.get('/', cacheMiddleware(30), async (req, res) => {
       }
     }
 
+    const visibleSubmissions = req.user.role === 'teacher'
+      ? submissions.map((submission) => sanitizeSubmissionForTeacher(submission))
+      : submissions;
+
     const response = {
       success: true,
-      count: submissions.length,
+      count: visibleSubmissions.length,
       total,
       page: pageNum,
       pages: shouldReturnAllForJudge ? 1 : Math.ceil(total / limitNum),
       limit: limitNum,
       allResults: shouldReturnAllForJudge,
-      submissions
+      submissions: visibleSubmissions
     };
 
     if (responseMessage) {
@@ -981,7 +1001,7 @@ router.patch('/:id/teacher-reupload', authorize('teacher'), invalidateCacheOnCha
     res.json({
       success: true,
       message: `${part === 'lessonPlan' ? 'Lesson plan' : 'Video'} reuploaded successfully`,
-      submission
+      submission: sanitizeSubmissionForTeacher(submission)
     });
   } catch (error) {
     console.error('Teacher reupload error:', error);
@@ -1086,9 +1106,13 @@ router.get('/:id', async (req, res) => {
       'read'
     );
 
+    const visibleSubmission = req.user.role === 'teacher'
+      ? sanitizeSubmissionForTeacher(submission)
+      : submission;
+
     res.json({
       success: true,
-      submission
+      submission: visibleSubmission
     });
   } catch (error) {
     console.error('Get submission error:', error);
