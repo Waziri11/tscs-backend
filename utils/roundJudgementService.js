@@ -2460,7 +2460,9 @@ const listAreaLeaderboards = async ({ filters = {}, user }) => {
     query.chunkIds = new mongoose.Types.ObjectId(filters.chunkId);
   }
 
-  if (user.role === 'admin' || user.role === 'judge' || user.role === 'teacher' || user.role === 'stakeholder') {
+  if (user.role === 'teacher') {
+    query.state = 'published';
+  } else if (user.role === 'admin' || user.role === 'judge' || user.role === 'stakeholder') {
     query.state = { $in: ['finalized', 'published'] };
   }
 
@@ -2796,7 +2798,10 @@ const findAreaLeaderboardById = async ({ id, user }) => {
   if (!leaderboard) return null;
   leaderboard = await syncLeaderboardStatusesFromPromotionDecisions(leaderboard);
 
-  if (['judge', 'teacher', 'admin'].includes(user.role) && !['finalized', 'published'].includes(leaderboard.state)) {
+  if (['judge', 'admin'].includes(user.role) && !['finalized', 'published'].includes(leaderboard.state)) {
+    return null;
+  }
+  if (user.role === 'teacher' && leaderboard.state !== 'published') {
     return null;
   }
   if (user.role === 'stakeholder' && !['finalized', 'published'].includes(leaderboard.state)) {
