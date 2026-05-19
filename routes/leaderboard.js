@@ -438,13 +438,37 @@ router.post('/:id/finalize', invalidateCacheOnChange('cache:/api/leaderboard*'),
       scopedAreaOfFocus = parsedAreaOfFocus;
     }
 
+    let rankedSubmissionIds = null;
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'rankedSubmissionIds')) {
+      if (!Array.isArray(req.body.rankedSubmissionIds)) {
+        return res.status(400).json({
+          success: false,
+          message: 'rankedSubmissionIds must be an array when provided'
+        });
+      }
+
+      const normalizedRankedSubmissionIds = req.body.rankedSubmissionIds
+        .map((id) => String(id || '').trim())
+        .filter(Boolean);
+
+      if (normalizedRankedSubmissionIds.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'rankedSubmissionIds must contain at least one submission id when provided'
+        });
+      }
+
+      rankedSubmissionIds = normalizedRankedSubmissionIds;
+    }
+
     const result = await approveAreaLeaderboardAndPromote({
       roundId: leaderboard.roundId,
       areaId: leaderboard.areaId,
       approvedBy: req.user._id,
       force: req.body.force === true,
       quotaOverride,
-      areaOfFocus: scopedAreaOfFocus
+      areaOfFocus: scopedAreaOfFocus,
+      rankedSubmissionIds
     });
 
     if (!result.success) {

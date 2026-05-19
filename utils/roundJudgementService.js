@@ -2139,7 +2139,8 @@ const approveAreaLeaderboardAndPromote = async ({
   approvedBy,
   force = false,
   quotaOverride = null,
-  areaOfFocus = null
+  areaOfFocus = null,
+  rankedSubmissionIds = null
 }) => {
   const round = await CompetitionRound.findById(roundId);
   if (!round) {
@@ -2209,7 +2210,38 @@ const approveAreaLeaderboardAndPromote = async ({
     ? NATIONAL_FINAL_SELECTION_COUNT
     : (normalizedQuotaOverride ?? defaultQuota);
 
-  const rankedEntries = rankEntriesDeterministically(normalizedEligibleEntries);
+  const rankedEntriesBySystem = rankEntriesDeterministically(normalizedEligibleEntries);
+  let rankedEntries = rankedEntriesBySystem;
+
+  if (Array.isArray(rankedSubmissionIds) && rankedSubmissionIds.length > 0) {
+    const rankedIdList = rankedSubmissionIds.map((id) => String(id || '').trim()).filter(Boolean);
+    const uniqueRankedIdList = [...new Set(rankedIdList)];
+    const eligibleById = new Map(
+      rankedEntriesBySystem.map((entry) => [String(entry.submissionId), entry])
+    );
+
+    if (uniqueRankedIdList.length !== rankedEntriesBySystem.length) {
+      return {
+        success: false,
+        status: 400,
+        message: 'Finalization ranking does not match the current leaderboard entries. Please refresh and try again.'
+      };
+    }
+
+    if (uniqueRankedIdList.some((id) => !eligibleById.has(id))) {
+      return {
+        success: false,
+        status: 400,
+        message: 'Finalization ranking includes unknown or ineligible submissions. Please refresh and try again.'
+      };
+    }
+
+    rankedEntries = uniqueRankedIdList.map((id) => eligibleById.get(id));
+    rankedEntries.forEach((entry, index) => {
+      entry.rank = index + 1;
+    });
+  }
+
   const effectiveQuota = Math.max(0, Math.min(appliedQuota, rankedEntries.length));
 
   const promotedGroup = rankedEntries.slice(0, effectiveQuota);
