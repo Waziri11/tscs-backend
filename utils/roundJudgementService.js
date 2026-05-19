@@ -10,6 +10,7 @@ const User = require('../models/User');
 const SubmissionAssignment = require('../models/SubmissionAssignment');
 const AreaLeaderboard = require('../models/AreaLeaderboard');
 const PromotionRecord = require('../models/PromotionRecord');
+const notificationService = require('../services/notificationService');
 const { getAdminScope } = require('./adminScope');
 const { resolveSubmissionRoundContext, isRoundActionable } = require('./roundContext');
 const { ensureSubmissionAssignmentIndexesReady } = require('./judgeAssignment');
@@ -20,6 +21,7 @@ const {
 } = require('./areaOfFocus');
 
 const ROUND_LEVELS = ['Council', 'Regional', 'National'];
+const NATIONAL_FINAL_SELECTION_COUNT = 5;
 const NEXT_LEVEL = {
   Council: 'Regional',
   Regional: 'National',
@@ -119,6 +121,88 @@ const isTransactionUnsupportedError = (error) => {
 };
 
 const getNextLevel = (level) => NEXT_LEVEL[level] || null;
+
+const stringifyId = (value) => {
+  if (!value) return null;
+  if (typeof value === 'string') return value;
+  if (typeof value === 'object' && typeof value.toString === 'function') {
+    return value.toString();
+  }
+  return String(value);
+};
+
+const notifyNationalFinalizationOutcomes = async ({
+  round,
+  promotedEntries = [],
+  eliminatedEntries = [],
+  selectionLimit = NATIONAL_FINAL_SELECTION_COUNT
+}) => {
+  const totalCandidates = promotedEntries.length + eliminatedEntries.length;
+  const roundName = `${round.level} Level Round`;
+  const events = [];
+
+  for (const entry of promotedEntries) {
+    const teacherId = stringifyId(entry.teacherId);
+    if (!teacherId) continue;
+
+    const parsedRank = Number(entry.rank);
+    const rank = Number.isFinite(parsedRank) ? parsedRank : null;
+    const rankText = rank ? ` (Rank #${rank})` : '';
+    const submissionId = stringifyId(entry.submissionId);
+
+    events.push(
+      notificationService.emit('SYSTEM_NOTIFICATION', {
+        userId: teacherId,
+        title: 'Selected for Face-to-Face Evaluation',
+        message: `Congratulations! Your submission${rankText} has been selected in the top ${selectionLimit} at the National level for face-to-face evaluation.`,
+        metadata: {
+          submissionId,
+          roundId: stringifyId(round._id),
+          roundName,
+          level: round.level,
+          rank,
+          totalCandidates,
+          selectionLimit,
+          status: 'selected_for_face_to_face_evaluation'
+        },
+        sendEmail: true
+      })
+    );
+  }
+
+  for (const entry of eliminatedEntries) {
+    const teacherId = stringifyId(entry.teacherId);
+    if (!teacherId) continue;
+
+    const parsedRank = Number(entry.rank);
+    const rank = Number.isFinite(parsedRank) ? parsedRank : null;
+    const rankText = rank ? ` (Rank #${rank})` : '';
+    const submissionId = stringifyId(entry.submissionId);
+
+    events.push(
+      notificationService.emit('SYSTEM_NOTIFICATION', {
+        userId: teacherId,
+        title: 'National Level Result',
+        message: `Your submission${rankText} was evaluated at the National level and was not selected in the top ${selectionLimit} for face-to-face evaluation. You have been eliminated at the National level.`,
+        metadata: {
+          submissionId,
+          roundId: stringifyId(round._id),
+          roundName,
+          level: round.level,
+          rank,
+          totalCandidates,
+          selectionLimit,
+          status: 'eliminated_at_national_level'
+        },
+        sendEmail: true
+      })
+    );
+  }
+
+  if (events.length > 0) {
+    await Promise.allSettled(events);
+  }
+};
 
 const getRoundSnapshot = async (roundId) => {
   return RoundSnapshot.findOne({ roundId });
@@ -2120,13 +2204,11 @@ const approveAreaLeaderboardAndPromote = async ({
     ? quotaOverride
     : null;
   const appliedQuota = round.level === 'National'
-    ? 1
+    ? NATIONAL_FINAL_SELECTION_COUNT
     : (normalizedQuotaOverride ?? defaultQuota);
 
   const rankedEntries = rankEntriesDeterministically(normalizedEligibleEntries);
-  const effectiveQuota = round.level === 'National'
-    ? (rankedEntries.length > 0 ? 1 : 0)
-    : Math.max(0, Math.min(appliedQuota, rankedEntries.length));
+  const effectiveQuota = Math.max(0, Math.min(appliedQuota, rankedEntries.length));
 
   const promotedGroup = rankedEntries.slice(0, effectiveQuota);
   const eliminatedGroup = rankedEntries.slice(effectiveQuota);
@@ -2272,7 +2354,7 @@ const approveAreaLeaderboardAndPromote = async ({
       });
 
       leaderboard.entries = updatedEntries;
-      leaderboard.quota = round.level === 'National' ? 1 : appliedQuota;
+      leaderboard.quota = appliedQuota;
       leaderboard.state = 'finalized';
       leaderboard.isLocked = true;
       leaderboard.finalizedAt = new Date();
@@ -2290,7 +2372,7 @@ const approveAreaLeaderboardAndPromote = async ({
       result = {
         success: true,
         leaderboard,
-        appliedQuota: round.level === 'National' ? 1 : appliedQuota,
+        appliedQuota,
         promoted: promotedEntries.length,
         eliminated: eliminatedEntries.length,
         promotedIds,
@@ -2325,6 +2407,19 @@ const approveAreaLeaderboardAndPromote = async ({
     };
   } finally {
     await session.endSession();
+  }
+
+  if (result?.success && round.level === 'National') {
+    try {
+      await notifyNationalFinalizationOutcomes({
+        round,
+        promotedEntries,
+        eliminatedEntries,
+        selectionLimit: NATIONAL_FINAL_SELECTION_COUNT
+      });
+    } catch (error) {
+      console.error('Failed to send national finalization notifications:', error);
+    }
   }
 
   return result;
