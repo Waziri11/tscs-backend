@@ -165,7 +165,8 @@ const notifyNationalFinalizationOutcomes = async ({
           selectionLimit,
           status: 'selected_for_face_to_face_evaluation'
         },
-        sendEmail: true
+        sendEmail: true,
+        sendSMS: true
       })
     );
   }
@@ -194,7 +195,8 @@ const notifyNationalFinalizationOutcomes = async ({
           selectionLimit,
           status: 'eliminated_at_national_level'
         },
-        sendEmail: true
+        sendEmail: true,
+        sendSMS: true
       })
     );
   }
